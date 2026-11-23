@@ -1,0 +1,140 @@
+name: CI & Windows Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-and-build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Read Version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Get-Content -Raw VERSION).Trim()
+          echo "version=$v" >> $env:GITHUB_OUTPUT
+          echo "tag=v$v" >> $env:GITHUB_OUTPUT
+
+      - name: Install Frontend Dependencies
+        working-directory: frontend
+        run: npm install --no-audit --no-fund
+
+      - name: Run Frontend Unit Tests
+        working-directory: frontend
+        run: npm test
+
+      - name: Build Frontend (TypeScript + Vite)
+        working-directory: frontend
+        run: npm run build
+
+      - name: Go Vet & Unit Tests (Windows DPAPI, Vault, SSH Proxy/Jump, Autocomplete)
+        shell: pwsh
+        run: |
+          go mod tidy
+          go vet ./...
+          go test -v ./...
+
+      - name: Install Wails v2 CLI
+        shell: pwsh
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.1
+          $goBin = (go env GOPATH) + "\bin"
+          echo "$goBin" >> $env:GITHUB_PATH
+
+      - name: Generate Windows Application Icons
+        shell: pwsh
+        run: python scripts/gen_icons.py
+
+      - name: Build Windows Executable (GravitySSH.exe)
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          wails build -clean -s -skipbindings -ldflags "-X main.AppVersion=$v"
+
+      - name: Package Portable Artifacts & SHA256 Checksums
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path dist-release | Out-Null
+          $exeName = "GravitySSH-v$v-windows-amd64.exe"
+          $zipName = "GravitySSH-v$v-windows-amd64-portable.zip"
+          Copy-Item "build\bin\GravitySSH.exe" "dist-release\$exeName"
+          Compress-Archive -Path "dist-release\$exeName", "README.md" -DestinationPath "dist-release\$zipName" -Force
+
+          $hashes = @()
+          foreach ($f in @($exeName, $zipName)) {
+            $h = (Get-FileHash "dist-release\$f" -Algorithm SHA256).Hash.ToLower()
+            $hashes += "$h  $f"
+          }
+          $hashes -join "`n" | Set-Content -Encoding utf8 "dist-release\SHA256SUMS.txt"
+          Get-ChildItem dist-release
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GravitySSH-windows-amd64-v${{ steps.ver.outputs.version }}
+          path: dist-release/*
+
+      - name: Ensure Release Tag
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.ver.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          $existing = git tag -l $tag
+          if (-not $existing) {
+            git tag -a $tag -m "Release $tag"
+            git push origin $tag
+          }
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: GravitySSH ${{ steps.ver.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## GravitySSH ${{ steps.ver.outputs.tag }} (Windows x64)
+
+            Antigravity 风格的 Windows 现代化 SSH 客户端：
+            - **左侧服务器管理 + 独立 SSH 密钥库**（支持文件加载、粘贴导入、生成 Ed25519/RSA-4096）
+            - **SOCKS5 / HTTP 代理 + 多级跳板机（Bastion）** 支持弱网与内网机器连接
+            - **连接自动就绪 SFTP 文件管理**（支持文件浏览、上传、拖入上传、下载与进度显示）
+            - **每条操作命令自动记录 + 勾选保存为加密快捷方式**
+            - **智能命令补齐**（内置 `apt`、`apk`、`docker`、`systemctl`、`git` 等推荐，点击自动补齐，设置中可自主开关）
+            - **Windows DPAPI (MachineGuid + User + App Entropy) + AES-256-GCM** 防拷贝本地加密保险库
+
+            ### 下载说明
+            - 直接下载 **`GravitySSH-${{ steps.ver.outputs.tag }}-windows-amd64.exe`** 双击即可运行（单文件绿色版，无需安装）。
+          files: |
+            dist-release/GravitySSH-v${{ steps.ver.outputs.version }}-windows-amd64.exe
+            dist-release/GravitySSH-v${{ steps.ver.outputs.version }}-windows-amd64-portable.zip
+            dist-release/SHA256SUMS.txt
