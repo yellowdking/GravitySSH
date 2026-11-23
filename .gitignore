@@ -1,0 +1,15 @@
+# Build artifacts
+build/bin/
+frontend/dist/
+frontend/node_modules/
+*.exe
+*.zip
+*.gsv
+*.tmp
+*.syso
+
+# IDE & OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
