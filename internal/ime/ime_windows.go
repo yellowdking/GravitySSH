@@ -8,164 +8,243 @@ import (
 	"unsafe"
 )
 
-const (
-	wmImeControl        = 0x0283
-	imcGetConversion    = 0x0001
-	imcSetConversion    = 0x0002
-	imcGetOpenStatus    = 0x0005
-	imcSetOpenStatus    = 0x0006
-	imeCmodeNative      = 0x0001
-	imeCmodeKatakana    = 0x0002
-	imeCmodeFullShape   = 0x0008
-	smtoAbortIfHung     = 0x0002
-	imeSendTimeoutMs    = 80
-)
-
-type rect struct {
-	Left, Top, Right, Bottom int32
-}
+const imeCmodeFullShape = 0x0008
 
 type guiThreadInfo struct {
-	CbSize        uint32
-	Flags         uint32
-	HwndActive    uintptr
-	HwndFocus     uintptr
-	HwndCapture   uintptr
-	HwndMenuOwner uintptr
-	HwndMoveSize  uintptr
-	HwndCaret     uintptr
-	RcCaret       rect
+	CbSize, Flags                                      uint32
+	Active, Focus, Capture, MenuOwner, MoveSize, Caret uintptr
+	RcCaret                                            [4]int32
+}
+
+type keybdInput struct {
+	wVk, wScan    uint16
+	dwFlags, time uint32
+	extraInfo     uintptr
+	pad           [2]uint32
+}
+
+type winInput struct {
+	typ uint32
+	ki  keybdInput
 }
 
 var (
-	user32                  = syscall.NewLazyDLL("user32.dll")
-	imm32                   = syscall.NewLazyDLL("imm32.dll")
-	kernel32                = syscall.NewLazyDLL("kernel32.dll")
-	procGetForegroundWindow = user32.NewProc("GetForegroundWindow")
-	procGetWindowThreadPID  = user32.NewProc("GetWindowThreadProcessId")
-	procGetGUIThreadInfo    = user32.NewProc("GetGUIThreadInfo")
-	procEnumChildWindows    = user32.NewProc("EnumChildWindows")
-	procSendMessageTimeoutW = user32.NewProc("SendMessageTimeoutW")
-	procImmGetDefaultIMEWnd = imm32.NewProc("ImmGetDefaultIMEWnd")
-	procImmGetContext       = imm32.NewProc("ImmGetContext")
-	procImmSetConvStatus    = imm32.NewProc("ImmSetConversionStatus")
-	procImmSetOpenStatus    = imm32.NewProc("ImmSetOpenStatus")
-	procImmReleaseContext   = imm32.NewProc("ImmReleaseContext")
-	procGetCurrentProcessId = kernel32.NewProc("GetCurrentProcessId")
+	u32          = syscall.NewLazyDLL("user32.dll")
+	i32          = syscall.NewLazyDLL("imm32.dll")
+	pFgWnd       = u32.NewProc("GetForegroundWindow")
+	pAncestor    = u32.NewProc("GetAncestor")
+	pWndTPID     = u32.NewProc("GetWindowThreadProcessId")
+	pGuiInfo     = u32.NewProc("GetGUIThreadInfo")
+	pEnumChild   = u32.NewProc("EnumChildWindows")
+	pSendMsgTO   = u32.NewProc("SendMessageTimeoutW")
+	pPostMsg     = u32.NewProc("PostMessageW")
+	pGetKL       = u32.NewProc("GetKeyboardLayout")
+	pGetKLList   = u32.NewProc("GetKeyboardLayoutList")
+	pKeyState    = u32.NewProc("GetAsyncKeyState")
+	pSendInput   = u32.NewProc("SendInput")
+	pDefIMEWnd   = i32.NewProc("ImmGetDefaultIMEWnd")
+	pImmCtx      = i32.NewProc("ImmGetContext")
+	pImmSetConv  = i32.NewProc("ImmSetConversionStatus")
+	pImmSetOpen  = i32.NewProc("ImmSetOpenStatus")
+	pImmRelCtx   = i32.NewProc("ImmReleaseContext")
+	pCurPID      = syscall.NewLazyDLL("kernel32.dll").NewProc("GetCurrentProcessId")
+	swMu, enumMu sync.Mutex
+	enumKids     []uintptr
+	enumCB       = syscall.NewCallback(func(h, _ uintptr) uintptr { enumKids = append(enumKids, h); return 1 })
 )
 
-var (
-	enumMu       sync.Mutex
-	enumChildren []uintptr
-	enumCB       = syscall.NewCallback(func(hwnd uintptr, _ uintptr) uintptr {
-		enumChildren = append(enumChildren, hwnd)
-		return 1
-	})
-)
-
-// SwitchToEnglish switches the active Windows IME to half-width English mode
-// when GravitySSH is the foreground window (including embedded WebView2 child HWNDs).
+// SwitchToEnglish switches Windows IME to half-width English when GravitySSH owns the foreground window.
 func SwitchToEnglish() {
-	fg, _, _ := procGetForegroundWindow.Call()
-	if fg == 0 {
+	swMu.Lock()
+	defer swMu.Unlock()
+
+	fg, _, _ := pFgWnd.Call()
+	cur, _, _ := pCurPID.Call()
+	if fg == 0 || cur == 0 || !ownedBy(fg, cur) {
 		return
 	}
+	fgTID, _ := threadPID(fg)
+	enumMu.Lock()
+	enumKids = enumKids[:0]
+	pEnumChild.Call(fg, enumCB, 0)
+	kids := append([]uintptr(nil), enumKids...)
+	enumMu.Unlock()
 
-	var fgPID uint32
-	fgTID, _, _ := procGetWindowThreadPID.Call(fg, uintptr(unsafe.Pointer(&fgPID)))
-	curPID, _, _ := procGetCurrentProcessId.Call()
-	if fgPID == 0 || uintptr(fgPID) != curPID {
-		return
-	}
-
-	seen := make(map[uintptr]struct{}, 16)
-	targets := make([]uintptr, 0, 16)
-	addTarget := func(h uintptr) {
-		if h == 0 {
-			return
+	seen := map[uintptr]bool{}
+	targets := make([]uintptr, 0, len(kids)+4)
+	add := func(h uintptr) {
+		if h != 0 && !seen[h] {
+			seen[h] = true
+			targets = append(targets, h)
 		}
-		if _, ok := seen[h]; ok {
-			return
-		}
-		seen[h] = struct{}{}
-		targets = append(targets, h)
 	}
 
-	if focus := focusedWindowOfThread(fgTID); focus != 0 {
-		addTarget(focus)
-	}
-
-	children := collectChildWindows(fg)
-	seenThreads := map[uintptr]bool{fgTID: true}
-	for _, ch := range children {
-		var chPID uint32
-		chTID, _, _ := procGetWindowThreadPID.Call(ch, uintptr(unsafe.Pointer(&chPID)))
-		if chTID != 0 && !seenThreads[chTID] {
-			seenThreads[chTID] = true
-			if focus := focusedWindowOfThread(chTID); focus != 0 {
-				addTarget(focus)
+	focus := focusOf(0)
+	add(focus)
+	seenT := map[uintptr]bool{}
+	for _, ch := range append(kids, fg) {
+		if tid, _ := threadPID(ch); tid != 0 && !seenT[tid] {
+			seenT[tid] = true
+			if f := focusOf(tid); f != 0 {
+				if focus == 0 {
+					focus = f
+				}
+				add(f)
 			}
 		}
-		addTarget(ch)
 	}
-	addTarget(fg)
-
-	for _, hwnd := range targets {
-		switchWindowIMEToEnglish(hwnd)
+	for _, ch := range kids {
+		add(ch)
 	}
-}
-
-func focusedWindowOfThread(tid uintptr) uintptr {
-	if tid == 0 {
-		return 0
+	add(fg)
+	if focus == 0 {
+		focus = fg
 	}
-	var info guiThreadInfo
-	info.CbSize = uint32(unsafe.Sizeof(info))
-	r, _, _ := procGetGUIThreadInfo.Call(tid, uintptr(unsafe.Pointer(&info)))
-	if r == 0 {
-		return 0
+
+	tid, _ := threadPID(focus)
+	hkl, _, _ := pGetKL.Call(tid)
+	if hkl == 0 && fgTID != 0 {
+		hkl, _, _ = pGetKL.Call(fgTID)
 	}
-	return info.HwndFocus
-}
+	if isEnglishHKL(hkl) {
+		return
+	}
 
-func collectChildWindows(parent uintptr) []uintptr {
-	enumMu.Lock()
-	defer enumMu.Unlock()
-	enumChildren = enumChildren[:0]
-	_, _, _ = procEnumChildWindows.Call(parent, enumCB, 0)
-	out := make([]uintptr, len(enumChildren))
-	copy(out, enumChildren)
-	return out
-}
+	// 1. Switch via WM_INPUTLANGCHANGEREQUEST when an English layout is already installed.
+	if en := findInstalledEnglishHKL(); en != 0 {
+		pPostMsg.Call(focus, 0x0050, 0, en)
+		if fg != focus {
+			pPostMsg.Call(fg, 0x0050, 0, en)
+		}
+		return
+	}
 
-func switchWindowIMEToEnglish(hwnd uintptr) {
-	if imeWnd, _, _ := procImmGetDefaultIMEWnd.Call(hwnd); imeWnd != 0 {
-		openStatus, okOpen := sendIMEControl(imeWnd, imcGetOpenStatus, 0)
-		convMode, okConv := sendIMEControl(imeWnd, imcGetConversion, 0)
-		needsSwitch := !okOpen || openStatus != 0 || !okConv || (convMode&(imeCmodeNative|imeCmodeKatakana|imeCmodeFullShape)) != 0
-		if needsSwitch {
-			_, _ = sendIMEControl(imeWnd, imcSetConversion, 0)
-			_, _ = sendIMEControl(imeWnd, imcSetOpenStatus, 0)
+	// 2. Clear native/full-shape conversion mode without closing Microsoft Pinyin openStatus.
+	zh, cleared := isChineseHKL(hkl), false
+	seenIME := map[uintptr]bool{}
+	for _, h := range targets {
+		if ime, _, _ := pDefIMEWnd.Call(h); ime != 0 && !seenIME[ime] {
+			seenIME[ime] = true
+			if toEnglish(ime, zh) {
+				cleared = true
+			}
+		}
+		if himc, _, _ := pImmCtx.Call(h); himc != 0 {
+			pImmSetConv.Call(himc, 0, 0)
+			if !zh {
+				pImmSetOpen.Call(himc, 0)
+			}
+			pImmRelCtx.Call(h, himc)
 		}
 	}
 
-	if himc, _, _ := procImmGetContext.Call(hwnd); himc != 0 {
-		_, _, _ = procImmSetConvStatus.Call(himc, 0, 0)
-		_, _, _ = procImmSetOpenStatus.Call(himc, 0)
-		_, _, _ = procImmReleaseContext.Call(hwnd, himc)
+	// 3. Idempotent VK_IME_OFF fallback for TSF-only WebView2 windows that ignore IMM32.
+	if !cleared && !modifierDown() {
+		if f, _, _ := pFgWnd.Call(); f != 0 && ownedBy(f, cur) {
+			in := [2]winInput{
+				{typ: 1, ki: keybdInput{wVk: 0x1A}},
+				{typ: 1, ki: keybdInput{wVk: 0x1A, dwFlags: 0x0002}},
+			}
+			pSendInput.Call(2, uintptr(unsafe.Pointer(&in[0])), unsafe.Sizeof(in[0]))
+		}
 	}
 }
 
-func sendIMEControl(imeWnd, wParam, lParam uintptr) (uintptr, bool) {
-	var result uintptr
-	r, _, _ := procSendMessageTimeoutW.Call(
-		imeWnd,
-		wmImeControl,
-		wParam,
-		lParam,
-		smtoAbortIfHung,
-		imeSendTimeoutMs,
-		uintptr(unsafe.Pointer(&result)),
-	)
-	return result, r != 0
+func toEnglish(ime uintptr, zh bool) bool {
+	open, okOpen := imeCtl(ime, 5, 0) // IMC_GETOPENSTATUS
+	before, okB := imeCtl(ime, 1, 0)  // IMC_GETCONVERSIONMODE
+	hadNative := okB && needsEnglishConversion(before)
+	if zh {
+		imeCtl(ime, 2, 0) // IMC_SETCONVERSIONMODE = 0 (half-width English)
+		after, okA := imeCtl(ime, 1, 0)
+		if okA && !needsEnglishConversion(after) {
+			return hadNative
+		}
+		if okA && needsEnglishConversion(after) {
+			imeCtl(ime, 6, 0) // IMC_SETOPENSTATUS = 0 fallback for legacy IMEs
+			imeCtl(ime, 2, 0)
+		}
+		return false
+	}
+	if !okOpen || open != 0 || !okB || hadNative {
+		imeCtl(ime, 2, 0)
+		imeCtl(ime, 6, 0)
+		return hadNative || (okOpen && open != 0)
+	}
+	return false
+}
+
+func isEnglishHKL(h uintptr) bool           { return h != 0 && uint16(h&0xFFFF)&0x03FF == 0x09 }
+func isChineseHKL(h uintptr) bool           { return h != 0 && uint16(h&0xFFFF)&0x03FF == 0x04 }
+func needsEnglishConversion(m uintptr) bool { return m&(0x0001|0x0002|imeCmodeFullShape) != 0 }
+
+func selectEnglishHKL(hkls []uintptr) uintptr {
+	var fb uintptr
+	for _, h := range hkls {
+		if !isEnglishHKL(h) {
+			continue
+		}
+		if uint16(h&0xFFFF) == 0x0409 {
+			return h
+		}
+		if fb == 0 {
+			fb = h
+		}
+	}
+	return fb
+}
+
+func findInstalledEnglishHKL() uintptr {
+	n, _, _ := pGetKLList.Call(0, 0)
+	if n == 0 || n > 64 {
+		return 0
+	}
+	list := make([]uintptr, n)
+	got, _, _ := pGetKLList.Call(n, uintptr(unsafe.Pointer(&list[0])))
+	if got == 0 {
+		return 0
+	}
+	if got > n {
+		got = n
+	}
+	return selectEnglishHKL(list[:got])
+}
+
+func threadPID(h uintptr) (uintptr, uintptr) {
+	var pid uint32
+	tid, _, _ := pWndTPID.Call(h, uintptr(unsafe.Pointer(&pid)))
+	return tid, uintptr(pid)
+}
+
+func ownedBy(h, cur uintptr) bool {
+	if _, pid := threadPID(h); pid != 0 && pid == cur {
+		return true
+	}
+	root, _, _ := pAncestor.Call(h, 3)
+	_, pid := threadPID(root)
+	return root != 0 && pid == cur
+}
+
+func focusOf(tid uintptr) uintptr {
+	var gi guiThreadInfo
+	gi.CbSize = uint32(unsafe.Sizeof(gi))
+	if r, _, _ := pGuiInfo.Call(tid, uintptr(unsafe.Pointer(&gi))); r == 0 {
+		return 0
+	}
+	return gi.Focus
+}
+
+func imeCtl(ime, w, l uintptr) (uintptr, bool) {
+	var res uintptr
+	r, _, _ := pSendMsgTO.Call(ime, 0x0283, w, l, 0x0002, 80, uintptr(unsafe.Pointer(&res)))
+	return res, r != 0
+}
+
+func modifierDown() bool {
+	for _, vk := range [...]uintptr{0x10, 0x11, 0x12, 0x5B, 0x5C} {
+		if s, _, _ := pKeyState.Call(vk); s&0x8000 != 0 {
+			return true
+		}
+	}
+	return false
 }
