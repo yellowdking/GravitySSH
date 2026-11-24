@@ -8,7 +8,7 @@ import { applyTerminalInputToLine, sanitizePasteText } from '../utils/autocomple
 import { inspectPasteSafety, type PasteInspection } from '../utils/pasteGuard'
 import { highlightLogText } from '../utils/keywordHighlight'
 import { base64ToUint8Array, DEFAULT_TERMINAL_FONT } from '../components/terminalTheme'
-import { attachTerminalInputHandlers, createConfiguredTerminal } from './terminalHandlers'
+import { attachTerminalImeGuard, attachTerminalInputHandlers, createConfiguredTerminal } from './terminalHandlers'
 
 interface UseTerminalOptions {
   sessionId: string
@@ -103,6 +103,12 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
       onClearSuggestions: () => cbRef.current.onClearSuggestions(),
     })
 
+    const detachImeGuard = attachTerminalImeGuard(
+      term,
+      () => cbRef.current.active,
+      () => settingsRef.current.autoSwitchEnglishIme
+    )
+
     const onData = term.onData((data) => {
       enqueueWrite(data)
       if (term.buffer.active.type === 'alternate') { cbRef.current.inputLineRef.current = ''; cbRef.current.onClearSuggestions(); return }
@@ -132,6 +138,7 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
     return () => {
       if (roTimer) clearTimeout(roTimer)
       el.removeEventListener('paste', onNativePaste, true)
+      detachImeGuard()
       ro.disconnect(); unsubData(); onData.dispose(); onResize.dispose(); term.dispose()
       termRef.current = null; fitRef.current = null
     }
@@ -146,7 +153,11 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
 
   useEffect(() => {
     if (!opts.active) return
-    const id = setTimeout(() => { syncSize(); termRef.current?.focus() }, 40)
+    const id = setTimeout(() => {
+      syncSize()
+      termRef.current?.focus()
+      if (settingsRef.current.autoSwitchEnglishIme) void api.switchTerminalIme().catch(() => {})
+    }, 40)
     return () => clearTimeout(id)
   }, [opts.active, opts.showSftp, opts.rightDrawer, opts.settings.monitorBarEnabled, syncSize])
 
