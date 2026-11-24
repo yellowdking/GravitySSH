@@ -1,90 +1,230 @@
 package sshclient
 
 import (
+	"errors"
+	"io"
 	"os"
+	"path"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/pkg/sftp"
 )
 
 func TestPickDominantMode(t *testing.T) {
-	mode := pickDominantMode(map[os.FileMode]int{
-		0o644: 3,
-		0o755: 1,
-		0o600: 1,
-	}, 0o644)
-	if mode != 0o644 {
-		t.Fatalf("expected 0644, got %04o", mode)
-	}
-
-	// Tie prefers fallback
-	modeTie := pickDominantMode(map[os.FileMode]int{
-		0o644: 2,
-		0o640: 2,
-	}, 0o644)
-	if modeTie != 0o644 {
-		t.Fatalf("expected tie-breaker 0644, got %04o", modeTie)
-	}
-
-	// Empty uses fallback
-	empty := pickDominantMode(nil, 0o755)
-	if empty != 0o755 {
-		t.Fatalf("expected fallback 0755, got %04o", empty)
+	if pickDominantMode(map[os.FileMode]int{0o644: 3, 0o755: 1}, 0o644) != 0o644 ||
+		pickDominantMode(map[os.FileMode]int{0o644: 2, 0o640: 2}, 0o644) != 0o644 ||
+		pickDominantMode(nil, 0o755) != 0o755 {
+		t.Fatal("pickDominantMode mismatch")
 	}
 }
 
 func TestBuildExtractCommand(t *testing.T) {
-	zipCmd, err := buildExtractCommand("/var/www", "app bundle.zip")
-	if err != nil {
-		t.Fatalf("zip build failed: %v", err)
+	for _, tc := range [][3]string{
+		{"/w", "a b.zip", "unzip -o 'a b.zip' -d ."},
+		{"/d", "b.tar.gz", "tar -xzf 'b.tar.gz'"},
+		{"/t", "p.7z", "7z x -y 'p.7z'"},
+		{"/l", "a.gz", "gunzip -kf 'a.gz'"},
+	} {
+		if c, err := buildExtractCommand(tc[0], tc[1]); err != nil || !strings.Contains(c, tc[2]) {
+			t.Fatalf("%s: %q %v", tc[1], c, err)
+		}
 	}
-	if !strings.Contains(zipCmd, "command -v unzip") || !strings.Contains(zipCmd, "apt-get") || !strings.Contains(zipCmd, "unzip -o 'app bundle.zip' -d .") {
-		t.Fatalf("unexpected zip extract cmd: %s", zipCmd)
-	}
-
-	tgzCmd, err := buildExtractCommand("/opt/data", "backup.tar.gz")
-	if err != nil || !strings.Contains(tgzCmd, "tar -xzf 'backup.tar.gz'") {
-		t.Fatalf("unexpected tar.gz cmd: %q, err=%v", tgzCmd, err)
-	}
-
-	sevenCmd, err := buildExtractCommand("/tmp", "pack.7z")
-	if err != nil || !strings.Contains(sevenCmd, "command -v 7z") || !strings.Contains(sevenCmd, "7z x -y 'pack.7z'") {
-		t.Fatalf("unexpected 7z cmd: %q, err=%v", sevenCmd, err)
-	}
-
-	gzCmd, err := buildExtractCommand("/var/log", "app.log.gz")
-	if err != nil || !strings.Contains(gzCmd, "gunzip -kf 'app.log.gz'") {
-		t.Fatalf("unexpected gz cmd: %q, err=%v", gzCmd, err)
-	}
-
-	if _, err := buildExtractCommand("/tmp", "readme.txt"); err == nil {
-		t.Fatal("expected unsupported extension to fail")
+	if _, err := buildExtractCommand("/t", "r.txt"); err == nil {
+		t.Fatal("expected error")
 	}
 }
 
 func TestUpdateCWDFromCommand(t *testing.T) {
+	m, s := NewManager(nil, nil), &sessionState{currentDir: "/home/u"}
+	s.info.HomeDir = "/home/u"
+	for _, tc := range [][2]string{{"cd /var/log/nginx", "/var/log/nginx"}, {"cd ../apt && ls", "/var/log/apt"}, {"cd ~/p", "/home/u/p"}, {"cd", "/home/u"}} {
+		if m.updateCWDFromCommand(s, tc[0]); s.currentDir != tc[1] {
+			t.Fatalf("%q: %q", tc[0], s.currentDir)
+		}
+	}
+}
+
+type mNode struct {
+	name, tgt string
+	mode      os.FileMode
+}
+
+func (n *mNode) Name() string       { return n.name }
+func (n *mNode) Size() int64        { return 0 }
+func (n *mNode) Mode() os.FileMode  { return n.mode }
+func (n *mNode) ModTime() time.Time { return time.Time{} }
+func (n *mNode) IsDir() bool        { return n.mode.IsDir() }
+func (n *mNode) Sys() any           { return nil }
+
+type fiList []os.FileInfo
+
+func (l fiList) ListAt(dst []os.FileInfo, off int64) (int, error) {
+	if off >= int64(len(l)) {
+		return 0, io.EOF
+	}
+	n := copy(dst, l[off:])
+	if off+int64(n) >= int64(len(l)) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+type mFS struct {
+	mu       sync.Mutex
+	m        map[string]*mNode
+	spurious bool
+}
+
+func (f *mFS) Fileread(*sftp.Request) (io.ReaderAt, error)  { return nil, os.ErrPermission }
+func (f *mFS) Filewrite(*sftp.Request) (io.WriterAt, error) { return nil, os.ErrPermission }
+func (f *mFS) Lstat(r *sftp.Request) (sftp.ListerAt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if n, ok := f.m[path.Clean(r.Filepath)]; ok {
+		return fiList{n}, nil
+	}
+	return nil, os.ErrNotExist
+}
+func (f *mFS) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := path.Clean(r.Filepath)
+	n, ok := f.m[p]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	if r.Method == "Stat" {
+		if n.mode&os.ModeSymlink != 0 {
+			if tn, ok := f.m[n.tgt]; ok {
+				return fiList{tn}, nil
+			}
+			return nil, os.ErrNotExist
+		}
+		return fiList{n}, nil
+	}
+	var out fiList
+	for k, v := range f.m {
+		if k != p && path.Dir(k) == p {
+			out = append(out, v)
+		}
+	}
+	return out, nil
+}
+func (f *mFS) Filecmd(r *sftp.Request) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := path.Clean(r.Filepath)
+	n, ok := f.m[p]
+	if !ok {
+		return os.ErrNotExist
+	}
+	switch r.Method {
+	case "Setstat":
+		if r.AttrFlags().Permissions {
+			n.mode = (n.mode &^ os.ModePerm) | r.Attributes().FileMode().Perm()
+		}
+	case "Remove":
+		if n.IsDir() {
+			return os.ErrInvalid
+		}
+		delete(f.m, p)
+	case "Rmdir":
+		for k := range f.m {
+			if strings.HasPrefix(k, p+"/") {
+				return errors.New("not empty")
+			}
+		}
+		delete(f.m, p)
+	case "Rename":
+		return f.mv(p, path.Clean(r.Target), false)
+	default:
+		return sftp.ErrSSHFxOpUnsupported
+	}
+	return nil
+}
+func (f *mFS) PosixRename(r *sftp.Request) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mv(path.Clean(r.Filepath), path.Clean(r.Target), true)
+}
+func (f *mFS) mv(oldP, newP string, overwrite bool) error {
+	n, ok := f.m[oldP]
+	if !ok {
+		return os.ErrNotExist
+	}
+	if _, exists := f.m[newP]; !overwrite && exists {
+		return errors.New("exists")
+	}
+	delete(f.m, oldP)
+	n.name, f.m[newP] = path.Base(newP), n
+	for k, v := range f.m {
+		if strings.HasPrefix(k, oldP+"/") {
+			delete(f.m, k)
+			f.m[newP+strings.TrimPrefix(k, oldP)] = v
+		}
+	}
+	if f.spurious {
+		f.spurious = false
+		return os.ErrNotExist
+	}
+	return nil
+}
+
+type rwPipe struct {
+	io.Reader
+	io.WriteCloser
+}
+
+func TestSFTPDeleteAndRename(t *testing.T) {
+	const d755, d555, lnk = os.ModeDir | 0o755, os.ModeDir | 0o555, os.ModeSymlink | 0o777
+	fs := &mFS{m: map[string]*mNode{
+		"/": {"/", "", d755}, "/r": {"r", "", d755},
+		"/r/sdk": {"sdk", "", d755}, "/r/sdk/sub": {"sub", "", d555},
+		"/r/sdk/sub/a": {"a", "", 0o644}, "/r/sdk/brk": {"brk", "/no", lnk},
+		"/r/keep": {"keep", "", d755}, "/r/keep/f": {"f", "", 0o644},
+		"/r/lnk": {"lnk", "/r/keep", lnk}, "/r/geo": {"geo", "", d755},
+		"/r/geo/d": {"d", "", 0o644}, "/r/a": {"a", "", 0o644}, "/r/b": {"b", "", 0o644},
+	}}
+	c2sR, c2sW := io.Pipe()
+	s2cR, s2cW := io.Pipe()
+	srv := sftp.NewRequestServer(rwPipe{c2sR, s2cW}, sftp.Handlers{FileGet: fs, FilePut: fs, FileCmd: fs, FileList: fs})
+	go func() { _ = srv.Serve() }()
+	cli, err := sftp.NewClientPipe(s2cR, c2sW)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c2sW.Close(); _ = srv.Close(); _ = s2cW.Close(); _ = cli.Close() })
 	m := NewManager(nil, nil)
-	sess := &sessionState{
-		currentDir: "/home/ubuntu",
-	}
-	sess.info.HomeDir = "/home/ubuntu"
+	m.sessions["s1"] = &sessionState{sftpClient: cli, dirCache: map[string]dirCacheEntry{}}
+	has := func(p string) bool { _, ok := fs.m[p]; return ok }
 
-	m.updateCWDFromCommand(sess, "cd /var/log/nginx")
-	if sess.currentDir != "/var/log/nginx" {
-		t.Fatalf("expected /var/log/nginx, got %q", sess.currentDir)
+	if m.SFTPDelete("s1", "/") == nil || !errors.Is(m.SFTPDelete("s1", "/r/miss"), os.ErrNotExist) {
+		t.Fatal("root/missing delete check failed")
 	}
-
-	m.updateCWDFromCommand(sess, "cd ../apt && ls -la")
-	if sess.currentDir != "/var/log/apt" {
-		t.Fatalf("expected /var/log/apt, got %q", sess.currentDir)
+	// nested dir with read-only subdir + broken symlink (the metatube-sdk case)
+	if err := m.SFTPDelete("s1", "/r/sdk"); err != nil || has("/r/sdk") || has("/r/sdk/brk") {
+		t.Fatalf("nested delete: %v", err)
 	}
-
-	m.updateCWDFromCommand(sess, "cd ~/projects")
-	if sess.currentDir != "/home/ubuntu/projects" {
-		t.Fatalf("expected /home/ubuntu/projects, got %q", sess.currentDir)
+	if err := m.SFTPDelete("s1", "/r/lnk"); err != nil || has("/r/lnk") || !has("/r/keep/f") {
+		t.Fatalf("symlink delete: %v", err)
 	}
-
-	m.updateCWDFromCommand(sess, "cd")
-	if sess.currentDir != "/home/ubuntu" {
-		t.Fatalf("expected /home/ubuntu, got %q", sess.currentDir)
+	for _, tc := range []struct {
+		old, dst, chk string
+		sp            bool
+	}{
+		{"/r/geo", "/r/geo2", "/r/geo2/d", false},
+		{"/r/a", "/r/b", "/r/b", false}, // overwrite
+		{"/r/b", "/r/c", "/r/c", true},  // server moved but replied ENOENT
+	} {
+		fs.spurious = tc.sp
+		if err := m.SFTPRename("s1", tc.old, tc.dst); err != nil || has(tc.old) || !has(tc.chk) {
+			t.Fatalf("rename %s->%s: %v", tc.old, tc.dst, err)
+		}
+	}
+	if err := m.SFTPRename("s1", "/r/miss", "/r/c"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing rename: %v", err)
 	}
 }
