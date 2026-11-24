@@ -10,6 +10,8 @@ import type {
   ServerSaveRequest,
   ServerView,
   SessionInfo,
+  SSHCacheClearResult,
+  SSHCacheInfo,
   SSHKeyMeta,
   UpdateCheckResult,
   VaultLockState,
@@ -95,6 +97,12 @@ export const api = {
     callGo<CompletionItem[]>('SuggestCommandsForSession', input, serverId, sessionId),
   getSettings: () => callGo<AppSettings>('GetSettings'),
   saveSettings: (settings: AppSettings) => callGo<AppSettings>('SaveSettings', settings),
+
+  // SSH Cache
+  getSshCacheInfo: () => callGo<SSHCacheInfo>('GetSSHCacheInfo'),
+  clearSshHostCache: (host: string, port: number) =>
+    callGo<SSHCacheClearResult>('ClearSSHHostCache', host, port),
+  clearAllSshCache: () => callGo<SSHCacheClearResult>('ClearAllSSHCache'),
 
   // Runtime events
   onEvent: <T>(eventName: string, handler: (payload: T) => void): (() => void) => {
