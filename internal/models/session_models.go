@@ -60,6 +60,12 @@ type AppSettings struct {
 	MaxHistoryEntries        int    `json:"maxHistoryEntries"`
 	RecordCommands           bool   `json:"recordCommands"`
 	Language                 string `json:"language"`
+	MonitorBarEnabled        bool   `json:"monitorBarEnabled"`
+	AutoReconnect            bool   `json:"autoReconnect"`
+	SFTPFollowTerminal       bool   `json:"sftpFollowTerminal"`
+	PasteGuardEnabled        bool   `json:"pasteGuardEnabled"`
+	KeywordHighlightEnabled  bool   `json:"keywordHighlightEnabled"`
+	CheckUpdatesOnStartup    bool   `json:"checkUpdatesOnStartup"`
 }
 
 func DefaultSettings() AppSettings {
@@ -75,6 +81,12 @@ func DefaultSettings() AppSettings {
 		MaxHistoryEntries:        2000,
 		RecordCommands:           true,
 		Language:                 "zh",
+		MonitorBarEnabled:        true,
+		AutoReconnect:            true,
+		SFTPFollowTerminal:       true,
+		PasteGuardEnabled:        true,
+		KeywordHighlightEnabled:  true,
+		CheckUpdatesOnStartup:    true,
 	}
 }
 
