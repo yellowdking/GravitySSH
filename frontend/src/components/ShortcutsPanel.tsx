@@ -108,7 +108,7 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
       </div>
 
       <ShortcutEditorModal open={!!editing} initial={editing} title={editing?.id ? '编辑快捷命令' : '新建快捷命令'} onClose={() => setEditing(null)} onSubmit={handleSave} />
-      <ShortcutTemplatesModal open={templatesOpen} hasActiveSession={!!activeSessionId} onClose={() => setTemplatesOpen(false)} onImport={handleImportTemplate} onRunNow={onRunCommand ? handleRunTemplateNow : undefined} />
+      <ShortcutTemplatesModal open={templatesOpen} hasActiveSession={!!activeSessionId} onClose={() => setTemplatesOpen(false)} onImport={handleImportTemplate} onRunNow={onRunCommand ? handleRunTemplateNow : undefined} onToast={onToast} />
     </div>
   )
 }
