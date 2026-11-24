@@ -59,6 +59,21 @@ func (a *App) GetCurrentInputLine(sessionID string) (string, error) {
 	return a.sshMgr.CurrentInputLine(sessionID), nil
 }
 
+func (a *App) GetSessionMetrics(sessionID string) (models.HostMetrics, error) {
+	if err := a.ensureReady(); err != nil {
+		return models.HostMetrics{}, err
+	}
+	return a.sshMgr.GetSessionMetrics(sessionID)
+}
+
+func (a *App) WakeReconnect() error {
+	if err := a.ensureReady(); err != nil {
+		return err
+	}
+	a.sshMgr.WakeReconnect()
+	return nil
+}
+
 func (a *App) SFTPList(sessionID, remotePath string) (models.SFTPListResult, error) {
 	if err := a.ensureReady(); err != nil {
 		return models.SFTPListResult{}, err
@@ -99,6 +114,44 @@ func (a *App) SFTPExtractArchive(sessionID, remotePath string) (string, error) {
 		return "", err
 	}
 	return a.sshMgr.SFTPExtractArchive(sessionID, remotePath)
+}
+
+func (a *App) SFTPReadTextFile(sessionID, remotePath string) (models.RemoteFileContent, error) {
+	if err := a.ensureReady(); err != nil {
+		return models.RemoteFileContent{}, err
+	}
+	return a.sshMgr.SFTPReadTextFile(sessionID, remotePath)
+}
+
+func (a *App) SFTPWriteTextFile(sessionID, remotePath, content string) error {
+	if err := a.ensureReady(); err != nil {
+		return err
+	}
+	return a.sshMgr.SFTPWriteTextFile(sessionID, remotePath, content)
+}
+
+func (a *App) SFTPCompress(sessionID, remoteDir string, names []string, format string) (string, error) {
+	if err := a.ensureReady(); err != nil {
+		return "", err
+	}
+	return a.sshMgr.SFTPCompress(sessionID, remoteDir, names, format)
+}
+
+func (a *App) SFTPDownloadFolderDialog(sessionID, remotePath string) (map[string]any, error) {
+	if err := a.ensureReady(); err != nil {
+		return nil, err
+	}
+	dir, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "选择保存文件夹的目标本地目录",
+	})
+	if err != nil || dir == "" {
+		return map[string]any{"cancelled": true}, err
+	}
+	count, err := a.sshMgr.SFTPDownloadPacked(sessionID, remotePath, dir)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"cancelled": false, "localDir": dir, "fileCount": count}, nil
 }
 
 func (a *App) SFTPUploadDialog(sessionID, remoteDir string) (int, error) {
