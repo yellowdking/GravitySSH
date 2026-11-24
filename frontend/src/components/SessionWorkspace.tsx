@@ -64,6 +64,7 @@ export const SessionWorkspace: React.FC<SessionWorkspaceProps> = ({
           session={session}
           active={visible}
           width={sftpWidth}
+          followTerminal={settings.sftpFollowTerminal}
           onCdInTerminal={(d) => { void api.writeTerminal(session.sessionId, `cd ${JSON.stringify(d)}\r`) }}
           onToast={onToast}
         />
@@ -82,7 +83,7 @@ export const SessionWorkspace: React.FC<SessionWorkspaceProps> = ({
         />
         <div style={{ width: drawerWidth }} className="shrink-0 h-full min-w-0 flex overflow-hidden [&>*]:!w-full [&>*]:min-w-0">
           {rightDrawer === 'shortcuts' && (
-            <ShortcutsPanel compact shortcuts={shortcuts} activeSessionId={session.sessionId} onRunShortcut={onRunShortcut} onChanged={onReload} onToast={onToast} />
+            <ShortcutsPanel compact shortcuts={shortcuts} activeSessionId={session.sessionId} onRunShortcut={onRunShortcut} onRunCommand={onRunCommand} onChanged={onReload} onToast={onToast} />
           )}
           {rightDrawer === 'history' && (
             <HistoryPanel compact history={history} activeServerId={session.serverId} activeSessionId={session.sessionId} onRunCommand={onRunCommand} onShortcutSaved={onReload} onHistoryChanged={onReload} onToast={onToast} />
