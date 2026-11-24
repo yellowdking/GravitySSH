@@ -14,7 +14,7 @@ import (
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
-const vaultSchemaVersion = 3
+const vaultSchemaVersion = 4
 
 type Store struct {
 	mu          sync.RWMutex
@@ -46,6 +46,7 @@ func Open(filePath string, protector crypto.KeyProtector) (*Store, error) {
 			Servers:   []models.ServerConfig{},
 			SSHKeys:   []models.SSHKeyRecord{},
 			Shortcuts: defaultShortcuts(),
+			Templates: BuiltinOpsTemplates(),
 			History:   []models.CommandRecord{},
 			Settings:  models.DefaultSettings(),
 		},
@@ -95,6 +96,9 @@ func normalizeVault(v *models.VaultData) {
 		v.Settings.KeywordHighlightEnabled = true
 		v.Settings.CheckUpdatesOnStartup = true
 	}
+	if v.Version < 4 && v.Templates == nil {
+		v.Templates = BuiltinOpsTemplates()
+	}
 	if v.Version < vaultSchemaVersion {
 		v.Version = vaultSchemaVersion
 	}
@@ -106,6 +110,9 @@ func normalizeVault(v *models.VaultData) {
 	}
 	if v.Shortcuts == nil {
 		v.Shortcuts = []models.CommandShortcut{}
+	}
+	if v.Templates == nil {
+		v.Templates = []models.BuiltinTemplate{}
 	}
 	if v.History == nil {
 		v.History = []models.CommandRecord{}
