@@ -38,18 +38,27 @@ export const MonitorBar: React.FC<Props> = ({ sessionId, status, active, enabled
   useEffect(() => {
     if (!enabled || !active || status !== 'connected') return
     let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
     const poll = async () => {
+      let nextDelay = 3000
       try {
         const res = await api.getSessionMetrics(sessionId)
-        if (!cancelled) setM(res)
-      } catch { /* ignore transient sampling error */ }
+        if (!cancelled) {
+          setM(res)
+          if (res.latencyMs >= 500) nextDelay = 6000
+          else if (res.latencyMs >= 250) nextDelay = 4500
+        }
+      } catch {
+        nextDelay = 5000
+      }
+      if (!cancelled) {
+        timer = setTimeout(() => { void poll() }, nextDelay)
+      }
     }
-    const initTimer = setTimeout(() => { void poll() }, 600)
-    const interval = setInterval(() => { void poll() }, 3000)
+    timer = setTimeout(() => { void poll() }, 600)
     return () => {
       cancelled = true
-      clearTimeout(initTimer)
-      clearInterval(interval)
+      if (timer !== null) clearTimeout(timer)
     }
   }, [sessionId, status, active, enabled])
 
