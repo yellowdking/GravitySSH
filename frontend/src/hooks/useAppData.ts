@@ -6,6 +6,7 @@ import type {
   ServerView,
   SessionInfo,
   SSHKeyMeta,
+  UpdateCheckResult,
   VaultLockState,
   VaultSecurityInfo,
 } from '../types'
@@ -24,6 +25,12 @@ const DEFAULT_SETTINGS: AppSettings = {
   maxHistoryEntries: 2000,
   recordCommands: true,
   language: 'zh',
+  monitorBarEnabled: true,
+  autoReconnect: true,
+  sftpFollowTerminal: true,
+  pasteGuardEnabled: true,
+  keywordHighlightEnabled: true,
+  checkUpdatesOnStartup: true,
 }
 
 export function useAppData(showToast: (text: string, type?: 'info' | 'error') => void) {
@@ -34,7 +41,8 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
   const [securityInfo, setSecurityInfo] = useState<VaultSecurityInfo | null>(null)
   const [lockState, setLockState] = useState<VaultLockState | null>(null)
-  const [appVersion, setAppVersion] = useState('1.1.3')
+  const [appVersion, setAppVersion] = useState('1.2.0')
+  const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null)
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sftpOpenBySession, setSftpOpenBySession] = useState<Record<string, boolean>>({})
@@ -62,16 +70,40 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
       setSshKeys(keys || [])
       setShortcuts(scs || [])
       setHistory(hist || [])
-      if (cfg) setSettings(cfg)
+      if (cfg) setSettings({ ...DEFAULT_SETTINGS, ...cfg })
       if (sec) setSecurityInfo(sec)
     } catch (err) {
       showToast(`加载配置失败: ${err}`, 'error')
     }
   }, [showToast])
 
+  useEffect(() => { void loadAll() }, [loadAll])
+
+  // Silent startup GitHub update check when enabled
   useEffect(() => {
-    void loadAll()
-  }, [loadAll])
+    if (!settings.checkUpdatesOnStartup || lockState?.locked) return
+    let cancelled = false
+    const t = setTimeout(() => {
+      void api.checkForUpdates().then((res) => { if (!cancelled && res) setUpdateInfo(res) }).catch(() => {})
+    }, 2500)
+    return () => { cancelled = true; clearTimeout(t) }
+  }, [settings.checkUpdatesOnStartup, lockState?.locked])
+
+  // Immediately wake auto-reconnect when network returns or Windows wakes from sleep
+  useEffect(() => {
+    const onOnline = () => { void api.wakeReconnect().catch(() => {}) }
+    window.addEventListener('online', onOnline)
+    let lastTick = Date.now()
+    const id = setInterval(() => {
+      const now = Date.now()
+      if (now - lastTick > 15000) void api.wakeReconnect().catch(() => {})
+      lastTick = now
+    }, 5000)
+    return () => {
+      window.removeEventListener('online', onOnline)
+      clearInterval(id)
+    }
+  }, [])
 
   useEffect(() => {
     const unsubStatus = api.onEvent<SessionInfo>('session:status', (info) => {
@@ -89,29 +121,13 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
     const unsubCmd = api.onEvent<CommandRecord>('command:recorded', (rec) => {
       setHistory((prev) => [rec, ...prev].slice(0, 500))
     })
-    return () => {
-      unsubStatus()
-      unsubCmd()
-    }
+    return () => { unsubStatus(); unsubCmd() }
   }, [settings.autoOpenSftp])
 
   return {
-    servers,
-    sshKeys,
-    shortcuts,
-    setShortcuts,
-    history,
-    settings,
-    setSettings,
-    securityInfo,
-    lockState,
-    appVersion,
-    sessions,
-    setSessions,
-    activeSessionId,
-    setActiveSessionId,
-    sftpOpenBySession,
-    setSftpOpenBySession,
-    loadAll,
+    servers, sshKeys, shortcuts, setShortcuts, history, settings, setSettings,
+    securityInfo, lockState, appVersion, updateInfo, setUpdateInfo,
+    sessions, setSessions, activeSessionId, setActiveSessionId,
+    sftpOpenBySession, setSftpOpenBySession, loadAll,
   }
 }
