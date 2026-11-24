@@ -6,6 +6,7 @@ import type {
   CompletionItem,
   HostMetrics,
   KeyDeployResult,
+  PresetLoadResult,
   ServerSaveRequest,
   ServerView,
   SessionInfo,
@@ -77,6 +78,10 @@ export const api = {
   clearHistory: (serverId: string) => callGo<void>('ClearHistory', serverId),
   listShortcuts: () => callGo<CommandShortcut[]>('ListShortcuts'),
   listBuiltinTemplates: () => callGo<BuiltinTemplate[]>('ListBuiltinTemplates'),
+  listOpsTemplates: () => callGo<BuiltinTemplate[]>('ListOpsTemplates'),
+  saveOpsTemplate: (tpl: Partial<BuiltinTemplate>) => callGo<BuiltinTemplate>('SaveOpsTemplate', tpl),
+  deleteOpsTemplate: (id: string) => callGo<void>('DeleteOpsTemplate', id),
+  loadPresetTemplates: () => callGo<PresetLoadResult>('LoadPresetTemplates'),
   saveShortcut: (sc: Partial<CommandShortcut>) => callGo<CommandShortcut>('SaveShortcut', sc),
   deleteShortcut: (id: string) => callGo<void>('DeleteShortcut', id),
   runShortcut: (sessionId: string, shortcutId: string, forceExecute: boolean) =>
