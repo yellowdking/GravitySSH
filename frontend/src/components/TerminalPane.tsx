@@ -45,7 +45,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
 
   useEffect(() => { if (!settings.autocompleteEnabled) setSuggestions([]) }, [settings.autocompleteEnabled])
 
-  const { containerRef, termRef, searchAddonRef } = useTerminalInstance({
+  const { containerRef, termRef, searchAddonRef, pasteText } = useTerminalInstance({
     sessionId: session.sessionId,
     status: session.status,
     active,
@@ -110,7 +110,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
             void navigator.clipboard.writeText(sel)
             termRef.current?.clearSelection()
           } else {
-            void navigator.clipboard.readText().then((t) => { if (t) void api.writeTerminal(session.sessionId, t) })
+            void navigator.clipboard.readText().then((t) => { if (t) pasteText(t) })
           }
         }}
       />
