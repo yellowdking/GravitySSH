@@ -51,6 +51,10 @@ jobs:
         working-directory: frontend
         run: npm test
 
+      - name: Fetch Smiley Sans Font
+        shell: pwsh
+        run: python scripts/fetch_fonts.py
+
       - name: Build Frontend (TypeScript + Vite)
         working-directory: frontend
         run: npm run build
