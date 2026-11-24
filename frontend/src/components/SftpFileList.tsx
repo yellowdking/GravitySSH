@@ -5,7 +5,7 @@ import { formatBytes } from '../utils/autocomplete'
 
 interface Props {
   entries: SFTPFileEntry[]
-  busyPath: string | null
+  busyPaths: Set<string>
   onOpenDir: (path: string) => void
   onEditFile: (entry: SFTPFileEntry) => void
   onDownload: (entry: SFTPFileEntry) => void
@@ -38,15 +38,16 @@ function fileIcon(entry: SFTPFileEntry) {
 }
 
 const actBtn = 'p-1 rounded text-ag-muted disabled:opacity-40'
+const badgeCls = 'text-[9px] px-1 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/25 shrink-0'
 
 export const SftpFileList: React.FC<Props> = ({
-  entries, busyPath, onOpenDir, onEditFile, onDownload, onDownloadFolder, onCompress, onExtract, onAlignPerms, onRename, onDelete,
+  entries, busyPaths, onOpenDir, onEditFile, onDownload, onDownloadFolder, onCompress, onExtract, onAlignPerms, onRename, onDelete,
 }) => (
   <div className="divide-y divide-ag-border/40">
     {entries.map((entry) => {
       const archive = !entry.isDir && isArchiveFile(entry.name)
       const editable = !entry.isDir && !archive && isEditableTextFile(entry.name)
-      const isBusy = busyPath === entry.path
+      const isBusy = busyPaths.has(entry.path)
 
       return (
         <div
@@ -66,11 +67,7 @@ export const SftpFileList: React.FC<Props> = ({
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5 min-w-0">
                 <span className="text-ag-text truncate font-medium">{entry.name}</span>
-                {archive && (
-                  <span className="text-[9px] px-1 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/25 shrink-0">
-                    {isBusy ? '处理中' : '双击解压'}
-                  </span>
-                )}
+                {(isBusy || archive) && <span className={badgeCls}>{isBusy ? '处理中...' : '双击解压'}</span>}
               </div>
               <div className="text-[10px] font-mono text-ag-subtle truncate">{entry.mode}</div>
             </div>
