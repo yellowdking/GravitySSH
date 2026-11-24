@@ -135,6 +135,7 @@ export interface AppSettings {
   sftpFollowTerminal: boolean
   pasteGuardEnabled: boolean
   keywordHighlightEnabled: boolean
+  autoSwitchEnglishIme: boolean
   checkUpdatesOnStartup: boolean
 }
 
