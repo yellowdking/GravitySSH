@@ -27,7 +27,7 @@ export const SessionTabsBar: React.FC<Props> = ({
         const dotCls =
           sess.status === 'connected'
             ? 'bg-emerald-400'
-            : sess.status === 'connecting' || sess.status === 'reconnecting'
+            : sess.status === 'connecting'
             ? 'bg-amber-400 animate-pulse'
             : 'bg-rose-400'
         return (
