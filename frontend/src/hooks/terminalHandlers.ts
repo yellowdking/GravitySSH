@@ -4,6 +4,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { SearchAddon } from '@xterm/addon-search'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import type { AppSettings, CompletionItem } from '../types'
+import { api } from '../wailsApi'
 import { ANTIGRAVITY_TERM_THEME, DEFAULT_TERMINAL_FONT } from '../components/terminalTheme'
 
 export function createConfiguredTerminal(el: HTMLDivElement, settings: AppSettings) {
@@ -86,4 +87,36 @@ export function attachTerminalInputHandlers(d: HandlerDeps) {
     }
     return true
   })
+}
+
+export function attachTerminalImeGuard(
+  term: Terminal,
+  isActive: () => boolean,
+  isEnabled: () => boolean
+): () => void {
+  let lastTrigger = 0
+  const trigger = () => {
+    if (!isActive() || !isEnabled()) return
+    const now = Date.now()
+    if (now - lastTrigger < 120) return
+    lastTrigger = now
+    void api.switchTerminalIme().catch(() => {})
+  }
+
+  const onWindowFocus = () => {
+    const activeEl = document.activeElement
+    const isOtherInput =
+      activeEl &&
+      activeEl !== term.textarea &&
+      (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || (activeEl as HTMLElement).isContentEditable)
+    if (!isOtherInput) trigger()
+  }
+
+  const ta = term.textarea
+  ta?.addEventListener('focus', trigger)
+  window.addEventListener('focus', onWindowFocus)
+  return () => {
+    ta?.removeEventListener('focus', trigger)
+    window.removeEventListener('focus', onWindowFocus)
+  }
 }
