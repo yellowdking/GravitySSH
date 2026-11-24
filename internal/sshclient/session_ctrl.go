@@ -87,10 +87,6 @@ func (m *Manager) Disconnect(sessionID string) {
 		sess.mu.Lock()
 		sess.userClosed = true
 		sess.mu.Unlock()
-		select {
-		case sess.wakeCh <- struct{}{}:
-		default:
-		}
 		m.markDisconnected(sess, "已主动断开连接")
 	}
 }
@@ -107,10 +103,6 @@ func (m *Manager) CloseAll() {
 		s.mu.Lock()
 		s.userClosed = true
 		s.mu.Unlock()
-		select {
-		case s.wakeCh <- struct{}{}:
-		default:
-		}
 		m.markDisconnected(s, "应用关闭")
 	}
 }
