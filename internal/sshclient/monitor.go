@@ -28,6 +28,11 @@ func (m *Manager) GetSessionMetrics(sessionID string) (models.HostMetrics, error
 		return models.HostMetrics{SessionID: sessionID}, fmt.Errorf("会话不存在")
 	}
 
+	if !sess.metricsInFlight.CompareAndSwap(false, true) {
+		return models.HostMetrics{SessionID: sessionID}, fmt.Errorf("主机指标采样进行中")
+	}
+	defer sess.metricsInFlight.Store(false)
+
 	sess.mu.Lock()
 	var client = (*DialResult)(nil)
 	if sess.dialRes != nil && sess.dialRes.Client != nil {
@@ -48,7 +53,7 @@ func (m *Manager) GetSessionMetrics(sessionID string) (models.HostMetrics, error
 	go func() {
 		select {
 		case <-done:
-		case <-time.After(6 * time.Second):
+		case <-time.After(10 * time.Second):
 			_ = sshSess.Close()
 		}
 	}()
