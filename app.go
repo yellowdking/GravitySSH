@@ -61,6 +61,37 @@ func (a *App) ensureReady() error {
 	return nil
 }
 
+func (a *App) ensureUnlocked() error {
+	if err := a.ensureReady(); err != nil {
+		return err
+	}
+	if a.store.IsLocked() {
+		return errors.New("配置文件已锁定，请先输入解锁密码")
+	}
+	return nil
+}
+
+func (a *App) GetVaultLockState() (models.VaultLockState, error) {
+	if err := a.ensureReady(); err != nil {
+		return models.VaultLockState{}, err
+	}
+	return a.store.LockState(), nil
+}
+
+func (a *App) UnlockVault(password string) error {
+	if err := a.ensureReady(); err != nil {
+		return err
+	}
+	return a.store.Unlock(password)
+}
+
+func (a *App) SetVaultPassword(currentPassword, newPassword string) error {
+	if err := a.ensureUnlocked(); err != nil {
+		return err
+	}
+	return a.store.SetPassword(currentPassword, newPassword)
+}
+
 func (a *App) GetVaultSecurityInfo() (models.VaultSecurityInfo, error) {
 	if err := a.ensureReady(); err != nil {
 		return models.VaultSecurityInfo{}, err
@@ -80,21 +111,21 @@ func (a *App) ListServers() ([]models.ServerView, error) {
 }
 
 func (a *App) SaveServer(req models.ServerSaveRequest) (models.ServerView, error) {
-	if err := a.ensureReady(); err != nil {
+	if err := a.ensureUnlocked(); err != nil {
 		return models.ServerView{}, err
 	}
 	return a.store.SaveServer(req)
 }
 
 func (a *App) DeleteServer(id string) error {
-	if err := a.ensureReady(); err != nil {
+	if err := a.ensureUnlocked(); err != nil {
 		return err
 	}
 	return a.store.DeleteServer(id)
 }
 
 func (a *App) TestServerConnection(req models.ServerSaveRequest) (string, error) {
-	if err := a.ensureReady(); err != nil {
+	if err := a.ensureUnlocked(); err != nil {
 		return "", err
 	}
 	return a.sshMgr.TestConnection(a.ctx, req)
@@ -108,14 +139,14 @@ func (a *App) ListSSHKeys() ([]models.SSHKeyMeta, error) {
 }
 
 func (a *App) ImportSSHKeyFromText(name, pemContent, passphrase, comment string) (models.SSHKeyMeta, error) {
-	if err := a.ensureReady(); err != nil {
+	if err := a.ensureUnlocked(); err != nil {
 		return models.SSHKeyMeta{}, err
 	}
 	return a.store.ImportSSHKey(name, pemContent, passphrase, comment)
 }
 
 func (a *App) PickAndReadSSHKeyFile() (map[string]string, error) {
-	if err := a.ensureReady(); err != nil {
+	if err := a.ensureUnlocked(); err != nil {
 		return nil, err
 	}
 	selected, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
@@ -146,15 +177,22 @@ func (a *App) PickAndReadSSHKeyFile() (map[string]string, error) {
 }
 
 func (a *App) GenerateSSHKey(name, algorithm, passphrase, comment string) (models.SSHKeyMeta, error) {
-	if err := a.ensureReady(); err != nil {
+	if err := a.ensureUnlocked(); err != nil {
 		return models.SSHKeyMeta{}, err
 	}
 	return a.store.GenerateSSHKey(name, algorithm, passphrase, comment)
 }
 
 func (a *App) DeleteSSHKey(id string) error {
-	if err := a.ensureReady(); err != nil {
+	if err := a.ensureUnlocked(); err != nil {
 		return err
 	}
 	return a.store.DeleteSSHKey(id)
+}
+
+func (a *App) DeploySSHKeyToServers(keyID string, serverIDs []string, bindAsAuth bool) ([]models.KeyDeployResult, error) {
+	if err := a.ensureUnlocked(); err != nil {
+		return nil, err
+	}
+	return a.sshMgr.DeploySSHKeyToServers(a.ctx, keyID, serverIDs, bindAsAuth)
 }
