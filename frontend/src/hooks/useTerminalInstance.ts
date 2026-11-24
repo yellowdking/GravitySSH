@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef } from 'react'
-import { Terminal } from '@xterm/xterm'
-import { FitAddon } from '@xterm/addon-fit'
-import { WebLinksAddon } from '@xterm/addon-web-links'
-import { SearchAddon } from '@xterm/addon-search'
-import { Unicode11Addon } from '@xterm/addon-unicode11'
+import type { Terminal } from '@xterm/xterm'
+import type { FitAddon } from '@xterm/addon-fit'
+import type { SearchAddon } from '@xterm/addon-search'
 import type { AppSettings, CompletionItem } from '../types'
 import { api } from '../wailsApi'
 import { applyTerminalInputToLine, sanitizePasteText } from '../utils/autocomplete'
-import { ANTIGRAVITY_TERM_THEME, base64ToUint8Array, DEFAULT_TERMINAL_FONT } from '../components/terminalTheme'
+import { inspectPasteSafety, type PasteInspection } from '../utils/pasteGuard'
+import { highlightLogText } from '../utils/keywordHighlight'
+import { base64ToUint8Array, DEFAULT_TERMINAL_FONT } from '../components/terminalTheme'
+import { attachTerminalInputHandlers, createConfiguredTerminal } from './terminalHandlers'
 
 interface UseTerminalOptions {
   sessionId: string
@@ -24,6 +25,7 @@ interface UseTerminalOptions {
   onMoveSelection: (delta: number) => void
   onApplySelected: () => void
   onOpenSearch: () => void
+  onPasteGuard: (text: string, inspection: PasteInspection) => void
 }
 
 export function useTerminalInstance(opts: UseTerminalOptions) {
@@ -40,10 +42,22 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
     writeQueueRef.current = writeQueueRef.current.then(() => api.writeTerminal(opts.sessionId, data)).catch(() => {})
   }, [opts.sessionId])
 
+  const commitPaste = useCallback((raw: string) => {
+    const term = termRef.current
+    const cleaned = sanitizePasteText(raw)
+    if (!term || !cleaned) return
+    term.paste(cleaned)
+    term.focus()
+  }, [])
+
   const pasteText = useCallback((raw: string) => {
     const term = termRef.current
     const cleaned = sanitizePasteText(raw)
     if (!term || !cleaned) return
+    if (settingsRef.current.pasteGuardEnabled) {
+      const check = inspectPasteSafety(cleaned, term.modes.bracketedPasteMode)
+      if (check.needsConfirm) { cbRef.current.onPasteGuard(cleaned, check); return }
+    }
     term.paste(cleaned)
     term.focus()
   }, [])
@@ -67,49 +81,26 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
-    const term = new Terminal({
-      cursorBlink: true, cursorStyle: 'bar', cursorWidth: 2,
-      fontFamily: settingsRef.current.terminalFontFamily || DEFAULT_TERMINAL_FONT,
-      fontSize: settingsRef.current.terminalFontSize,
-      lineHeight: 1.15, letterSpacing: 0, convertEol: false, windowsMode: false,
-      scrollSensitivity: 0.34, scrollback: 8000, allowProposedApi: true, theme: ANTIGRAVITY_TERM_THEME,
-    })
-    const fit = new FitAddon(), links = new WebLinksAddon(), searchAddon = new SearchAddon(), unicode11 = new Unicode11Addon()
-    term.loadAddon(fit); term.loadAddon(links); term.loadAddon(searchAddon); term.loadAddon(unicode11)
-    term.unicode.activeVersion = '11'
-    term.open(el); fit.fit()
+    const { term, fit, searchAddon } = createConfiguredTerminal(el, settingsRef.current)
     termRef.current = term; fitRef.current = fit; searchAddonRef.current = searchAddon
     if (term.cols > 0 && term.rows > 0) void api.resizeTerminal(opts.sessionId, term.cols, term.rows)
 
+    const decoder = new TextDecoder('utf-8')
     const onNativePaste = (ev: ClipboardEvent) => {
       const text = ev.clipboardData?.getData('text/plain')
       if (!text) return
       ev.preventDefault(); ev.stopImmediatePropagation()
-      const cleaned = sanitizePasteText(text)
-      if (cleaned) term.paste(cleaned)
+      pasteText(text)
     }
     el.addEventListener('paste', onNativePaste, true)
 
-    term.attachCustomWheelEventHandler((ev: WheelEvent) => {
-      if (ev.deltaY === 0) return true
-      if (term.buffer.active.type === 'normal') { ev.preventDefault(); term.scrollLines(ev.deltaY > 0 ? 1 : -1); return false }
-      if (term.modes.mouseTrackingMode === 'none') { ev.preventDefault(); enqueueWrite(ev.deltaY > 0 ? '\x1b[B' : '\x1b[A'); return false }
-      return true
-    })
-
-    term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
-      if (ev.type !== 'keydown') return true
-      const k = ev.key.toLowerCase()
-      if ((ev.ctrlKey || ev.metaKey) && k === 'f') { ev.preventDefault(); cbRef.current.onOpenSearch(); return false }
-      if (ev.ctrlKey && ev.shiftKey && k === 'c') { ev.preventDefault(); const s = term.getSelection(); if (s) void navigator.clipboard.writeText(s); return false }
-      if (ev.ctrlKey && ev.shiftKey && k === 'v') { ev.preventDefault(); void navigator.clipboard.readText().then((t) => { const c = sanitizePasteText(t); if (c) term.paste(c) }); return false }
-      if (term.buffer.active.type === 'normal' && cbRef.current.suggestionsRef.current.length > 0) {
-        if (ev.key === 'ArrowDown') { ev.preventDefault(); cbRef.current.onMoveSelection(1); return false }
-        if (ev.key === 'ArrowUp') { ev.preventDefault(); cbRef.current.onMoveSelection(-1); return false }
-        if (ev.key === 'Tab') { ev.preventDefault(); cbRef.current.onApplySelected(); return false }
-        if (ev.key === 'Escape') { ev.preventDefault(); cbRef.current.onClearSuggestions(); return false }
-      }
-      return true
+    attachTerminalInputHandlers({
+      term, enqueueWrite, pasteText,
+      suggestionsRef: cbRef.current.suggestionsRef,
+      onOpenSearch: () => cbRef.current.onOpenSearch(),
+      onMoveSelection: (d) => cbRef.current.onMoveSelection(d),
+      onApplySelected: () => cbRef.current.onApplySelected(),
+      onClearSuggestions: () => cbRef.current.onClearSuggestions(),
     })
 
     const onData = term.onData((data) => {
@@ -122,7 +113,14 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
     })
     const onResize = term.onResize(({ cols, rows }) => { void api.resizeTerminal(opts.sessionId, cols, rows) })
     const unsubData = api.onEvent<{ sessionId: string; data: string }>('terminal:data', (p) => {
-      if (p.sessionId === opts.sessionId && p.data) term.write(base64ToUint8Array(p.data))
+      if (p.sessionId !== opts.sessionId || !p.data) return
+      const bytes = base64ToUint8Array(p.data)
+      if (settingsRef.current.keywordHighlightEnabled && term.buffer.active.type === 'normal') {
+        const text = decoder.decode(bytes, { stream: true })
+        if (text) term.write(highlightLogText(text))
+      } else {
+        term.write(bytes)
+      }
     })
 
     let roTimer: ReturnType<typeof setTimeout> | null = null
@@ -137,7 +135,7 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
       ro.disconnect(); unsubData(); onData.dispose(); onResize.dispose(); term.dispose()
       termRef.current = null; fitRef.current = null
     }
-  }, [opts.sessionId, enqueueWrite])
+  }, [opts.sessionId, enqueueWrite, pasteText])
 
   useEffect(() => {
     if (opts.status !== 'connected') return
@@ -150,7 +148,7 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
     if (!opts.active) return
     const id = setTimeout(() => { syncSize(); termRef.current?.focus() }, 40)
     return () => clearTimeout(id)
-  }, [opts.active, opts.showSftp, opts.rightDrawer, syncSize])
+  }, [opts.active, opts.showSftp, opts.rightDrawer, opts.settings.monitorBarEnabled, syncSize])
 
-  return { containerRef, termRef, searchAddonRef, pasteText }
+  return { containerRef, termRef, searchAddonRef, pasteText, commitPaste }
 }
