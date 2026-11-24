@@ -14,7 +14,7 @@ import (
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
-const vaultSchemaVersion = 4
+const vaultSchemaVersion = 5
 
 type Store struct {
 	mu          sync.RWMutex
@@ -98,6 +98,9 @@ func normalizeVault(v *models.VaultData) {
 	}
 	if v.Version < 4 && v.Templates == nil {
 		v.Templates = BuiltinOpsTemplates()
+	}
+	if v.Version < 5 {
+		v.Settings.AutoSwitchEnglishIME = true
 	}
 	if v.Version < vaultSchemaVersion {
 		v.Version = vaultSchemaVersion
