@@ -1,25 +1,24 @@
 import type {
   AppSettings,
+  BuiltinTemplate,
   CommandRecord,
   CommandShortcut,
   CompletionItem,
+  HostMetrics,
   KeyDeployResult,
   ServerSaveRequest,
   ServerView,
   SessionInfo,
-  SFTPListResult,
   SSHKeyMeta,
+  UpdateCheckResult,
   VaultLockState,
   VaultSecurityInfo,
 } from './types'
+import { callGo, sftpApi } from './wailsSftpApi'
 
 declare global {
   interface Window {
-    go?: {
-      main?: {
-        App?: Record<string, (...args: unknown[]) => Promise<unknown>>
-      }
-    }
+    go?: { main?: { App?: Record<string, (...args: unknown[]) => Promise<unknown>> } }
     runtime?: {
       EventsOn: (eventName: string, callback: (...data: unknown[]) => void) => () => void
       EventsOff: (...eventNames: string[]) => void
@@ -29,16 +28,11 @@ declare global {
   }
 }
 
-function callGo<T>(method: string, ...args: unknown[]): Promise<T> {
-  const fn = window.go?.main?.App?.[method]
-  if (!fn) {
-    return Promise.reject(new Error(`Wails runtime 未就绪: ${method}`))
-  }
-  return fn(...args) as Promise<T>
-}
-
 export const api = {
+  ...sftpApi,
   getAppVersion: () => callGo<string>('GetAppVersion'),
+  checkForUpdates: () => callGo<UpdateCheckResult>('CheckForUpdates'),
+  openExternalURL: (url: string) => callGo<void>('OpenExternalURL', url),
   getVaultSecurityInfo: () => callGo<VaultSecurityInfo>('GetVaultSecurityInfo'),
   getVaultLockState: () => callGo<VaultLockState>('GetVaultLockState'),
   unlockVault: (password: string) => callGo<void>('UnlockVault', password),
@@ -73,23 +67,8 @@ export const api = {
   setSessionCwd: (sessionId: string, remotePath: string) =>
     callGo<void>('SetSessionCWD', sessionId, remotePath),
   getCurrentInputLine: (sessionId: string) => callGo<string>('GetCurrentInputLine', sessionId),
-
-  // Auto SFTP
-  sftpList: (sessionId: string, remotePath: string) => callGo<SFTPListResult>('SFTPList', sessionId, remotePath),
-  sftpMkdir: (sessionId: string, remotePath: string) => callGo<void>('SFTPMkdir', sessionId, remotePath),
-  sftpRename: (sessionId: string, oldPath: string, newPath: string) =>
-    callGo<void>('SFTPRename', sessionId, oldPath, newPath),
-  sftpDelete: (sessionId: string, remotePath: string) => callGo<void>('SFTPDelete', sessionId, remotePath),
-  sftpAlignPermissions: (sessionId: string, remotePath: string) =>
-    callGo<string>('SFTPAlignPermissions', sessionId, remotePath),
-  sftpExtractArchive: (sessionId: string, remotePath: string) =>
-    callGo<string>('SFTPExtractArchive', sessionId, remotePath),
-  sftpUploadDialog: (sessionId: string, remoteDir: string) =>
-    callGo<number>('SFTPUploadDialog', sessionId, remoteDir),
-  sftpUploadFiles: (sessionId: string, localPaths: string[], remoteDir: string) =>
-    callGo<number>('SFTPUploadFiles', sessionId, localPaths, remoteDir),
-  sftpDownloadDialog: (sessionId: string, remotePath: string) =>
-    callGo<string>('SFTPDownloadDialog', sessionId, remotePath),
+  getSessionMetrics: (sessionId: string) => callGo<HostMetrics>('GetSessionMetrics', sessionId),
+  wakeReconnect: () => callGo<void>('WakeReconnect'),
 
   // History & Shortcuts
   listCommandHistory: (serverId: string, limit: number) =>
@@ -97,6 +76,7 @@ export const api = {
   deleteHistoryEntry: (id: string) => callGo<void>('DeleteHistoryEntry', id),
   clearHistory: (serverId: string) => callGo<void>('ClearHistory', serverId),
   listShortcuts: () => callGo<CommandShortcut[]>('ListShortcuts'),
+  listBuiltinTemplates: () => callGo<BuiltinTemplate[]>('ListBuiltinTemplates'),
   saveShortcut: (sc: Partial<CommandShortcut>) => callGo<CommandShortcut>('SaveShortcut', sc),
   deleteShortcut: (id: string) => callGo<void>('DeleteShortcut', id),
   runShortcut: (sessionId: string, shortcutId: string, forceExecute: boolean) =>
@@ -115,16 +95,11 @@ export const api = {
     if (!window.runtime?.EventsOn) return () => {}
     return window.runtime.EventsOn(eventName, (data: unknown) => handler(data as T))
   },
-
   onFileDrop: (handler: (paths: string[]) => void): (() => void) => {
     if (!window.runtime?.OnFileDrop) return () => {}
     window.runtime.OnFileDrop((_x, _y, paths) => {
-      if (Array.isArray(paths) && paths.length > 0) {
-        handler(paths)
-      }
+      if (Array.isArray(paths) && paths.length > 0) handler(paths)
     }, false)
-    return () => {
-      window.runtime?.OnFileDropOff?.()
-    }
+    return () => { window.runtime?.OnFileDropOff?.() }
   },
 }
