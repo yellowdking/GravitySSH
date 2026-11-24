@@ -11,33 +11,19 @@ import (
 )
 
 func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv *models.ServerConfig, cols, rows int) {
-	m.establishOnce(ctx, sess, srv, cols, rows, false)
-}
-
-func (m *Manager) establishOnce(ctx context.Context, sess *sessionState, srv *models.ServerConfig, cols, rows int, isReconnect bool) bool {
-	if isReconnect {
-		m.sendTerminalText(sess.info.SessionID, fmt.Sprintf("\x1b[38;5;105m● 正在重新连接 %s (%s@%s:%d)...\x1b[0m\r\n", srv.Name, srv.Username, srv.Host, defaultPort(srv.Port)))
-	} else {
-		m.sendTerminalText(sess.info.SessionID, fmt.Sprintf("\x1b[38;5;105m● 正在连接 %s (%s@%s:%d)...\x1b[0m\r\n", srv.Name, srv.Username, srv.Host, defaultPort(srv.Port)))
-	}
+	m.sendTerminalText(sess.info.SessionID, fmt.Sprintf("\x1b[38;5;105m● 正在连接 %s (%s@%s:%d)...\x1b[0m\r\n", srv.Name, srv.Username, srv.Host, defaultPort(srv.Port)))
 
 	dialRes, err := DialServer(ctx, srv, m.store)
 	if err != nil {
-		if isReconnect {
-			m.sendTerminalText(sess.info.SessionID, fmt.Sprintf("\x1b[38;5;203m✗ 重连失败: %s\x1b[0m\r\n", err.Error()))
-			return false
-		}
 		m.failSession(sess, err.Error())
-		return false
+		return
 	}
 
 	sshSess, err := dialRes.Client.NewSession()
 	if err != nil {
 		dialRes.Close()
-		if !isReconnect {
-			m.failSession(sess, fmt.Sprintf("创建 SSH 会话失败: %v", err))
-		}
-		return false
+		m.failSession(sess, fmt.Sprintf("创建 SSH 会话失败: %v", err))
+		return
 	}
 
 	sess.mu.Lock()
@@ -58,10 +44,8 @@ func (m *Manager) establishOnce(ctx context.Context, sess *sessionState, srv *mo
 	if err := sshSess.RequestPty("xterm-256color", ptyRows, ptyCols, modes); err != nil {
 		_ = sshSess.Close()
 		dialRes.Close()
-		if !isReconnect {
-			m.failSession(sess, fmt.Sprintf("请求 PTY 终端失败: %v", err))
-		}
-		return false
+		m.failSession(sess, fmt.Sprintf("请求 PTY 终端失败: %v", err))
+		return
 	}
 
 	_ = sshSess.Setenv("LANG", "en_US.UTF-8")
@@ -71,37 +55,29 @@ func (m *Manager) establishOnce(ctx context.Context, sess *sessionState, srv *mo
 	if err != nil {
 		_ = sshSess.Close()
 		dialRes.Close()
-		if !isReconnect {
-			m.failSession(sess, fmt.Sprintf("获取 stdin 失败: %v", err))
-		}
-		return false
+		m.failSession(sess, fmt.Sprintf("获取 stdin 失败: %v", err))
+		return
 	}
 	stdout, err := sshSess.StdoutPipe()
 	if err != nil {
 		_ = sshSess.Close()
 		dialRes.Close()
-		if !isReconnect {
-			m.failSession(sess, fmt.Sprintf("获取 stdout 失败: %v", err))
-		}
-		return false
+		m.failSession(sess, fmt.Sprintf("获取 stdout 失败: %v", err))
+		return
 	}
 	stderr, err := sshSess.StderrPipe()
 	if err != nil {
 		_ = sshSess.Close()
 		dialRes.Close()
-		if !isReconnect {
-			m.failSession(sess, fmt.Sprintf("获取 stderr 失败: %v", err))
-		}
-		return false
+		m.failSession(sess, fmt.Sprintf("获取 stderr 失败: %v", err))
+		return
 	}
 
 	if err := sshSess.Shell(); err != nil {
 		_ = sshSess.Close()
 		dialRes.Close()
-		if !isReconnect {
-			m.failSession(sess, fmt.Sprintf("启动远程 Shell 失败: %v", err))
-		}
-		return false
+		m.failSession(sess, fmt.Sprintf("启动远程 Shell 失败: %v", err))
+		return
 	}
 
 	sess.mu.Lock()
@@ -114,7 +90,12 @@ func (m *Manager) establishOnce(ctx context.Context, sess *sessionState, srv *mo
 	var sftpClient *sftp.Client
 	homeDir := srv.DefaultRemotePath
 	sftpReady := false
-	if sc, scErr := sftp.NewClient(dialRes.Client); scErr == nil {
+	sc, scErr := sftp.NewClient(dialRes.Client)
+	if scErr != nil {
+		time.Sleep(300 * time.Millisecond)
+		sc, scErr = sftp.NewClient(dialRes.Client)
+	}
+	if scErr == nil {
 		sftpClient = sc
 		sftpReady = true
 		if homeDir == "" {
@@ -137,7 +118,7 @@ func (m *Manager) establishOnce(ctx context.Context, sess *sessionState, srv *mo
 		}
 		_ = sshSess.Close()
 		dialRes.Close()
-		return true
+		return
 	}
 	sess.closed = false
 	sess.dialRes = dialRes
@@ -158,16 +139,14 @@ func (m *Manager) establishOnce(ctx context.Context, sess *sessionState, srv *mo
 
 	m.store.MarkServerConnected(srv.ID)
 
-	if isReconnect {
-		m.sendTerminalText(sess.info.SessionID, "\x1b[38;5;78m✓ 自动重连成功，SSH 与 SFTP 已恢复\x1b[0m\r\n")
-	} else if dialRes.ViaSummary != "" {
+	if dialRes.ViaSummary != "" {
 		m.sendTerminalText(sess.info.SessionID, fmt.Sprintf("\x1b[38;5;78m✓ 已连接 · 链路: %s → %s\x1b[0m\r\n", dialRes.ViaSummary, srv.Host))
 	} else {
 		m.sendTerminalText(sess.info.SessionID, "\x1b[38;5;78m✓ SSH 与 SFTP 已自动就绪\x1b[0m\r\n")
 	}
 	m.emit("session:status", infoSnap)
 
-	if srv.StartupCommand != "" && !isReconnect {
+	if srv.StartupCommand != "" {
 		go func() {
 			time.Sleep(450 * time.Millisecond)
 			_ = m.WriteInput(sess.info.SessionID, srv.StartupCommand+"\n")
@@ -185,14 +164,8 @@ func (m *Manager) establishOnce(ctx context.Context, sess *sessionState, srv *mo
 
 	go func() {
 		_ = sshSess.Wait()
-		m.resetSessionTransport(sess)
-		if m.shouldAutoReconnect(sess) {
-			m.runReconnectLoop(sess, srv.ID)
-			return
-		}
 		m.markDisconnected(sess, "远程会话已结束")
 	}()
-	return true
 }
 
 func (m *Manager) failSession(sess *sessionState, errMsg string) {
