@@ -65,6 +65,7 @@ type AppSettings struct {
 	SFTPFollowTerminal       bool   `json:"sftpFollowTerminal"`
 	PasteGuardEnabled        bool   `json:"pasteGuardEnabled"`
 	KeywordHighlightEnabled  bool   `json:"keywordHighlightEnabled"`
+	AutoSwitchEnglishIME     bool   `json:"autoSwitchEnglishIme"`
 	CheckUpdatesOnStartup    bool   `json:"checkUpdatesOnStartup"`
 }
 
@@ -86,6 +87,7 @@ func DefaultSettings() AppSettings {
 		SFTPFollowTerminal:       true,
 		PasteGuardEnabled:        true,
 		KeywordHighlightEnabled:  true,
+		AutoSwitchEnglishIME:     true,
 		CheckUpdatesOnStartup:    true,
 	}
 }
