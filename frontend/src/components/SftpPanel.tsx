@@ -41,7 +41,7 @@ export const SftpPanel: React.FC<SftpPanelProps> = ({ session, active, width, fo
       <div className="flex-1 overflow-y-auto">
         {!session.sftpReady ? (
           <div className="h-full flex flex-col items-center justify-center p-6 text-center text-ag-muted text-xs gap-2">
-            {session.status === 'connecting' || session.status === 'reconnecting' ? (
+            {session.status === 'connecting' ? (
               <><Loader2 className="w-5 h-5 animate-spin text-indigo-400" /><span>正在建立 SSH 与自动 SFTP 通道...</span></>
             ) : (
               <span>等待 SSH 连接就绪后自动加载远程文件</span>
@@ -54,7 +54,7 @@ export const SftpPanel: React.FC<SftpPanelProps> = ({ session, active, width, fo
         ) : (
           <SftpFileList
             entries={sftp.visibleEntries}
-            busyPath={sftp.busyPath}
+            busyPaths={sftp.busyPaths}
             onOpenDir={(p) => void sftp.loadDir(p)}
             onEditFile={(e) => void sftp.handleEditFile(e)}
             onDownload={(e) => void sftp.handleDownload(e)}
