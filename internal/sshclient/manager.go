@@ -25,21 +25,37 @@ type dirCacheEntry struct {
 	fetchedAt time.Time
 }
 
+type cpuSample struct {
+	total uint64
+	idle  uint64
+}
+
+type netSample struct {
+	rx uint64
+	tx uint64
+}
+
 type sessionState struct {
-	mu         sync.Mutex
-	writeMu    sync.Mutex
-	info       models.SessionInfo
-	dialRes    *DialResult
-	sshSession *ssh.Session
-	stdin      io.WriteCloser
-	sftpClient *sftp.Client
-	recorder   *CommandRecorder
-	stopCh     chan struct{}
-	closed     bool
-	lastCols   int
-	lastRows   int
-	currentDir string
-	dirCache   map[string]dirCacheEntry
+	mu           sync.Mutex
+	writeMu      sync.Mutex
+	info         models.SessionInfo
+	appCtx       context.Context
+	dialRes      *DialResult
+	sshSession   *ssh.Session
+	stdin        io.WriteCloser
+	sftpClient   *sftp.Client
+	recorder     *CommandRecorder
+	stopCh       chan struct{}
+	wakeCh       chan struct{}
+	closed       bool
+	userClosed   bool
+	lastCols     int
+	lastRows     int
+	currentDir   string
+	dirCache     map[string]dirCacheEntry
+	prevCPU      *cpuSample
+	prevNet      *netSample
+	prevSampleAt time.Time
 }
 
 type Manager struct {
@@ -169,7 +185,9 @@ func (m *Manager) Connect(ctx context.Context, serverID string, cols, rows int) 
 			Status:     "connecting",
 			CreatedAt:  time.Now(),
 		},
+		appCtx:   ctx,
 		stopCh:   make(chan struct{}),
+		wakeCh:   make(chan struct{}, 1),
 		lastCols: cols,
 		lastRows: rows,
 		dirCache: make(map[string]dirCacheEntry),
