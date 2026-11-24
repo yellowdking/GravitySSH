@@ -6,20 +6,23 @@ import (
 	"unicode/utf8"
 )
 
+// CommandRecorder tracks keystrokes typed into an interactive PTY terminal
+// and reconstructs executed commands cleanly for history recording & autocomplete.
 type CommandRecorder struct {
-	mu        sync.Mutex
-	buf       []rune
-	cursor    int
-	inEsc     bool
-	escSeq    strings.Builder
-	dirtyHist bool
-	onCommand func(cmd string)
+	mu          sync.Mutex
+	buf         []rune
+	cursor      int
+	inEsc       bool
+	escSeq      strings.Builder
+	dirtyHist   bool // set when user uses Up/Down shell history so we don't log malformed partials
+	onCommand   func(cmd string)
 }
 
 func NewCommandRecorder(onCommand func(cmd string)) *CommandRecorder {
 	return &CommandRecorder{onCommand: onCommand}
 }
 
+// CurrentLine returns the current uncommitted command text in the input line.
 func (r *CommandRecorder) CurrentLine() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -29,6 +32,7 @@ func (r *CommandRecorder) CurrentLine() string {
 	return string(r.buf)
 }
 
+// Reset clears the current line buffer.
 func (r *CommandRecorder) Reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -39,11 +43,13 @@ func (r *CommandRecorder) Reset() {
 	r.dirtyHist = false
 }
 
+// Feed processes raw bytes sent from xterm.js to the SSH PTY stdin.
 func (r *CommandRecorder) Feed(data []byte) {
 	if len(data) == 0 {
 		return
 	}
 
+	// Strip bracketed paste wrappers if present (\x1b[200~ ... \x1b[201~)
 	s := string(data)
 	s = strings.ReplaceAll(s, "\x1b[200~", "")
 	s = strings.ReplaceAll(s, "\x1b[201~", "")
@@ -67,7 +73,7 @@ func (r *CommandRecorder) Feed(data []byte) {
 		}
 
 		switch rn {
-		case 0x1b:
+		case 0x1b: // ESC
 			r.inEsc = true
 			r.escSeq.Reset()
 
@@ -82,30 +88,30 @@ func (r *CommandRecorder) Feed(data []byte) {
 			r.cursor = 0
 			r.dirtyHist = false
 
-		case 0x7f, 0x08:
+		case 0x7f, 0x08: // Backspace / DEL
 			if r.cursor > 0 && len(r.buf) > 0 {
 				r.buf = append(r.buf[:r.cursor-1], r.buf[r.cursor:]...)
 				r.cursor--
 			}
 
-		case 0x03, 0x04:
+		case 0x03, 0x04: // Ctrl+C / Ctrl+D
 			r.buf = nil
 			r.cursor = 0
 			r.dirtyHist = false
 
-		case 0x15:
+		case 0x15: // Ctrl+U (delete to start of line)
 			if r.cursor > 0 {
 				r.buf = r.buf[r.cursor:]
 				r.cursor = 0
 			}
 			r.dirtyHist = false
 
-		case 0x0b:
+		case 0x0b: // Ctrl+K (delete to end of line)
 			if r.cursor < len(r.buf) {
 				r.buf = r.buf[:r.cursor]
 			}
 
-		case 0x17:
+		case 0x17: // Ctrl+W (delete previous word)
 			if r.cursor > 0 {
 				i := r.cursor
 				for i > 0 && r.buf[i-1] == ' ' {
@@ -118,13 +124,14 @@ func (r *CommandRecorder) Feed(data []byte) {
 				r.cursor = i
 			}
 
-		case 0x01:
+		case 0x01: // Ctrl+A (Home)
 			r.cursor = 0
 
-		case 0x05:
+		case 0x05: // Ctrl+E (End)
 			r.cursor = len(r.buf)
 
 		case '\t':
+			// Shell Tab completion may expand text remotely; keep prefix clean
 			continue
 
 		default:
@@ -134,6 +141,7 @@ func (r *CommandRecorder) Feed(data []byte) {
 					r.cursor = 0
 					r.dirtyHist = false
 				}
+				// Insert rune at cursor
 				r.buf = append(r.buf, 0)
 				copy(r.buf[r.cursor+1:], r.buf[r.cursor:])
 				r.buf[r.cursor] = rn
@@ -167,23 +175,23 @@ func isEscapeSequenceDone(seq string) bool {
 
 func (r *CommandRecorder) handleEscape(seq string) {
 	switch seq {
-	case "[D", "OD":
+	case "[D", "OD": // Left arrow
 		if r.cursor > 0 {
 			r.cursor--
 		}
-	case "[C", "OC":
+	case "[C", "OC": // Right arrow
 		if r.cursor < len(r.buf) {
 			r.cursor++
 		}
-	case "[H", "OH", "[1~":
+	case "[H", "OH", "[1~": // Home
 		r.cursor = 0
-	case "[F", "OF", "[4~":
+	case "[F", "OF", "[4~": // End
 		r.cursor = len(r.buf)
-	case "[3~":
+	case "[3~": // Delete forward
 		if r.cursor < len(r.buf) {
 			r.buf = append(r.buf[:r.cursor], r.buf[r.cursor+1:]...)
 		}
-	case "[A", "OA", "[B", "OB":
+	case "[A", "OA", "[B", "OB": // Up / Down (shell history navigation)
 		r.buf = nil
 		r.cursor = 0
 		r.dirtyHist = true
@@ -191,5 +199,6 @@ func (r *CommandRecorder) handleEscape(seq string) {
 }
 
 func isLikelyNoise(cmd string) bool {
+	// Skip single-character navigation answers like y/n/q if desired? Keep meaningful 2+ or known 1-char commands like 'w'
 	return strings.TrimSpace(cmd) == ""
 }
