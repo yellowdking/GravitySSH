@@ -131,7 +131,6 @@ export interface AppSettings {
   recordCommands: boolean
   language: 'zh' | 'en'
   monitorBarEnabled: boolean
-  autoReconnect: boolean
   sftpFollowTerminal: boolean
   pasteGuardEnabled: boolean
   keywordHighlightEnabled: boolean
@@ -201,7 +200,7 @@ export interface SessionInfo {
   host: string
   port: number
   username: string
-  status: 'connecting' | 'connected' | 'reconnecting' | 'disconnected' | 'error'
+  status: 'connecting' | 'connected' | 'disconnected' | 'error'
   sftpReady: boolean
   homeDir: string
   error?: string
