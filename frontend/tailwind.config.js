@@ -21,7 +21,7 @@ export default {
         },
       },
       fontFamily: {
-        sans: ['"Segoe UI Variable"', '"Segoe UI"', 'Inter', '"PingFang SC"', '"Microsoft YaHei"', 'sans-serif'],
+        sans: ['"Smiley Sans"', '"Segoe UI Variable"', '"Segoe UI"', '"PingFang SC"', '"Microsoft YaHei"', 'sans-serif'],
         mono: ['"Cascadia Mono"', '"JetBrains Mono"', 'Consolas', 'monospace'],
       },
       boxShadow: {

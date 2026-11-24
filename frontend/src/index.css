@@ -2,6 +2,15 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Smiley Sans (得意黑 v2.0.1, SIL OFL 1.1) — bundled offline via scripts/fetch_fonts.py */
+@font-face {
+  font-family: "Smiley Sans";
+  src: url("/fonts/SmileySans-Oblique.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
 @layer base {
   * {
     box-sizing: border-box;
@@ -16,7 +25,24 @@
     padding: 0;
     background-color: #0b0d12;
     color: #e6eaf5;
-    font-family: "Segoe UI Variable", "Segoe UI", Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-family: "Smiley Sans", "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    letter-spacing: 0.015em;
+    line-height: 1.45;
+    font-kerning: normal;
+    font-feature-settings: "kern" 1, "liga" 1;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  .font-mono,
+  code,
+  pre,
+  kbd,
+  samp {
+    letter-spacing: 0;
+    font-synthesis: weight style;
+    font-variant-numeric: tabular-nums;
   }
 }
 
@@ -40,6 +66,9 @@
 .xterm {
   padding: 10px 12px;
   height: 100%;
+  letter-spacing: 0;
+  font-synthesis: weight style;
+  text-rendering: geometricPrecision;
 }
 .xterm-viewport {
   overflow-y: auto !important;
