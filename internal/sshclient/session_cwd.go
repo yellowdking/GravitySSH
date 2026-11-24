@@ -87,6 +87,9 @@ func (m *Manager) CachedDirEntries(sessionID, dir string) []models.SFTPFileEntry
 	}
 	infos, err := sc.ReadDir(target)
 	if err != nil {
+		if isSFTPConnError(err) {
+			m.invalidateSFTP(sessionID, sc)
+		}
 		return nil
 	}
 
@@ -146,6 +149,26 @@ func (m *Manager) invalidateDirCache(sessionID, dir string) {
 	}
 	sess.mu.Lock()
 	delete(sess.dirCache, path.Clean(dir))
+	sess.mu.Unlock()
+}
+
+func (m *Manager) invalidateDirTreeCache(sessionID, target string) {
+	m.mu.RLock()
+	sess, ok := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if !ok {
+		return
+	}
+	clean := path.Clean(target)
+	prefix := clean + "/"
+	sess.mu.Lock()
+	delete(sess.dirCache, path.Dir(clean))
+	delete(sess.dirCache, clean)
+	for k := range sess.dirCache {
+		if strings.HasPrefix(k, prefix) {
+			delete(sess.dirCache, k)
+		}
+	}
 	sess.mu.Unlock()
 }
 
