@@ -90,7 +90,6 @@ func Open(filePath string, protector crypto.KeyProtector) (*Store, error) {
 func normalizeVault(v *models.VaultData) {
 	if v.Version < 3 {
 		v.Settings.MonitorBarEnabled = true
-		v.Settings.AutoReconnect = true
 		v.Settings.SFTPFollowTerminal = true
 		v.Settings.PasteGuardEnabled = true
 		v.Settings.KeywordHighlightEnabled = true
