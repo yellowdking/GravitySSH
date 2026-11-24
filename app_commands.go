@@ -7,6 +7,7 @@ import (
 
 	"github.com/yellowdking/GravitySSH/internal/autocomplete"
 	"github.com/yellowdking/GravitySSH/internal/models"
+	"github.com/yellowdking/GravitySSH/internal/vault"
 )
 
 func (a *App) ListCommandHistory(serverID string, limit int) ([]models.CommandRecord, error) {
@@ -35,6 +36,10 @@ func (a *App) ListShortcuts() ([]models.CommandShortcut, error) {
 		return nil, err
 	}
 	return a.store.ListShortcuts(), nil
+}
+
+func (a *App) ListBuiltinTemplates() []models.BuiltinTemplate {
+	return vault.BuiltinOpsTemplates()
 }
 
 func (a *App) SaveShortcut(sc models.CommandShortcut) (models.CommandShortcut, error) {
