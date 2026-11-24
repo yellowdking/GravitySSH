@@ -67,14 +67,6 @@ func (a *App) GetSessionMetrics(sessionID string) (models.HostMetrics, error) {
 	return a.sshMgr.GetSessionMetrics(sessionID)
 }
 
-func (a *App) WakeReconnect() error {
-	if err := a.ensureReady(); err != nil {
-		return err
-	}
-	a.sshMgr.WakeReconnect()
-	return nil
-}
-
 // SwitchTerminalIME switches Windows IME to English when enabled in settings.
 func (a *App) SwitchTerminalIME() {
 	if a.store != nil && !a.store.GetSettings().AutoSwitchEnglishIME {
