@@ -95,6 +95,7 @@ type VaultData struct {
 	Servers   []ServerConfig    `json:"servers"`
 	SSHKeys   []SSHKeyRecord    `json:"sshKeys"`
 	Shortcuts []CommandShortcut `json:"shortcuts"`
+	Templates []BuiltinTemplate `json:"templates"`
 	History   []CommandRecord   `json:"history"`
 	Settings  AppSettings       `json:"settings"`
 }
