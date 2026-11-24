@@ -1,30 +1,28 @@
 import React, { useMemo, useState } from 'react'
-import { Bookmark, Plus, Search } from 'lucide-react'
-import type { CommandShortcut } from '../types'
+import type { BuiltinTemplate, CommandShortcut } from '../types'
 import { api } from '../wailsApi'
 import { ShortcutEditorModal } from './ShortcutEditorModal'
 import { ShortcutCard } from './ShortcutCard'
+import { ShortcutTemplatesModal } from './ShortcutTemplatesModal'
+import { ShortcutsHeader } from './ShortcutsHeader'
 
 interface ShortcutsPanelProps {
   shortcuts: CommandShortcut[]
   activeSessionId?: string
   compact?: boolean
   onRunShortcut: (sc: CommandShortcut, execute: boolean) => void
+  onRunCommand?: (cmd: string, execute: boolean) => void
   onChanged: () => void
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
 
 export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
-  shortcuts,
-  activeSessionId,
-  compact = false,
-  onRunShortcut,
-  onChanged,
-  onToast,
+  shortcuts, activeSessionId, compact = false, onRunShortcut, onRunCommand, onChanged, onToast,
 }) => {
   const [search, setSearch] = useState('')
   const [selectedCat, setSelectedCat] = useState('全部')
   const [editing, setEditing] = useState<Partial<CommandShortcut> | null>(null)
+  const [templatesOpen, setTemplatesOpen] = useState(false)
 
   const categories = useMemo(() => {
     const set = new Set<string>(['全部'])
@@ -54,57 +52,41 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
     }
   }
 
+  const handleImportTemplate = async (tpl: BuiltinTemplate) => {
+    try {
+      await api.saveShortcut({
+        id: '', name: tpl.name, command: tpl.command, description: tpl.description,
+        category: tpl.category, autoExecute: true, pinned: false,
+      })
+      onChanged()
+      onToast(`已将「${tpl.name}」加入快捷命令库`)
+    } catch (err) {
+      onToast(String(err), 'error')
+    }
+  }
+
+  const handleRunTemplateNow = async (tpl: BuiltinTemplate) => {
+    if (!onRunCommand) return
+    onRunCommand(tpl.command + '\r', false)
+    onToast(`已下发运维脚本：${tpl.name}`)
+  }
+
   return (
     <div className={`flex flex-col h-full min-w-0 ${compact ? 'w-full bg-ag-sidebar' : 'flex-1 bg-ag-bg'}`}>
-      <div className="px-4 py-3 border-b border-ag-border bg-[#0f1219] space-y-2.5">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Bookmark className="w-4 h-4 text-violet-400" />
-            <span className="text-sm font-semibold text-ag-text">快捷命令库</span>
-          </div>
-          <button
-            onClick={() =>
-              setEditing({ id: '', name: '', command: '', description: '', category: '常用', autoExecute: true, pinned: false })
-            }
-            className="ag-btn-primary text-xs py-1 px-2.5"
-          >
-            <Plus className="w-3.5 h-3.5" />新建
-          </button>
-        </div>
-        <div className="relative">
-          <Search className="w-3.5 h-3.5 text-ag-subtle absolute left-2.5 top-1/2 -translate-y-1/2" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="搜索快捷命令名称或内容..."
-            className="w-full rounded-lg bg-[#0b0d12] border border-ag-border pl-8 pr-2.5 py-1.5 text-xs text-ag-text placeholder:text-ag-subtle focus:outline-none focus:border-violet-500/50"
-          />
-        </div>
-        <div className="flex items-center gap-1 overflow-x-auto pb-0.5">
-          {categories.map((cat) => (
-            <button
-              key={cat}
-              onClick={() => setSelectedCat(cat)}
-              className={`px-2 py-0.5 rounded-md text-[11px] whitespace-nowrap transition ${
-                selectedCat === cat
-                  ? 'bg-violet-500/20 text-violet-200 border border-violet-500/35'
-                  : 'text-ag-muted hover:text-ag-text bg-ag-panel border border-transparent'
-              }`}
-            >
-              {cat}
-            </button>
-          ))}
-        </div>
-      </div>
+      <ShortcutsHeader
+        search={search}
+        categories={categories}
+        selectedCat={selectedCat}
+        onSearchChange={setSearch}
+        onSelectCat={setSelectedCat}
+        onOpenTemplates={() => setTemplatesOpen(true)}
+        onNewShortcut={() => setEditing({ id: '', name: '', command: '', description: '', category: '常用', autoExecute: true, pinned: false })}
+      />
 
-      <div
-        className={`flex-1 overflow-y-auto p-3 ${
-          compact ? 'space-y-2' : 'grid grid-cols-1 md:grid-cols-2 gap-3 content-start max-w-5xl w-full mx-auto'
-        }`}
-      >
+      <div className={`flex-1 overflow-y-auto p-3 ${compact ? 'space-y-2' : 'grid grid-cols-1 md:grid-cols-2 gap-3 content-start max-w-5xl w-full mx-auto'}`}>
         {filtered.length === 0 ? (
           <div className="col-span-full py-14 text-center text-xs text-ag-subtle">
-            没有找到快捷命令，您可以点击右上角新建，或从「命令历史」勾选保存
+            没有找到快捷命令，您可以点击右上角新建、导入「运维模板」，或从「命令历史」勾选保存
           </div>
         ) : (
           filtered.map((sc) => (
@@ -112,16 +94,11 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
               key={sc.id}
               sc={sc}
               hasActiveSession={!!activeSessionId}
-              onTogglePin={() => {
-                void api.saveShortcut({ ...sc, pinned: !sc.pinned }).then(onChanged)
-              }}
+              onTogglePin={() => { void api.saveShortcut({ ...sc, pinned: !sc.pinned }).then(onChanged) }}
               onEdit={() => setEditing(sc)}
               onDelete={() => {
                 if (window.confirm(`确定删除快捷命令 "${sc.name}" 吗？`)) {
-                  void api.deleteShortcut(sc.id).then(() => {
-                    onChanged()
-                    onToast(`已删除快捷命令 ${sc.name}`)
-                  })
+                  void api.deleteShortcut(sc.id).then(() => { onChanged(); onToast(`已删除快捷命令 ${sc.name}`) })
                 }
               }}
               onRun={(exec) => onRunShortcut(sc, exec)}
@@ -130,13 +107,8 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
         )}
       </div>
 
-      <ShortcutEditorModal
-        open={!!editing}
-        initial={editing}
-        title={editing?.id ? '编辑快捷命令' : '新建快捷命令'}
-        onClose={() => setEditing(null)}
-        onSubmit={handleSave}
-      />
+      <ShortcutEditorModal open={!!editing} initial={editing} title={editing?.id ? '编辑快捷命令' : '新建快捷命令'} onClose={() => setEditing(null)} onSubmit={handleSave} />
+      <ShortcutTemplatesModal open={templatesOpen} hasActiveSession={!!activeSessionId} onClose={() => setTemplatesOpen(false)} onImport={handleImportTemplate} onRunNow={onRunCommand ? handleRunTemplateNow : undefined} />
     </div>
   )
 }
