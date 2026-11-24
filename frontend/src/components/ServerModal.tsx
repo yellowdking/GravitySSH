@@ -19,7 +19,13 @@ interface ServerModalProps {
 }
 
 export const ServerModal: React.FC<ServerModalProps> = ({
-  open, editingServer, allServers, sshKeys, onClose, onSaved, onGoToKeyVault,
+  open,
+  editingServer,
+  allServers,
+  sshKeys,
+  onClose,
+  onSaved,
+  onGoToKeyVault,
 }) => {
   const [tab, setTab] = useState<'basic' | 'proxy' | 'jump' | 'advanced'>('basic')
   const [form, setForm] = useState<ServerSaveRequest>(() => makeInitialServerForm(editingServer))
@@ -38,6 +44,7 @@ export const ServerModal: React.FC<ServerModalProps> = ({
   }, [open, editingServer])
 
   if (!open) return null
+
   const availableJumpServers = allServers.filter((s) => s.id !== editingServer?.id)
 
   const handleSave = async (e: React.FormEvent) => {
@@ -60,7 +67,8 @@ export const ServerModal: React.FC<ServerModalProps> = ({
     setTestMsg(null)
     setError('')
     try {
-      setTestMsg({ ok: true, text: await api.testServerConnection(form) })
+      const msg = await api.testServerConnection(form)
+      setTestMsg({ ok: true, text: msg })
     } catch (err) {
       setTestMsg({ ok: false, text: String(err) })
     } finally {
@@ -83,14 +91,24 @@ export const ServerModal: React.FC<ServerModalProps> = ({
               <p className="text-[11px] text-ag-muted">支持密码 / 加密 SSH 密钥 / SOCKS5 & HTTP 代理 / 多级跳板机</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text"><X className="w-4 h-4" /></button>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text">
+            <X className="w-4 h-4" />
+          </button>
         </div>
 
         <div className="px-5 pt-3 border-b border-ag-border flex items-center gap-1 bg-[#11151f]/60">
           {[
             { id: 'basic', label: '基本与认证', icon: <KeyRound className="w-3.5 h-3.5" /> },
-            { id: 'proxy', label: `代理${form.proxy.type !== 'none' ? ` (${form.proxy.type.toUpperCase()})` : ''}`, icon: <Globe className="w-3.5 h-3.5" /> },
-            { id: 'jump', label: `跳板机${form.jumpHost.mode !== 'none' ? ' (已启用)' : ''}`, icon: <Waypoints className="w-3.5 h-3.5" /> },
+            {
+              id: 'proxy',
+              label: `代理${form.proxy.type !== 'none' ? ` (${form.proxy.type.toUpperCase()})` : ''}`,
+              icon: <Globe className="w-3.5 h-3.5" />,
+            },
+            {
+              id: 'jump',
+              label: `跳板机${form.jumpHost.mode !== 'none' ? ' (已启用)' : ''}`,
+              icon: <Waypoints className="w-3.5 h-3.5" />,
+            },
             { id: 'advanced', label: '高级选项', icon: <Sliders className="w-3.5 h-3.5" /> },
           ].map((t) => (
             <button
@@ -98,7 +116,9 @@ export const ServerModal: React.FC<ServerModalProps> = ({
               type="button"
               onClick={() => setTab(t.id as typeof tab)}
               className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-t-lg border-b-2 transition ${
-                tab === t.id ? 'border-indigo-400 text-indigo-200 bg-ag-panel' : 'border-transparent text-ag-muted hover:text-ag-text'
+                tab === t.id
+                  ? 'border-indigo-400 text-indigo-200 bg-ag-panel'
+                  : 'border-transparent text-ag-muted hover:text-ag-text'
               }`}
             >
               {t.icon}
@@ -108,14 +128,43 @@ export const ServerModal: React.FC<ServerModalProps> = ({
         </div>
 
         <form onSubmit={handleSave} className="flex-1 overflow-y-auto p-5 space-y-4">
-          {tab === 'basic' && <ServerBasicTab form={form} editingServer={editingServer} sshKeys={sshKeys} onChange={setForm} onGoToKeyVault={() => { onClose(); onGoToKeyVault() }} />}
+          {tab === 'basic' && (
+            <ServerBasicTab
+              form={form}
+              editingServer={editingServer}
+              sshKeys={sshKeys}
+              onChange={setForm}
+              onGoToKeyVault={() => {
+                onClose()
+                onGoToKeyVault()
+              }}
+            />
+          )}
           {tab === 'proxy' && <ServerProxyTab form={form} editingServer={editingServer} onChange={setForm} />}
-          {tab === 'jump' && <ServerJumpTab form={form} editingServer={editingServer} availableJumpServers={availableJumpServers} sshKeys={sshKeys} onChange={setForm} />}
+          {tab === 'jump' && (
+            <ServerJumpTab
+              form={form}
+              editingServer={editingServer}
+              availableJumpServers={availableJumpServers}
+              sshKeys={sshKeys}
+              onChange={setForm}
+            />
+          )}
           {tab === 'advanced' && <ServerAdvancedTab form={form} onChange={setForm} />}
 
           {testMsg && (
-            <div className={`flex items-start gap-2 p-3 rounded-xl text-xs border ${testMsg.ok ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' : 'bg-rose-500/10 border-rose-500/30 text-rose-300'}`}>
-              {testMsg.ok ? <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" /> : <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />}
+            <div
+              className={`flex items-start gap-2 p-3 rounded-xl text-xs border ${
+                testMsg.ok
+                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                  : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+              }`}
+            >
+              {testMsg.ok ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+              ) : (
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              )}
               <span className="break-all">{testMsg.text}</span>
             </div>
           )}
