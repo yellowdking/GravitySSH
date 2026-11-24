@@ -34,8 +34,8 @@
 
 前往右侧 **[Releases](https://github.com/yellowdking/GravitySSH/releases)** 页面下载最新版本的：
 
-- `GravitySSH.exe`（单文件绿色便携版，双击即用，无需安装，升级直接覆盖即可）
-- `GravitySSH-portable.zip`
+- `GravitySSH-vX.Y.Z-windows-amd64.exe`（单文件绿色便携版，双击即用，无需安装）
+- `GravitySSH-vX.Y.Z-windows-amd64-portable.zip`
 
 > 运行环境：Windows 10 / Windows 11 (x64)，内置 WebView2 运行时（Windows 11 默认自带）。
 
