@@ -54,6 +54,7 @@ export const SettingsToggles: React.FC<Props> = ({ draft, patch }) => (
         <Terminal className="w-3.5 h-3.5" />终端安全、高亮与外观
       </div>
       <div className="rounded-xl bg-[#0d1017] border border-ag-border divide-y divide-ag-border/70">
+        <ToggleRow label="SSH 终端自动切换英文输入法" sub="进入、点击或切回 SSH 终端时自动切为英文，避免误输中文拼音（仍可手动按 Shift 切回中文）" checked={draft.autoSwitchEnglishIme} onChange={(v) => patch({ autoSwitchEnglishIme: v })} />
         <ToggleRow label="粘贴安全防护" sub="粘贴高危命令、curl|sh、隐藏/同形字符或非括号多行时弹窗确认" checked={draft.pasteGuardEnabled} onChange={(v) => patch({ pasteGuardEnabled: v })} />
         <ToggleRow label="终端日志关键词高亮" sub="自动为 error / warning / ok / IPv4 着色（nano/vim 全屏自动暂停）" checked={draft.keywordHighlightEnabled} onChange={(v) => patch({ keywordHighlightEnabled: v })} />
       </div>
