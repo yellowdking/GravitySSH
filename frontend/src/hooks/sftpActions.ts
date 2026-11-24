@@ -12,10 +12,20 @@ interface SftpActionDeps {
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
 
+const inFlightPaths = new Set<string>()
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
 export function createSftpActions(d: SftpActionDeps) {
+  const lockKey = (path: string) => `${d.sessionId}\0${path}`
   const withBusy = async (path: string, fn: () => Promise<void>) => {
+    const key = lockKey(path)
+    if (inFlightPaths.has(key)) return
+    inFlightPaths.add(key)
     d.setBusyPath(path)
-    try { await fn() } finally { d.setBusyPath(null) }
+    try { await fn() } finally { inFlightPaths.delete(key); d.setBusyPath(null) }
   }
 
   return {
@@ -89,17 +99,32 @@ export function createSftpActions(d: SftpActionDeps) {
       catch (err) { d.onToast(`创建目录失败: ${err}`, 'error') }
     },
     handleRename: async (entry: SFTPFileEntry) => {
+      if (inFlightPaths.has(lockKey(entry.path))) return
       const nextName = window.prompt('重命名为：', entry.name)
-      if (!nextName?.trim() || nextName.trim() === entry.name) return
-      const base = d.currentPath === '/' ? '' : d.currentPath
-      try { await api.sftpRename(d.sessionId, entry.path, `${base}/${nextName.trim()}`); d.onToast(`已重命名为 ${nextName.trim()}`); void d.loadDir(d.currentPath) }
-      catch (err) { d.onToast(`重命名失败: ${err}`, 'error') }
+      const trimmed = nextName?.trim()
+      if (!trimmed || trimmed === entry.name) return
+      if (trimmed.includes('/')) { d.onToast('重命名失败: 名称不能包含 "/"', 'error'); return }
+      const slash = entry.path.lastIndexOf('/')
+      const parent = slash > 0 ? entry.path.slice(0, slash) : (slash === 0 ? '' : (d.currentPath === '/' ? '' : d.currentPath))
+      await withBusy(entry.path, async () => {
+        try {
+          await api.sftpRename(d.sessionId, entry.path, `${parent}/${trimmed}`)
+          d.onToast(`已重命名为 ${trimmed}`)
+          await d.loadDir(d.currentPath)
+        } catch (err) { d.onToast(`重命名失败: ${errMsg(err)}`, 'error') }
+      })
     },
     handleDelete: async (entry: SFTPFileEntry) => {
+      if (inFlightPaths.has(lockKey(entry.path))) return
       const tip = entry.isDir ? `目录 "${entry.name}" 及其所有内容` : `文件 "${entry.name}"`
       if (!window.confirm(`确定要永久删除远程 ${tip} 吗？`)) return
-      try { await api.sftpDelete(d.sessionId, entry.path); d.onToast(`已删除 ${entry.name}`); void d.loadDir(d.currentPath) }
-      catch (err) { d.onToast(`删除失败: ${err}`, 'error') }
+      await withBusy(entry.path, async () => {
+        try {
+          await api.sftpDelete(d.sessionId, entry.path)
+          d.onToast(`已删除 ${entry.name}`)
+          await d.loadDir(d.currentPath)
+        } catch (err) { d.onToast(`删除失败: ${errMsg(err)}`, 'error') }
+      })
     },
   }
 }
