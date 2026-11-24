@@ -20,6 +20,11 @@ type EventSink interface {
 	Emit(eventName string, data ...any)
 }
 
+type dirCacheEntry struct {
+	entries   []models.SFTPFileEntry
+	fetchedAt time.Time
+}
+
 type sessionState struct {
 	mu         sync.Mutex
 	info       models.SessionInfo
@@ -30,6 +35,10 @@ type sessionState struct {
 	recorder   *CommandRecorder
 	stopCh     chan struct{}
 	closed     bool
+	lastCols   int
+	lastRows   int
+	currentDir string
+	dirCache   map[string]dirCacheEntry
 }
 
 type Manager struct {
@@ -159,12 +168,16 @@ func (m *Manager) Connect(ctx context.Context, serverID string, cols, rows int) 
 			Status:     "connecting",
 			CreatedAt:  time.Now(),
 		},
-		stopCh: make(chan struct{}),
+		stopCh:   make(chan struct{}),
+		lastCols: cols,
+		lastRows: rows,
+		dirCache: make(map[string]dirCacheEntry),
 	}
 
 	sess.recorder = NewCommandRecorder(func(cmd string) {
-		rec, err := m.store.RecordCommand(srv.ID, srv.Name, sessionID, cmd)
-		if err == nil && rec != nil {
+		m.updateCWDFromCommand(sess, cmd)
+		rec, recErr := m.store.RecordCommand(srv.ID, srv.Name, sessionID, cmd)
+		if recErr == nil && rec != nil {
 			m.emit("command:recorded", rec)
 		}
 	})
