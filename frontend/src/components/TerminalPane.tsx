@@ -1,11 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type { AppSettings, CompletionItem, SessionInfo } from '../types'
+import type { PasteInspection } from '../utils/pasteGuard'
 import { api } from '../wailsApi'
 import { computeCompletionInsert } from '../utils/autocomplete'
 import { useTerminalInstance } from '../hooks/useTerminalInstance'
 import { TerminalToolbar } from './TerminalToolbar'
 import { TerminalSearchBar } from './TerminalSearchBar'
 import { AutocompletePopup } from './AutocompletePopup'
+import { MonitorBar } from './MonitorBar'
+import { PasteGuardModal } from './PasteGuardModal'
 
 interface TerminalPaneProps {
   session: SessionInfo
@@ -28,6 +31,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   const [selectedIdx, setSelectedIdx] = useState(0)
   const [showSearch, setShowSearch] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
+  const [pendingPaste, setPendingPaste] = useState<{ text: string; inspection: PasteInspection } | null>(null)
 
   const suggestionsRef = useRef(suggestions); suggestionsRef.current = suggestions
   const selectedIdxRef = useRef(selectedIdx); selectedIdxRef.current = selectedIdx
@@ -45,7 +49,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
 
   useEffect(() => { if (!settings.autocompleteEnabled) setSuggestions([]) }, [settings.autocompleteEnabled])
 
-  const { containerRef, termRef, searchAddonRef, pasteText } = useTerminalInstance({
+  const { containerRef, termRef, searchAddonRef, pasteText, commitPaste } = useTerminalInstance({
     sessionId: session.sessionId,
     status: session.status,
     active,
@@ -66,6 +70,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       if (chosen) void applySuggestion(chosen)
     },
     onOpenSearch: () => setShowSearch(true),
+    onPasteGuard: (text, inspection) => setPendingPaste({ text, inspection }),
   })
 
   const applySuggestion = useCallback(async (item: CompletionItem) => {
@@ -114,6 +119,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           }
         }}
       />
+      <MonitorBar sessionId={session.sessionId} status={session.status} active={active} enabled={settings.monitorBarEnabled} />
       {settings.autocompleteEnabled && (
         <AutocompletePopup
           suggestions={suggestions}
@@ -122,6 +128,14 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           onApply={(item) => void applySuggestion(item)}
         />
       )}
+      <PasteGuardModal
+        open={!!pendingPaste}
+        initialText={pendingPaste?.text || ''}
+        warnings={pendingPaste?.inspection.warnings || []}
+        hasHiddenChars={!!pendingPaste?.inspection.hasHiddenChars}
+        onConfirm={(finalText) => { setPendingPaste(null); commitPaste(finalText) }}
+        onCancel={() => { setPendingPaste(null); termRef.current?.focus() }}
+      />
     </div>
   )
 }
