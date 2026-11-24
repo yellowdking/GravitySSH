@@ -3,6 +3,7 @@ import { Settings, X } from 'lucide-react'
 import type { AppSettings, UpdateCheckResult, VaultLockState, VaultSecurityInfo } from '../types'
 import { api } from '../wailsApi'
 import { SettingsToggles } from './SettingsToggles'
+import { SshCacheSection } from './SshCacheSection'
 import { VaultPasswordSection } from './VaultPasswordSection'
 import { UpdateCheckSection } from './UpdateCheckSection'
 
@@ -61,6 +62,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
           <SettingsToggles draft={draft} patch={patch} />
           <UpdateCheckSection appVersion={appVersion} updateInfo={updateInfo} checkOnStartup={draft.checkUpdatesOnStartup} onToggleCheckOnStartup={(v) => patch({ checkUpdatesOnStartup: v })} onUpdateFound={onUpdateFound} onToast={onToast} />
+          <SshCacheSection onToast={onToast} />
           <VaultPasswordSection securityInfo={securityInfo} lockState={lockState} onLockStateChanged={onLockStateChanged} onToast={onToast} />
         </div>
 
