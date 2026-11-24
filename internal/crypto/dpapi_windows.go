@@ -50,10 +50,13 @@ func (b *dataBlob) toBytes() []byte {
 	return out
 }
 
+// windowsDPAPIProtector binds wrapped keys to the current Windows user,
+// current Windows machine (DPAPI + HKLM MachineGuid), and GravitySSH app entropy.
 type windowsDPAPIProtector struct {
 	entropy []byte
 }
 
+// NewDefaultProtector returns the platform-native DPAPI key protector on Windows.
 func NewDefaultProtector() KeyProtector {
 	return &windowsDPAPIProtector{
 		entropy: deriveAppMachineEntropy(),
@@ -74,6 +77,8 @@ func readMachineGUID() string {
 }
 
 func deriveAppMachineEntropy() []byte {
+	// App-internal secret combined with Windows MachineGuid via HKDF-SHA256.
+	// Even another program running under the same user cannot unwrap without this exact entropy derivation.
 	appSecret := []byte("GravitySSH::DPAPI::AppBoundEntropy::v1::9f3e7b1c4a82d605")
 	salt := []byte(readMachineGUID())
 	info := []byte("GravitySSH-Vault-DPAPI-OptionalEntropy-v1")

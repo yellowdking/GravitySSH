@@ -17,6 +17,7 @@ var (
 	ErrInvalidKey         = errors.New("无法解析 SSH 私钥格式")
 )
 
+// ParsedKeyInfo holds non-sensitive metadata extracted from a valid private key.
 type ParsedKeyInfo struct {
 	KeyType     string
 	Fingerprint string
@@ -24,6 +25,7 @@ type ParsedKeyInfo struct {
 	Signer      ssh.Signer
 }
 
+// ParsePrivateKey validates and parses a private key PEM (with optional passphrase).
 func ParsePrivateKey(pemContent string, passphrase string) (*ParsedKeyInfo, error) {
 	trimmed := strings.TrimSpace(pemContent)
 	if trimmed == "" {
@@ -60,6 +62,7 @@ func ParsePrivateKey(pemContent string, passphrase string) (*ParsedKeyInfo, erro
 	}, nil
 }
 
+// GenerateKeyPair generates a new Ed25519 or RSA (4096-bit) key pair in OpenSSH format.
 func GenerateKeyPair(algorithm string, comment string, passphrase string) (privatePEM string, info *ParsedKeyInfo, err error) {
 	var priv any
 	switch strings.ToLower(strings.TrimSpace(algorithm)) {
@@ -95,7 +98,9 @@ func GenerateKeyPair(algorithm string, comment string, passphrase string) (priva
 		return "", nil, fmt.Errorf("marshal openssh private key: %w", err)
 	}
 
-	pemStr := string(pem.EncodeToMemory(block))
+	pemBytes := pem.EncodeToMemory(block)
+	pemStr := string(pemBytes)
+
 	parsed, err := ParsePrivateKey(pemStr, passphrase)
 	if err != nil {
 		return "", nil, err
