@@ -143,6 +143,20 @@ export interface VaultSecurityInfo {
   serverCount: number
 }
 
+export interface VaultLockState {
+  locked: boolean
+  hasPassword: boolean
+  vaultPath: string
+  schemaVersion: number
+}
+
+export interface KeyDeployResult {
+  serverId: string
+  serverName: string
+  ok: boolean
+  message: string
+}
+
 export interface SFTPFileEntry {
   name: string
   path: string
@@ -192,7 +206,7 @@ export interface CompletionItem {
   command: string
   description: string
   category: string
-  source: 'builtin' | 'shortcut' | 'history'
+  source: 'builtin' | 'shortcut' | 'history' | 'dir' | 'file'
   insertText: string
   score: number
 }
