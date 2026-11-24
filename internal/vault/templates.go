@@ -5,7 +5,7 @@ import "github.com/yellowdking/GravitySSH/internal/models"
 // BuiltinOpsTemplates returns curated, safety-hardened VPS initialization & ops shortcuts
 // (BBR, SWAP, mirror switch, Docker install, safe SSH port change with rollback).
 func BuiltinOpsTemplates() []models.BuiltinTemplate {
-	return []models.BuiltinTemplate{
+	list := []models.BuiltinTemplate{
 		{
 			ID:          "tpl-bbr",
 			Name:        "开启 BBR 网络加速",
@@ -112,4 +112,8 @@ echo ">>> 请立即新建会话测试新端口 ${NEW_PORT}！确认可连上后�
 echo ">>> 10 分钟内未确认将自动回滚至旧端口 ${OLD_PORT}。"`,
 		},
 	}
+	for i := range list {
+		list[i].PresetID = list[i].ID
+	}
+	return list
 }
