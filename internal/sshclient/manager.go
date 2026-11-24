@@ -27,6 +27,7 @@ type dirCacheEntry struct {
 
 type sessionState struct {
 	mu         sync.Mutex
+	writeMu    sync.Mutex
 	info       models.SessionInfo
 	dialRes    *DialResult
 	sshSession *ssh.Session

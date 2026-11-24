@@ -3,6 +3,8 @@ package main
 import (
 	"embed"
 	"log"
+	"os"
+	"path/filepath"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -11,10 +13,22 @@ import (
 )
 
 // AppVersion can be overridden at build time via -ldflags "-X main.AppVersion=..."
-var AppVersion = "1.1.1"
+var AppVersion = "1.1.2"
 
 //go:embed all:frontend/dist
 var assets embed.FS
+
+func resolveWebviewUserDataPath() string {
+	cfgDir, err := os.UserConfigDir()
+	if err != nil || cfgDir == "" {
+		return ""
+	}
+	dir := filepath.Join(cfgDir, "GravitySSH")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return ""
+	}
+	return dir
+}
 
 func main() {
 	app := NewApp()
@@ -41,6 +55,7 @@ func main() {
 		Windows: &windows.Options{
 			WebviewIsTransparent: false,
 			WindowIsTranslucent:  false,
+			WebviewUserDataPath:  resolveWebviewUserDataPath(),
 			Theme:                windows.Dark,
 			CustomTheme: &windows.ThemeSettings{
 				DarkModeTitleBar:   windows.RGB(16, 19, 26),
