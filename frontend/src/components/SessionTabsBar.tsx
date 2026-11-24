@@ -1,11 +1,13 @@
 import React from 'react'
-import { Terminal, X } from 'lucide-react'
-import type { SessionInfo } from '../types'
+import { ArrowUpCircle, Terminal, X } from 'lucide-react'
+import type { SessionInfo, UpdateCheckResult } from '../types'
+import { api } from '../wailsApi'
 
 interface Props {
   sessions: SessionInfo[]
   activeSessionId: string | null
   isServersView: boolean
+  updateInfo: UpdateCheckResult | null
   onSelectSession: (sessionId: string) => void
   onCloseSession: (sessionId: string) => void
 }
@@ -14,17 +16,18 @@ export const SessionTabsBar: React.FC<Props> = ({
   sessions,
   activeSessionId,
   isServersView,
+  updateInfo,
   onSelectSession,
   onCloseSession,
 }) => (
-  <div className="h-10 bg-[#0d1017] border-b border-ag-border flex items-center justify-between px-2 shrink-0 select-none">
+  <div className="h-10 bg-[#0d1017] border-b border-ag-border flex items-center justify-between px-2 gap-2 shrink-0 select-none">
     <div className="flex items-center gap-1 overflow-x-auto min-w-0 flex-1">
       {sessions.map((sess) => {
         const isSelected = isServersView && activeSessionId === sess.sessionId
         const dotCls =
           sess.status === 'connected'
             ? 'bg-emerald-400'
-            : sess.status === 'connecting'
+            : sess.status === 'connecting' || sess.status === 'reconnecting'
             ? 'bg-amber-400 animate-pulse'
             : 'bg-rose-400'
         return (
@@ -58,5 +61,17 @@ export const SessionTabsBar: React.FC<Props> = ({
         </div>
       )}
     </div>
+
+    {updateInfo?.hasUpdate && (
+      <button
+        type="button"
+        onClick={() => void api.openExternalURL(updateInfo.releaseUrl || updateInfo.downloadUrl)}
+        title={`发现新版本 v${updateInfo.latestVersion}，点击前往 GitHub 下载`}
+        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-300 text-[11px] font-medium shrink-0 transition"
+      >
+        <ArrowUpCircle className="w-3.5 h-3.5" />
+        <span>新版本 v{updateInfo.latestVersion}</span>
+      </button>
+    )}
   </div>
 )
