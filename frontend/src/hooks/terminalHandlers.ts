@@ -24,13 +24,11 @@ export function createConfiguredTerminal(el: HTMLDivElement, settings: AppSettin
     theme: ANTIGRAVITY_TERM_THEME,
   })
   const fit = new FitAddon()
-  const links = new WebLinksAddon()
   const searchAddon = new SearchAddon()
-  const unicode11 = new Unicode11Addon()
   term.loadAddon(fit)
-  term.loadAddon(links)
+  term.loadAddon(new WebLinksAddon())
   term.loadAddon(searchAddon)
-  term.loadAddon(unicode11)
+  term.loadAddon(new Unicode11Addon())
   term.unicode.activeVersion = '11'
   term.open(el)
   fit.fit()
@@ -89,34 +87,98 @@ export function attachTerminalInputHandlers(d: HandlerDeps) {
   })
 }
 
+export function syncTerminalImeAttrs(term: Terminal | null, enabled: boolean) {
+  const ta = term?.textarea
+  if (!ta) return
+  if (enabled) {
+    ta.setAttribute('inputmode', 'url')
+    ta.setAttribute('lang', 'en')
+    ta.setAttribute('autocapitalize', 'off')
+    ta.setAttribute('spellcheck', 'false')
+  } else {
+    ta.removeAttribute('inputmode')
+    ta.removeAttribute('lang')
+  }
+}
+
+export interface TerminalImeGuard {
+  trigger: (force?: boolean) => void
+  detach: () => void
+}
+
 export function attachTerminalImeGuard(
+  el: HTMLElement,
   term: Terminal,
   isActive: () => boolean,
   isEnabled: () => boolean
-): () => void {
+): TerminalImeGuard {
+  const ta = term.textarea
+  syncTerminalImeAttrs(term, isEnabled())
+
   let lastTrigger = 0
-  const trigger = () => {
+  let retryTimer: ReturnType<typeof setTimeout> | null = null
+  let isComposing = false
+  let refocusing = false
+
+  const clearRetry = () => {
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null }
+  }
+
+  const trigger = (force = false) => {
     if (!isActive() || !isEnabled()) return
     const now = Date.now()
-    if (now - lastTrigger < 120) return
+    if (!force && now - lastTrigger < 100) return
     lastTrigger = now
     void api.switchTerminalIme().catch(() => {})
+    clearRetry()
+    retryTimer = setTimeout(() => {
+      retryTimer = null
+      if (isActive() && isEnabled() && !isComposing) void api.switchTerminalIme().catch(() => {})
+    }, 80)
+  }
+
+  const isOtherInput = () => {
+    const a = document.activeElement
+    return Boolean(a && a !== ta && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || (a as HTMLElement).isContentEditable))
+  }
+
+  const onFocus = () => { if (!refocusing) trigger() }
+  const onCompStart = () => { isComposing = true }
+  const onCompEnd = () => { isComposing = false }
+
+  const onPointerDown = () => {
+    if (!isActive() || !isEnabled() || isComposing) return
+    if (!ta || document.activeElement !== ta) trigger(true)
   }
 
   const onWindowFocus = () => {
-    const activeEl = document.activeElement
-    const isOtherInput =
-      activeEl &&
-      activeEl !== term.textarea &&
-      (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || (activeEl as HTMLElement).isContentEditable)
-    if (!isOtherInput) trigger()
+    if (!isActive() || !isEnabled() || isComposing || isOtherInput()) return
+    if (ta && document.activeElement === ta && !refocusing) {
+      refocusing = true
+      try { ta.blur(); ta.focus({ preventScroll: true }) } finally { refocusing = false }
+    }
+    trigger(true)
   }
 
-  const ta = term.textarea
-  ta?.addEventListener('focus', trigger)
+  const onVis = () => { if (!document.hidden) onWindowFocus() }
+
+  ta?.addEventListener('focus', onFocus)
+  ta?.addEventListener('compositionstart', onCompStart)
+  ta?.addEventListener('compositionend', onCompEnd)
+  el.addEventListener('pointerdown', onPointerDown, true)
   window.addEventListener('focus', onWindowFocus)
-  return () => {
-    ta?.removeEventListener('focus', trigger)
-    window.removeEventListener('focus', onWindowFocus)
+  document.addEventListener('visibilitychange', onVis)
+
+  return {
+    trigger,
+    detach: () => {
+      clearRetry()
+      ta?.removeEventListener('focus', onFocus)
+      ta?.removeEventListener('compositionstart', onCompStart)
+      ta?.removeEventListener('compositionend', onCompEnd)
+      el.removeEventListener('pointerdown', onPointerDown, true)
+      window.removeEventListener('focus', onWindowFocus)
+      document.removeEventListener('visibilitychange', onVis)
+    },
   }
 }
