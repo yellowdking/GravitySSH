@@ -10,10 +10,12 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
+
+	"github.com/yellowdking/GravitySSH/internal/dpi"
 )
 
 // AppVersion can be overridden at build time via -ldflags "-X main.AppVersion=..."
-var AppVersion = "1.2.3"
+var AppVersion = "1.2.4"
 
 //go:embed all:frontend/dist
 var assets embed.FS
@@ -31,6 +33,7 @@ func resolveWebviewUserDataPath() string {
 }
 
 func main() {
+	dpi.EnablePerMonitorV2()
 	app := NewApp()
 
 	err := wails.Run(&options.App{
@@ -55,6 +58,7 @@ func main() {
 		Windows: &windows.Options{
 			WebviewIsTransparent: false,
 			WindowIsTranslucent:  false,
+			DisablePinchZoom:     true,
 			WebviewUserDataPath:  resolveWebviewUserDataPath(),
 			Theme:                windows.Dark,
 			CustomTheme: &windows.ThemeSettings{
