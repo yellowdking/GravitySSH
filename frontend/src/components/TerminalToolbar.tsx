@@ -30,7 +30,7 @@ export const TerminalToolbar: React.FC<Props> = ({
   const statusColor =
     session.status === 'connected'
       ? 'bg-emerald-400'
-      : session.status === 'connecting' || session.status === 'reconnecting'
+      : session.status === 'connecting'
       ? 'bg-amber-400 animate-pulse'
       : 'bg-rose-400'
 
@@ -50,11 +50,6 @@ export const TerminalToolbar: React.FC<Props> = ({
       </div>
 
       <div className="flex items-center gap-1 shrink-0">
-        {session.status === 'reconnecting' && (
-          <span className="text-[11px] px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 shrink-0">
-            自动重连中...
-          </span>
-        )}
         {(session.status === 'disconnected' || session.status === 'error') && (
           <button
             onClick={() => onReconnect(session.serverId)}
