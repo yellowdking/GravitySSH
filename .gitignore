@@ -8,6 +8,11 @@ frontend/node_modules/
 *.tmp
 *.syso
 
+# Downloaded web fonts (fetched deterministically by scripts/fetch_fonts.py)
+frontend/public/fonts/*.woff2
+frontend/public/fonts/*.ttf
+frontend/public/fonts/*.otf
+
 # IDE & OS
 .DS_Store
 Thumbs.db
