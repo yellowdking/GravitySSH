@@ -1,5 +1,5 @@
 import React from 'react'
-import { Lock, Terminal, X } from 'lucide-react'
+import { Terminal, X } from 'lucide-react'
 import type { SessionInfo } from '../types'
 
 interface Props {
@@ -58,9 +58,5 @@ export const SessionTabsBar: React.FC<Props> = ({
         </div>
       )}
     </div>
-    <span className="hidden lg:inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 shrink-0 ml-2">
-      <Lock className="w-3 h-3" />
-      DPAPI 保险库已锁定本机
-    </span>
   </div>
 )
