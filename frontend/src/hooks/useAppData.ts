@@ -26,7 +26,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   recordCommands: true,
   language: 'zh',
   monitorBarEnabled: true,
-  autoReconnect: true,
   sftpFollowTerminal: true,
   pasteGuardEnabled: true,
   keywordHighlightEnabled: true,
@@ -42,7 +41,7 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
   const [securityInfo, setSecurityInfo] = useState<VaultSecurityInfo | null>(null)
   const [lockState, setLockState] = useState<VaultLockState | null>(null)
-  const [appVersion, setAppVersion] = useState('1.2.3')
+  const [appVersion, setAppVersion] = useState('1.2.4')
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null)
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
@@ -89,22 +88,6 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
     }, 2500)
     return () => { cancelled = true; clearTimeout(t) }
   }, [settings.checkUpdatesOnStartup, lockState?.locked])
-
-  // Immediately wake auto-reconnect when network returns or Windows wakes from sleep
-  useEffect(() => {
-    const onOnline = () => { void api.wakeReconnect().catch(() => {}) }
-    window.addEventListener('online', onOnline)
-    let lastTick = Date.now()
-    const id = setInterval(() => {
-      const now = Date.now()
-      if (now - lastTick > 15000) void api.wakeReconnect().catch(() => {})
-      lastTick = now
-    }, 5000)
-    return () => {
-      window.removeEventListener('online', onOnline)
-      clearInterval(id)
-    }
-  }, [])
 
   useEffect(() => {
     const unsubStatus = api.onEvent<SessionInfo>('session:status', (info) => {
