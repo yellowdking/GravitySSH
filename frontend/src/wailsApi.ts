@@ -70,6 +70,7 @@ export const api = {
   getCurrentInputLine: (sessionId: string) => callGo<string>('GetCurrentInputLine', sessionId),
   getSessionMetrics: (sessionId: string) => callGo<HostMetrics>('GetSessionMetrics', sessionId),
   wakeReconnect: () => callGo<void>('WakeReconnect'),
+  switchTerminalIme: () => callGo<void>('SwitchTerminalIME'),
 
   // History & Shortcuts
   listCommandHistory: (serverId: string, limit: number) =>
