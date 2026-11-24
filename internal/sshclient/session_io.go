@@ -2,9 +2,7 @@ package sshclient
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
-	"io"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -13,19 +11,33 @@ import (
 )
 
 func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv *models.ServerConfig, cols, rows int) {
-	m.sendTerminalText(sess.info.SessionID, fmt.Sprintf("\x1b[38;5;105m● 正在连接 %s (%s@%s:%d)...\x1b[0m\r\n", srv.Name, srv.Username, srv.Host, defaultPort(srv.Port)))
+	m.establishOnce(ctx, sess, srv, cols, rows, false)
+}
+
+func (m *Manager) establishOnce(ctx context.Context, sess *sessionState, srv *models.ServerConfig, cols, rows int, isReconnect bool) bool {
+	if isReconnect {
+		m.sendTerminalText(sess.info.SessionID, fmt.Sprintf("\x1b[38;5;105m● 正在重新连接 %s (%s@%s:%d)...\x1b[0m\r\n", srv.Name, srv.Username, srv.Host, defaultPort(srv.Port)))
+	} else {
+		m.sendTerminalText(sess.info.SessionID, fmt.Sprintf("\x1b[38;5;105m● 正在连接 %s (%s@%s:%d)...\x1b[0m\r\n", srv.Name, srv.Username, srv.Host, defaultPort(srv.Port)))
+	}
 
 	dialRes, err := DialServer(ctx, srv, m.store)
 	if err != nil {
+		if isReconnect {
+			m.sendTerminalText(sess.info.SessionID, fmt.Sprintf("\x1b[38;5;203m✗ 重连失败: %s\x1b[0m\r\n", err.Error()))
+			return false
+		}
 		m.failSession(sess, err.Error())
-		return
+		return false
 	}
 
 	sshSess, err := dialRes.Client.NewSession()
 	if err != nil {
 		dialRes.Close()
-		m.failSession(sess, fmt.Sprintf("创建 SSH 会话失败: %v", err))
-		return
+		if !isReconnect {
+			m.failSession(sess, fmt.Sprintf("创建 SSH 会话失败: %v", err))
+		}
+		return false
 	}
 
 	sess.mu.Lock()
@@ -46,11 +58,12 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 	if err := sshSess.RequestPty("xterm-256color", ptyRows, ptyCols, modes); err != nil {
 		_ = sshSess.Close()
 		dialRes.Close()
-		m.failSession(sess, fmt.Sprintf("请求 PTY 终端失败: %v", err))
-		return
+		if !isReconnect {
+			m.failSession(sess, fmt.Sprintf("请求 PTY 终端失败: %v", err))
+		}
+		return false
 	}
 
-	// Best-effort UTF-8 locale so full-screen TUIs (nano/vim/htop) render borders and CJK cleanly.
 	_ = sshSess.Setenv("LANG", "en_US.UTF-8")
 	_ = sshSess.Setenv("LC_CTYPE", "en_US.UTF-8")
 
@@ -58,32 +71,39 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 	if err != nil {
 		_ = sshSess.Close()
 		dialRes.Close()
-		m.failSession(sess, fmt.Sprintf("获取 stdin 失败: %v", err))
-		return
+		if !isReconnect {
+			m.failSession(sess, fmt.Sprintf("获取 stdin 失败: %v", err))
+		}
+		return false
 	}
 	stdout, err := sshSess.StdoutPipe()
 	if err != nil {
 		_ = sshSess.Close()
 		dialRes.Close()
-		m.failSession(sess, fmt.Sprintf("获取 stdout 失败: %v", err))
-		return
+		if !isReconnect {
+			m.failSession(sess, fmt.Sprintf("获取 stdout 失败: %v", err))
+		}
+		return false
 	}
 	stderr, err := sshSess.StderrPipe()
 	if err != nil {
 		_ = sshSess.Close()
 		dialRes.Close()
-		m.failSession(sess, fmt.Sprintf("获取 stderr 失败: %v", err))
-		return
+		if !isReconnect {
+			m.failSession(sess, fmt.Sprintf("获取 stderr 失败: %v", err))
+		}
+		return false
 	}
 
 	if err := sshSess.Shell(); err != nil {
 		_ = sshSess.Close()
 		dialRes.Close()
-		m.failSession(sess, fmt.Sprintf("启动远程 Shell 失败: %v", err))
-		return
+		if !isReconnect {
+			m.failSession(sess, fmt.Sprintf("启动远程 Shell 失败: %v", err))
+		}
+		return false
 	}
 
-	// If window was resized during SSH dial / Shell startup, immediately sync PTY size.
 	sess.mu.Lock()
 	latestCols, latestRows := sess.lastCols, sess.lastRows
 	sess.mu.Unlock()
@@ -110,15 +130,16 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 	}
 
 	sess.mu.Lock()
-	if sess.closed {
+	if sess.userClosed {
 		sess.mu.Unlock()
 		if sftpClient != nil {
 			_ = sftpClient.Close()
 		}
 		_ = sshSess.Close()
 		dialRes.Close()
-		return
+		return true
 	}
+	sess.closed = false
 	sess.dialRes = dialRes
 	sess.sshSession = sshSess
 	sess.stdin = stdin
@@ -126,23 +147,27 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 	sess.info.Status = "connected"
 	sess.info.SFTPReady = sftpReady
 	sess.info.HomeDir = homeDir
+	sess.info.Error = ""
 	sess.info.ViaSummary = dialRes.ViaSummary
 	if sess.currentDir == "" {
 		sess.currentDir = homeDir
 	}
 	infoSnap := sess.info
+	stopCh := sess.stopCh
 	sess.mu.Unlock()
 
 	m.store.MarkServerConnected(srv.ID)
 
-	if dialRes.ViaSummary != "" {
+	if isReconnect {
+		m.sendTerminalText(sess.info.SessionID, "\x1b[38;5;78m✓ 自动重连成功，SSH 与 SFTP 已恢复\x1b[0m\r\n")
+	} else if dialRes.ViaSummary != "" {
 		m.sendTerminalText(sess.info.SessionID, fmt.Sprintf("\x1b[38;5;78m✓ 已连接 · 链路: %s → %s\x1b[0m\r\n", dialRes.ViaSummary, srv.Host))
 	} else {
 		m.sendTerminalText(sess.info.SessionID, "\x1b[38;5;78m✓ SSH 与 SFTP 已自动就绪\x1b[0m\r\n")
 	}
 	m.emit("session:status", infoSnap)
 
-	if srv.StartupCommand != "" {
+	if srv.StartupCommand != "" && !isReconnect {
 		go func() {
 			time.Sleep(450 * time.Millisecond)
 			_ = m.WriteInput(sess.info.SessionID, srv.StartupCommand+"\n")
@@ -156,59 +181,18 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 	if kaSec <= 0 {
 		kaSec = 30
 	}
-	go m.keepAliveLoop(sess, time.Duration(kaSec)*time.Second)
+	go m.keepAliveLoop(sess, stopCh, time.Duration(kaSec)*time.Second)
 
-	_ = sshSess.Wait()
-	m.markDisconnected(sess, "远程会话已结束")
-}
-
-func (m *Manager) pumpOutput(sessionID string, r io.Reader) {
-	buf := make([]byte, 16*1024)
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			m.emit("terminal:data", map[string]string{
-				"sessionId": sessionID,
-				"data":      base64.StdEncoding.EncodeToString(buf[:n]),
-			})
-		}
-		if err != nil {
+	go func() {
+		_ = sshSess.Wait()
+		m.resetSessionTransport(sess)
+		if m.shouldAutoReconnect(sess) {
+			m.runReconnectLoop(sess, srv.ID)
 			return
 		}
-	}
-}
-
-func (m *Manager) sendTerminalText(sessionID, text string) {
-	m.emit("terminal:data", map[string]string{
-		"sessionId": sessionID,
-		"data":      base64.StdEncoding.EncodeToString([]byte(text)),
-	})
-}
-
-func (m *Manager) keepAliveLoop(sess *sessionState, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-sess.stopCh:
-			return
-		case <-ticker.C:
-			sess.mu.Lock()
-			var client *ssh.Client
-			if sess.dialRes != nil {
-				client = sess.dialRes.Client
-			}
-			closed := sess.closed
-			sess.mu.Unlock()
-			if closed || client == nil {
-				return
-			}
-			if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
-				m.markDisconnected(sess, "心跳保活超时，连接已断开")
-				return
-			}
-		}
-	}
+		m.markDisconnected(sess, "远程会话已结束")
+	}()
+	return true
 }
 
 func (m *Manager) failSession(sess *sessionState, errMsg string) {
@@ -228,7 +212,13 @@ func (m *Manager) markDisconnected(sess *sessionState, reason string) {
 		return
 	}
 	sess.closed = true
-	close(sess.stopCh)
+	if sess.stopCh != nil {
+		select {
+		case <-sess.stopCh:
+		default:
+			close(sess.stopCh)
+		}
+	}
 	if sess.sftpClient != nil {
 		_ = sess.sftpClient.Close()
 		sess.sftpClient = nil
