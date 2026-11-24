@@ -6,13 +6,13 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"time"
 
 	"github.com/google/uuid"
+	"github.com/pkg/sftp"
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
-// SFTPUpload uploads a local file into remoteDir with resumable partial commit and auto-retry.
+// SFTPUpload streams a local file directly to remoteDir (rebuilding a stale SFTP client on open error).
 func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
 	src, err := os.Open(localPath)
 	if err != nil {
@@ -31,86 +31,64 @@ func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
 	fileName := filepath.Base(localPath)
 	cleanDir := path.Clean(remoteDir)
 	remotePath := path.Join(cleanDir, fileName)
-	partPath := remotePath + ".gsshpart"
 	transferID := uuid.NewString()
 	total := st.Size()
 
-	var lastErr error
-	for attempt := 1; attempt <= maxTransferRetries; attempt++ {
-		if attempt > 1 {
-			time.Sleep(time.Duration(attempt) * time.Second)
-		}
-		sc, scErr := m.getSFTP(sessionID)
-		if scErr != nil {
-			lastErr = scErr
-			continue
-		}
-
-		var offset int64
-		if pst, pErr := sc.Stat(partPath); pErr == nil && pst.Size() > 0 && pst.Size() <= total {
-			offset = pst.Size()
-		}
-		if _, sErr := src.Seek(offset, io.SeekStart); sErr != nil {
-			return sErr
-		}
-
-		flags := os.O_WRONLY | os.O_CREATE
-		if offset == 0 {
-			flags |= os.O_TRUNC
-		}
-		dst, oErr := sc.OpenFile(partPath, flags)
+	var dst *sftp.File
+	err = m.withSFTP(sessionID, func(sc *sftp.Client) error {
+		f, oErr := sc.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 		if oErr != nil {
-			lastErr = fmt.Errorf("创建远程文件失败: %w", oErr)
-			continue
+			return oErr
 		}
-		if offset > 0 {
-			if _, sErr := dst.Seek(offset, io.SeekStart); sErr != nil {
-				_ = dst.Close()
-				lastErr = sErr
-				continue
-			}
-		}
-
-		prog := models.TransferProgress{
+		dst = f
+		return nil
+	})
+	if err != nil {
+		emitErr := fmt.Errorf("创建远程文件失败: %w", err)
+		m.emitTransfer(models.TransferProgress{
 			TransferID: transferID, SessionID: sessionID, Direction: "upload",
 			FileName: fileName, RemotePath: remotePath, LocalPath: localPath,
-			Transferred: offset, Total: total, Status: "running",
-		}
-		cpErr := m.copyChunked(dst, src, &prog)
-		closeErr := dst.Close()
-		if cpErr != nil || closeErr != nil {
-			if cpErr != nil {
-				lastErr = cpErr
-			} else {
-				lastErr = closeErr
-			}
-			continue
-		}
-
-		if err := commitRemotePart(sc, partPath, remotePath); err != nil {
-			lastErr = fmt.Errorf("提交远程文件失败: %w", err)
-			continue
-		}
-		prog.Percent = 100
-		prog.Status = "done"
-		m.emitTransfer(prog)
-		m.invalidateDirCache(sessionID, cleanDir)
-		return nil
+			Total: total, Status: "error", Error: emitErr.Error(),
+		})
+		return emitErr
 	}
 
-	m.emitTransfer(models.TransferProgress{
+	prog := models.TransferProgress{
 		TransferID: transferID, SessionID: sessionID, Direction: "upload",
 		FileName: fileName, RemotePath: remotePath, LocalPath: localPath,
-		Total: total, Status: "error", Error: lastErr.Error(),
-	})
-	return lastErr
+		Total: total, Status: "running",
+	}
+	cpErr := m.copyChunked(dst, src, &prog)
+	closeErr := dst.Close()
+	if cpErr != nil || closeErr != nil {
+		finalErr := cpErr
+		if finalErr == nil {
+			finalErr = closeErr
+		}
+		if isSFTPConnError(finalErr) {
+			if sc, scErr := m.getSFTP(sessionID); scErr == nil {
+				m.invalidateSFTP(sessionID, sc)
+			}
+		}
+		m.emitTransfer(models.TransferProgress{
+			TransferID: transferID, SessionID: sessionID, Direction: "upload",
+			FileName: fileName, RemotePath: remotePath, LocalPath: localPath,
+			Transferred: prog.Transferred, Total: total, Status: "error", Error: finalErr.Error(),
+		})
+		return finalErr
+	}
+
+	prog.Percent = 100
+	prog.Status = "done"
+	m.emitTransfer(prog)
+	m.invalidateDirCache(sessionID, cleanDir)
+	return nil
 }
 
-// SFTPDownload downloads a remote file to localPath with resumable .gsshpart and auto-retry.
+// SFTPDownload streams a remote file directly to localPath (rebuilding a stale SFTP client on open error).
 func (m *Manager) SFTPDownload(sessionID, remotePath, localPath string) error {
 	cleanRemote := path.Clean(remotePath)
 	fileName := path.Base(cleanRemote)
-	partPath := localPath + ".gsshpart"
 	transferID := uuid.NewString()
 
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
@@ -118,96 +96,107 @@ func (m *Manager) SFTPDownload(sessionID, remotePath, localPath string) error {
 	}
 
 	var (
-		total   int64
-		lastErr error
+		src   *sftp.File
+		total int64
 	)
-	for attempt := 1; attempt <= maxTransferRetries; attempt++ {
-		if attempt > 1 {
-			time.Sleep(time.Duration(attempt) * time.Second)
-		}
-		sc, scErr := m.getSFTP(sessionID)
-		if scErr != nil {
-			lastErr = scErr
-			continue
-		}
-		src, oErr := sc.Open(cleanRemote)
+	err := m.withSFTP(sessionID, func(sc *sftp.Client) error {
+		f, oErr := sc.Open(cleanRemote)
 		if oErr != nil {
-			lastErr = fmt.Errorf("打开远程文件失败: %w", oErr)
-			continue
+			return oErr
 		}
-		st, stErr := src.Stat()
+		st, stErr := f.Stat()
 		if stErr != nil {
-			_ = src.Close()
-			lastErr = stErr
-			continue
+			_ = f.Close()
+			return stErr
 		}
 		if st.IsDir() {
-			_ = src.Close()
+			_ = f.Close()
 			return fmt.Errorf("无法直接下载目录，请使用打包下载目录")
 		}
+		src = f
 		total = st.Size()
-
-		var offset int64
-		if pst, pErr := os.Stat(partPath); pErr == nil && pst.Size() > 0 && pst.Size() <= total {
-			offset = pst.Size()
-		}
-		if offset > 0 {
-			if _, sErr := src.Seek(offset, io.SeekStart); sErr != nil {
-				offset = 0
-				_, _ = src.Seek(0, io.SeekStart)
-			}
-		}
-
-		flags := os.O_WRONLY | os.O_CREATE
-		if offset == 0 {
-			flags |= os.O_TRUNC
-		}
-		dst, dErr := os.OpenFile(partPath, flags, 0o644)
-		if dErr != nil {
-			_ = src.Close()
-			return fmt.Errorf("创建本地文件失败: %w", dErr)
-		}
-		if offset > 0 {
-			if _, sErr := dst.Seek(offset, io.SeekStart); sErr != nil {
-				_ = dst.Close()
-				_ = src.Close()
-				return sErr
-			}
-		}
-
-		prog := models.TransferProgress{
+		return nil
+	})
+	if err != nil {
+		m.emitTransfer(models.TransferProgress{
 			TransferID: transferID, SessionID: sessionID, Direction: "download",
 			FileName: fileName, RemotePath: cleanRemote, LocalPath: localPath,
-			Transferred: offset, Total: total, Status: "running",
-		}
-		cpErr := m.copyChunked(dst, src, &prog)
-		_ = src.Close()
-		closeErr := dst.Close()
-		if cpErr != nil || closeErr != nil {
-			if cpErr != nil {
-				lastErr = cpErr
-			} else {
-				lastErr = closeErr
-			}
-			continue
-		}
+			Status: "error", Error: err.Error(),
+		})
+		return err
+	}
+	defer src.Close()
 
-		if err := os.Rename(partPath, localPath); err != nil {
-			_ = os.Remove(localPath)
-			if err2 := os.Rename(partPath, localPath); err2 != nil {
-				return fmt.Errorf("保存本地文件失败: %w", err2)
-			}
-		}
-		prog.Percent = 100
-		prog.Status = "done"
-		m.emitTransfer(prog)
-		return nil
+	dst, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("创建本地文件失败: %w", err)
 	}
 
-	m.emitTransfer(models.TransferProgress{
+	prog := models.TransferProgress{
 		TransferID: transferID, SessionID: sessionID, Direction: "download",
 		FileName: fileName, RemotePath: cleanRemote, LocalPath: localPath,
-		Total: total, Status: "error", Error: lastErr.Error(),
-	})
-	return lastErr
+		Total: total, Status: "running",
+	}
+	cpErr := m.copyChunked(dst, src, &prog)
+	closeErr := dst.Close()
+	if cpErr != nil || closeErr != nil {
+		finalErr := cpErr
+		if finalErr == nil {
+			finalErr = closeErr
+		}
+		if isSFTPConnError(finalErr) {
+			if sc, scErr := m.getSFTP(sessionID); scErr == nil {
+				m.invalidateSFTP(sessionID, sc)
+			}
+		}
+		m.emitTransfer(models.TransferProgress{
+			TransferID: transferID, SessionID: sessionID, Direction: "download",
+			FileName: fileName, RemotePath: cleanRemote, LocalPath: localPath,
+			Transferred: prog.Transferred, Total: total, Status: "error", Error: finalErr.Error(),
+		})
+		return finalErr
+	}
+
+	prog.Percent = 100
+	prog.Status = "done"
+	m.emitTransfer(prog)
+	return nil
+}
+
+func (m *Manager) copyChunked(dst io.Writer, src io.Reader, prog *models.TransferProgress) error {
+	buf := make([]byte, 64*1024)
+	lastPercent := -1
+	if prog.Total > 0 {
+		prog.Percent = int(prog.Transferred * 100 / prog.Total)
+		lastPercent = prog.Percent
+	}
+	m.emitTransfer(*prog)
+
+	for {
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			written, writeErr := dst.Write(buf[:n])
+			if writeErr != nil {
+				return writeErr
+			}
+			prog.Transferred += int64(written)
+			if prog.Total > 0 {
+				pct := int(prog.Transferred * 100 / prog.Total)
+				if pct > 100 {
+					pct = 100
+				}
+				if pct != lastPercent {
+					lastPercent = pct
+					prog.Percent = pct
+					m.emitTransfer(*prog)
+				}
+			}
+		}
+		if readErr == io.EOF {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }
