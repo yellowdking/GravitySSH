@@ -246,11 +246,18 @@ export interface RemoteFileContent {
 
 export interface BuiltinTemplate {
   id: string
+  presetId?: string
   name: string
   category: string
   description: string
   safetyNote: string
   command: string
+}
+
+export interface PresetLoadResult {
+  added: number
+  skipped: number
+  templates: BuiltinTemplate[]
 }
 
 export interface CompletionItem {
