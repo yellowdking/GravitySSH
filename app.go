@@ -10,6 +10,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"github.com/yellowdking/GravitySSH/internal/models"
 	"github.com/yellowdking/GravitySSH/internal/sshclient"
+	"github.com/yellowdking/GravitySSH/internal/updater"
 	"github.com/yellowdking/GravitySSH/internal/vault"
 )
 
@@ -101,6 +102,20 @@ func (a *App) GetVaultSecurityInfo() (models.VaultSecurityInfo, error) {
 
 func (a *App) GetAppVersion() string {
 	return AppVersion
+}
+
+func (a *App) CheckForUpdates() (models.UpdateCheckResult, error) {
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return updater.CheckLatestRelease(ctx, AppVersion)
+}
+
+func (a *App) OpenExternalURL(url string) {
+	if a.ctx != nil && url != "" {
+		runtime.BrowserOpenURL(a.ctx, url)
+	}
 }
 
 func (a *App) ListServers() ([]models.ServerView, error) {
