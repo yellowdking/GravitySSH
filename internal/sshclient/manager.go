@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -44,18 +45,20 @@ type sessionState struct {
 	sshSession   *ssh.Session
 	stdin        io.WriteCloser
 	sftpClient   *sftp.Client
-	recorder     *CommandRecorder
-	stopCh       chan struct{}
-	wakeCh       chan struct{}
-	closed       bool
-	userClosed   bool
-	lastCols     int
-	lastRows     int
-	currentDir   string
-	dirCache     map[string]dirCacheEntry
-	prevCPU      *cpuSample
-	prevNet      *netSample
-	prevSampleAt time.Time
+	recorder         *CommandRecorder
+	stopCh           chan struct{}
+	closed           bool
+	userClosed       bool
+	lastCols         int
+	lastRows         int
+	currentDir       string
+	dirCache         map[string]dirCacheEntry
+	prevCPU          *cpuSample
+	prevNet          *netSample
+	prevSampleAt     time.Time
+	metricsInFlight  atomic.Bool
+	sshSameFSChecked bool
+	sshSameFS        bool
 }
 
 type Manager struct {
@@ -63,6 +66,7 @@ type Manager struct {
 	store    *vault.Store
 	events   EventSink
 	sessions map[string]*sessionState
+	sftpDial func(sessionID string) (*sftp.Client, error)
 }
 
 func NewManager(store *vault.Store, events EventSink) *Manager {
@@ -187,7 +191,6 @@ func (m *Manager) Connect(ctx context.Context, serverID string, cols, rows int) 
 		},
 		appCtx:   ctx,
 		stopCh:   make(chan struct{}),
-		wakeCh:   make(chan struct{}, 1),
 		lastCols: cols,
 		lastRows: rows,
 		dirCache: make(map[string]dirCacheEntry),
