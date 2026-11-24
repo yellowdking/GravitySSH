@@ -6,13 +6,15 @@ import (
 	"path/filepath"
 )
 
+const configDirName = "gsshconfig"
+
 // DefaultVaultPath resolves the portable vault path next to the running executable:
 //
-//	<exeDir>/config/vault.gsv
+//	<exeDir>/gsshconfig/vault.gsv
 //
-// If that file does not exist yet and a legacy %APPDATA%/GravitySSH/vault.gsv exists,
-// it is automatically copied to the portable location. If <exeDir>/config is not writable,
-// it falls back cleanly to %APPDATA%/GravitySSH/config/vault.gsv.
+// If that file does not exist yet, it automatically migrates from legacy locations
+// (<exeDir>/config/vault.gsv or %APPDATA%/GravitySSH/vault.gsv). If <exeDir>/gsshconfig
+// is not writable, it falls back cleanly to %APPDATA%/GravitySSH/gsshconfig/vault.gsv.
 func DefaultVaultPath() (string, error) {
 	exePath, exeErr := os.Executable()
 	exeDir := ""
@@ -31,18 +33,22 @@ func DefaultVaultPath() (string, error) {
 }
 
 func resolveDefaultVaultPath(exeDir, userConfigDir string) (string, error) {
-	legacyPath := ""
+	var legacyCandidates []string
+	if exeDir != "" {
+		legacyCandidates = append(legacyCandidates, filepath.Join(exeDir, "config", "vault.gsv"))
+	}
 	if userConfigDir != "" {
-		legacyPath = filepath.Join(userConfigDir, "GravitySSH", "vault.gsv")
+		legacyCandidates = append(legacyCandidates,
+			filepath.Join(userConfigDir, "GravitySSH", "config", "vault.gsv"),
+			filepath.Join(userConfigDir, "GravitySSH", "vault.gsv"),
+		)
 	}
 
 	if exeDir != "" {
-		portableDir := filepath.Join(exeDir, "config")
+		portableDir := filepath.Join(exeDir, configDirName)
 		portablePath := filepath.Join(portableDir, "vault.gsv")
 		if err := ensureDirWritable(portableDir); err == nil {
-			if _, statErr := os.Stat(portablePath); os.IsNotExist(statErr) && legacyPath != "" {
-				_ = migrateLegacyVault(legacyPath, portablePath)
-			}
+			migrateFirstExisting(legacyCandidates, portablePath)
 			return portablePath, nil
 		}
 	}
@@ -51,14 +57,12 @@ func resolveDefaultVaultPath(exeDir, userConfigDir string) (string, error) {
 		return "", fmt.Errorf("portable config dir is not writable and user config dir is unavailable")
 	}
 
-	fallbackDir := filepath.Join(userConfigDir, "GravitySSH", "config")
+	fallbackDir := filepath.Join(userConfigDir, "GravitySSH", configDirName)
 	fallbackPath := filepath.Join(fallbackDir, "vault.gsv")
 	if err := os.MkdirAll(fallbackDir, 0o700); err != nil {
 		return "", fmt.Errorf("create fallback config dir: %w", err)
 	}
-	if _, statErr := os.Stat(fallbackPath); os.IsNotExist(statErr) && legacyPath != "" {
-		_ = migrateLegacyVault(legacyPath, fallbackPath)
-	}
+	migrateFirstExisting(legacyCandidates, fallbackPath)
 	return fallbackPath, nil
 }
 
@@ -76,18 +80,22 @@ func ensureDirWritable(dir string) error {
 	return nil
 }
 
-func migrateLegacyVault(legacyPath, targetPath string) error {
-	raw, err := os.ReadFile(legacyPath)
-	if err != nil || len(raw) == 0 {
-		return err
+func migrateFirstExisting(candidates []string, targetPath string) {
+	if _, err := os.Stat(targetPath); !os.IsNotExist(err) {
+		return
 	}
-	tmpPath := targetPath + ".migrate.tmp"
-	if err := os.WriteFile(tmpPath, raw, 0o600); err != nil {
-		return err
+	for _, src := range candidates {
+		if src == "" || src == targetPath {
+			continue
+		}
+		if raw, err := os.ReadFile(src); err == nil && len(raw) > 0 {
+			tmpPath := targetPath + ".migrate.tmp"
+			if os.WriteFile(tmpPath, raw, 0o600) == nil {
+				if os.Rename(tmpPath, targetPath) != nil {
+					_ = os.Remove(tmpPath)
+				}
+			}
+			return
+		}
 	}
-	if err := os.Rename(tmpPath, targetPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	return nil
 }
