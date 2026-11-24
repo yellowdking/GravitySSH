@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyTerminalInputToLine, computeCompletionInsert, formatBytes } from './autocomplete'
+import { applyTerminalInputToLine, computeCompletionInsert, formatBytes, sanitizePasteText } from './autocomplete'
 
 describe('autocomplete helpers', () => {
   it('computes clean suffix insertion for prefix matches', () => {
@@ -63,5 +63,10 @@ describe('autocomplete helpers', () => {
     expect(formatBytes(512)).toBe('512 B')
     expect(formatBytes(2048)).toBe('2.0 KB')
     expect(formatBytes(1024 * 1024 * 3.5)).toBe('3.5 MB')
+  })
+
+  it('normalizes CRLF/CR and strips bracketed paste escapes for clean nano pasting', () => {
+    expect(sanitizePasteText('line1\r\nline2\r\n  indented\rline3')).toBe('line1\nline2\n  indented\nline3')
+    expect(sanitizePasteText('a\x1b[201~b\x1b[200~c')).toBe('abc')
   })
 })

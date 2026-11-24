@@ -63,6 +63,15 @@ export function applyTerminalInputToLine(currentLine: string, rawData: string): 
   return line
 }
 
+export function sanitizePasteText(raw: string): string {
+  if (!raw) return ''
+  return raw
+    .replace(/\x1b\[200~/g, '')
+    .replace(/\x1b\[201~/g, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   const units = ['KB', 'MB', 'GB', 'TB']
