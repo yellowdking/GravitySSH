@@ -11,6 +11,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ci-release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test-and-build:
     runs-on: windows-latest
@@ -78,10 +82,9 @@ jobs:
       - name: Package Portable Artifacts & SHA256 Checksums
         shell: pwsh
         run: |
-          $v = "${{ steps.ver.outputs.version }}"
           New-Item -ItemType Directory -Force -Path dist-release | Out-Null
-          $exeName = "GravitySSH-v$v-windows-amd64.exe"
-          $zipName = "GravitySSH-v$v-windows-amd64-portable.zip"
+          $exeName = "GravitySSH.exe"
+          $zipName = "GravitySSH-portable.zip"
           Copy-Item "build\bin\GravitySSH.exe" "dist-release\$exeName"
           Compress-Archive -Path "dist-release\$exeName", "README.md" -DestinationPath "dist-release\$zipName" -Force
 
@@ -134,8 +137,8 @@ jobs:
             - **Windows DPAPI (MachineGuid + User + App Entropy) + AES-256-GCM** 防拷贝本地加密保险库
 
             ### 下载说明
-            - 直接下载 **`GravitySSH-${{ steps.ver.outputs.tag }}-windows-amd64.exe`** 双击即可运行（单文件绿色版，无需安装）。
+            - 直接下载 **`GravitySSH.exe`** 双击即可运行（单文件绿色版，无需安装，升级直接覆盖即可自动读取同目录 `gsshconfig` 配置）。
           files: |
-            dist-release/GravitySSH-v${{ steps.ver.outputs.version }}-windows-amd64.exe
-            dist-release/GravitySSH-v${{ steps.ver.outputs.version }}-windows-amd64-portable.zip
+            dist-release/GravitySSH.exe
+            dist-release/GravitySSH-portable.zip
             dist-release/SHA256SUMS.txt
