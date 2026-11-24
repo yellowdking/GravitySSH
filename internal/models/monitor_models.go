@@ -40,9 +40,16 @@ type RemoteFileContent struct {
 
 type BuiltinTemplate struct {
 	ID          string `json:"id"`
+	PresetID    string `json:"presetId,omitempty"`
 	Name        string `json:"name"`
 	Category    string `json:"category"`
 	Description string `json:"description"`
 	SafetyNote  string `json:"safetyNote"`
 	Command     string `json:"command"`
+}
+
+type PresetLoadResult struct {
+	Added     int               `json:"added"`
+	Skipped   int               `json:"skipped"`
+	Templates []BuiltinTemplate `json:"templates"`
 }
