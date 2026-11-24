@@ -5,14 +5,14 @@ import (
 	"io"
 	"os"
 	"path"
-	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/pkg/sftp"
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
+
+const maxTransferRetries = 3
 
 func (m *Manager) getSFTP(sessionID string) (*sftp.Client, error) {
 	m.mu.RLock()
@@ -99,120 +99,28 @@ func (m *Manager) SFTPList(sessionID, remotePath string) (models.SFTPListResult,
 	}, nil
 }
 
-// SFTPUpload uploads a local file into remoteDir with live progress events.
-func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
-	sc, err := m.getSFTP(sessionID)
-	if err != nil {
-		return err
+func commitRemotePart(sc *sftp.Client, partPath, remotePath string) error {
+	if err := sc.PosixRename(partPath, remotePath); err == nil {
+		return nil
 	}
-
-	src, err := os.Open(localPath)
-	if err != nil {
-		return fmt.Errorf("打开本地文件失败: %w", err)
-	}
-	defer src.Close()
-
-	st, err := src.Stat()
-	if err != nil {
-		return err
-	}
-	if st.IsDir() {
-		return fmt.Errorf("暂不支持直接上传文件夹，请选择文件")
-	}
-
-	fileName := filepath.Base(localPath)
-	cleanDir := path.Clean(remoteDir)
-	remotePath := path.Join(cleanDir, fileName)
-	transferID := uuid.NewString()
-
-	dst, err := sc.Create(remotePath)
-	if err != nil {
-		m.emitTransfer(models.TransferProgress{
-			TransferID: transferID,
-			SessionID:  sessionID,
-			Direction:  "upload",
-			FileName:   fileName,
-			RemotePath: remotePath,
-			LocalPath:  localPath,
-			Total:      st.Size(),
-			Status:     "error",
-			Error:      err.Error(),
-		})
-		return fmt.Errorf("创建远程文件失败: %w", err)
-	}
-	defer dst.Close()
-
-	err = m.copyWithProgress(dst, src, models.TransferProgress{
-		TransferID: transferID,
-		SessionID:  sessionID,
-		Direction:  "upload",
-		FileName:   fileName,
-		RemotePath: remotePath,
-		LocalPath:  localPath,
-		Total:      st.Size(),
-		Status:     "running",
-	})
-	m.invalidateDirCache(sessionID, cleanDir)
-	return err
+	_ = sc.Remove(remotePath)
+	return sc.Rename(partPath, remotePath)
 }
 
-// SFTPDownload downloads a remote file to localPath with live progress events.
-func (m *Manager) SFTPDownload(sessionID, remotePath, localPath string) error {
-	sc, err := m.getSFTP(sessionID)
-	if err != nil {
-		return err
-	}
-
-	cleanRemote := path.Clean(remotePath)
-	src, err := sc.Open(cleanRemote)
-	if err != nil {
-		return fmt.Errorf("打开远程文件失败: %w", err)
-	}
-	defer src.Close()
-
-	st, err := src.Stat()
-	if err != nil {
-		return err
-	}
-	if st.IsDir() {
-		return fmt.Errorf("无法直接下载目录，请选择具体文件")
-	}
-
-	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
-		return err
-	}
-	dst, err := os.Create(localPath)
-	if err != nil {
-		return fmt.Errorf("创建本地文件失败: %w", err)
-	}
-	defer dst.Close()
-
-	transferID := uuid.NewString()
-	return m.copyWithProgress(dst, src, models.TransferProgress{
-		TransferID: transferID,
-		SessionID:  sessionID,
-		Direction:  "download",
-		FileName:   path.Base(cleanRemote),
-		RemotePath: cleanRemote,
-		LocalPath:  localPath,
-		Total:      st.Size(),
-		Status:     "running",
-	})
-}
-
-func (m *Manager) copyWithProgress(dst io.Writer, src io.Reader, prog models.TransferProgress) error {
+func (m *Manager) copyChunked(dst io.Writer, src io.Reader, prog *models.TransferProgress) error {
 	buf := make([]byte, 64*1024)
 	lastPercent := -1
-	m.emitTransfer(prog)
+	if prog.Total > 0 {
+		prog.Percent = int(prog.Transferred * 100 / prog.Total)
+		lastPercent = prog.Percent
+	}
+	m.emitTransfer(*prog)
 
 	for {
 		n, readErr := src.Read(buf)
 		if n > 0 {
 			written, writeErr := dst.Write(buf[:n])
 			if writeErr != nil {
-				prog.Status = "error"
-				prog.Error = writeErr.Error()
-				m.emitTransfer(prog)
 				return writeErr
 			}
 			prog.Transferred += int64(written)
@@ -224,23 +132,15 @@ func (m *Manager) copyWithProgress(dst io.Writer, src io.Reader, prog models.Tra
 				if pct != lastPercent {
 					lastPercent = pct
 					prog.Percent = pct
-					m.emitTransfer(prog)
+					m.emitTransfer(*prog)
 				}
 			}
 		}
 		if readErr == io.EOF {
-			break
+			return nil
 		}
 		if readErr != nil {
-			prog.Status = "error"
-			prog.Error = readErr.Error()
-			m.emitTransfer(prog)
 			return readErr
 		}
 	}
-
-	prog.Percent = 100
-	prog.Status = "done"
-	m.emitTransfer(prog)
-	return nil
 }
