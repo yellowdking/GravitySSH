@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, type MutableRefObject } from 'react'
 import type { Terminal } from '@xterm/xterm'
 import type { FitAddon } from '@xterm/addon-fit'
 import type { SearchAddon } from '@xterm/addon-search'
@@ -8,158 +8,108 @@ import { applyTerminalInputToLine, sanitizePasteText } from '../utils/autocomple
 import { inspectPasteSafety, type PasteInspection } from '../utils/pasteGuard'
 import { highlightLogText } from '../utils/keywordHighlight'
 import { base64ToUint8Array, DEFAULT_TERMINAL_FONT } from '../components/terminalTheme'
-import { attachTerminalImeGuard, attachTerminalInputHandlers, createConfiguredTerminal } from './terminalHandlers'
+import { attachTerminalImeGuard as bindIme, attachTerminalInputHandlers as bindInput, createConfiguredTerminal as initTerm, syncTerminalImeAttrs as syncIme } from './terminalHandlers'
 
 interface UseTerminalOptions {
-  sessionId: string
-  status: string
-  active: boolean
-  showSftp: boolean
-  rightDrawer: string
-  settings: AppSettings
-  suggestionsRef: React.MutableRefObject<CompletionItem[]>
-  selectedIdxRef: React.MutableRefObject<number>
-  inputLineRef: React.MutableRefObject<string>
-  onRequestSuggestions: (line: string) => void
-  onClearSuggestions: () => void
-  onMoveSelection: (delta: number) => void
-  onApplySelected: () => void
-  onOpenSearch: () => void
-  onPasteGuard: (text: string, inspection: PasteInspection) => void
+  sessionId: string; status: string; active: boolean; showSftp: boolean; rightDrawer: string; settings: AppSettings
+  suggestionsRef: MutableRefObject<CompletionItem[]>; selectedIdxRef: MutableRefObject<number>; inputLineRef: MutableRefObject<string>
+  onRequestSuggestions: (l: string) => void; onClearSuggestions: () => void; onMoveSelection: (d: number) => void
+  onApplySelected: () => void; onOpenSearch: () => void; onPasteGuard: (t: string, i: PasteInspection) => void
 }
 
 export function useTerminalInstance(opts: UseTerminalOptions) {
+  const { sessionId, status, active, showSftp, rightDrawer, settings } = opts
   const containerRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const searchAddonRef = useRef<SearchAddon | null>(null)
-  const writeQueueRef = useRef<Promise<void>>(Promise.resolve())
-  const settingsRef = useRef(opts.settings); settingsRef.current = opts.settings
-  const cbRef = useRef(opts); cbRef.current = opts
+  const imeRef = useRef<((f?: boolean) => void) | null>(null)
+  const wq = useRef(Promise.resolve())
+  const sRef = useRef(settings); sRef.current = settings
+  const cRef = useRef(opts); cRef.current = opts
 
-  const enqueueWrite = useCallback((data: string) => {
-    if (!data) return
-    writeQueueRef.current = writeQueueRef.current.then(() => api.writeTerminal(opts.sessionId, data)).catch(() => {})
-  }, [opts.sessionId])
+  const enqueueWrite = useCallback((d: string) => {
+    if (d) wq.current = wq.current.then(() => api.writeTerminal(sessionId, d)).catch(() => {})
+  }, [sessionId])
 
-  const commitPaste = useCallback((raw: string) => {
-    const term = termRef.current
-    const cleaned = sanitizePasteText(raw)
-    if (!term || !cleaned) return
-    term.paste(cleaned)
-    term.focus()
-  }, [])
-
-  const pasteText = useCallback((raw: string) => {
-    const term = termRef.current
-    const cleaned = sanitizePasteText(raw)
-    if (!term || !cleaned) return
-    if (settingsRef.current.pasteGuardEnabled) {
-      const check = inspectPasteSafety(cleaned, term.modes.bracketedPasteMode)
-      if (check.needsConfirm) { cbRef.current.onPasteGuard(cleaned, check); return }
+  const doPaste = useCallback((raw: string, guarded: boolean) => {
+    const t = termRef.current, s = sanitizePasteText(raw)
+    if (!t || !s) return
+    if (guarded && sRef.current.pasteGuardEnabled) {
+      const c = inspectPasteSafety(s, t.modes.bracketedPasteMode)
+      if (c.needsConfirm) { cRef.current.onPasteGuard(s, c); return }
     }
-    term.paste(cleaned)
-    term.focus()
+    t.paste(s); t.focus()
   }, [])
+  const commitPaste = useCallback((r: string) => doPaste(r, false), [doPaste])
+  const pasteText = useCallback((r: string) => doPaste(r, true), [doPaste])
 
   const syncSize = useCallback(() => {
-    const fit = fitRef.current, term = termRef.current
-    if (!fit || !term) return
-    try {
-      fit.fit()
-      if (term.cols > 0 && term.rows > 0) void api.resizeTerminal(opts.sessionId, term.cols, term.rows)
-    } catch { /* ignore */ }
-  }, [opts.sessionId])
+    const f = fitRef.current, t = termRef.current
+    if (f && t) try { f.fit(); if (t.cols > 0 && t.rows > 0) void api.resizeTerminal(sessionId, t.cols, t.rows) } catch { /**/ }
+  }, [sessionId])
 
   useEffect(() => {
-    if (!termRef.current) return
-    termRef.current.options.fontSize = opts.settings.terminalFontSize
-    termRef.current.options.fontFamily = opts.settings.terminalFontFamily || DEFAULT_TERMINAL_FONT
-    syncSize()
-  }, [opts.settings.terminalFontSize, opts.settings.terminalFontFamily, syncSize])
+    const t = termRef.current
+    if (t) { t.options.fontSize = settings.terminalFontSize; t.options.fontFamily = settings.terminalFontFamily || DEFAULT_TERMINAL_FONT; syncSize() }
+  }, [settings.terminalFontSize, settings.terminalFontFamily, syncSize])
+
+  useEffect(() => {
+    syncIme(termRef.current, settings.autoSwitchEnglishIme)
+    if (active && settings.autoSwitchEnglishIme) imeRef.current?.(true)
+  }, [settings.autoSwitchEnglishIme, active])
 
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
-    const { term, fit, searchAddon } = createConfiguredTerminal(el, settingsRef.current)
+    const { term, fit, searchAddon } = initTerm(el, sRef.current)
     termRef.current = term; fitRef.current = fit; searchAddonRef.current = searchAddon
-    if (term.cols > 0 && term.rows > 0) void api.resizeTerminal(opts.sessionId, term.cols, term.rows)
+    if (term.cols > 0 && term.rows > 0) void api.resizeTerminal(sessionId, term.cols, term.rows)
 
-    const decoder = new TextDecoder('utf-8')
-    const onNativePaste = (ev: ClipboardEvent) => {
-      const text = ev.clipboardData?.getData('text/plain')
-      if (!text) return
-      ev.preventDefault(); ev.stopImmediatePropagation()
-      pasteText(text)
+    const dec = new TextDecoder('utf-8')
+    const onPaste = (e: ClipboardEvent) => {
+      const t = e.clipboardData?.getData('text/plain')
+      if (t) { e.preventDefault(); e.stopImmediatePropagation(); pasteText(t) }
     }
-    el.addEventListener('paste', onNativePaste, true)
-
-    attachTerminalInputHandlers({
-      term, enqueueWrite, pasteText,
-      suggestionsRef: cbRef.current.suggestionsRef,
-      onOpenSearch: () => cbRef.current.onOpenSearch(),
-      onMoveSelection: (d) => cbRef.current.onMoveSelection(d),
-      onApplySelected: () => cbRef.current.onApplySelected(),
-      onClearSuggestions: () => cbRef.current.onClearSuggestions(),
+    el.addEventListener('paste', onPaste, true)
+    bindInput({ term, enqueueWrite, pasteText, suggestionsRef: cRef.current.suggestionsRef, onOpenSearch: () => cRef.current.onOpenSearch(), onMoveSelection: (d) => cRef.current.onMoveSelection(d), onApplySelected: () => cRef.current.onApplySelected(), onClearSuggestions: () => cRef.current.onClearSuggestions() })
+    const ime = bindIme(el, term, () => cRef.current.active, () => sRef.current.autoSwitchEnglishIme)
+    imeRef.current = ime.trigger
+    const onData = term.onData((d) => {
+      enqueueWrite(d); const c = cRef.current
+      if (term.buffer.active.type === 'alternate') { c.inputLineRef.current = ''; c.onClearSuggestions(); return }
+      const n = applyTerminalInputToLine(c.inputLineRef.current, d); c.inputLineRef.current = n
+      if (sRef.current.autocompleteEnabled && n.trimStart()) c.onRequestSuggestions(n); else c.onClearSuggestions()
     })
-
-    const detachImeGuard = attachTerminalImeGuard(
-      term,
-      () => cbRef.current.active,
-      () => settingsRef.current.autoSwitchEnglishIme
-    )
-
-    const onData = term.onData((data) => {
-      enqueueWrite(data)
-      if (term.buffer.active.type === 'alternate') { cbRef.current.inputLineRef.current = ''; cbRef.current.onClearSuggestions(); return }
-      const nextLine = applyTerminalInputToLine(cbRef.current.inputLineRef.current, data)
-      cbRef.current.inputLineRef.current = nextLine
-      if (settingsRef.current.autocompleteEnabled && nextLine.trimStart().length > 0) cbRef.current.onRequestSuggestions(nextLine)
-      else cbRef.current.onClearSuggestions()
+    const onResize = term.onResize(({ cols, rows }) => { void api.resizeTerminal(sessionId, cols, rows) })
+    const unsub = api.onEvent<{ sessionId: string; data: string }>('terminal:data', (p) => {
+      if (p.sessionId !== sessionId || !p.data) return
+      const b = base64ToUint8Array(p.data)
+      if (sRef.current.keywordHighlightEnabled && term.buffer.active.type === 'normal') {
+        const s = dec.decode(b, { stream: true }); if (s) term.write(highlightLogText(s))
+      } else term.write(b)
     })
-    const onResize = term.onResize(({ cols, rows }) => { void api.resizeTerminal(opts.sessionId, cols, rows) })
-    const unsubData = api.onEvent<{ sessionId: string; data: string }>('terminal:data', (p) => {
-      if (p.sessionId !== opts.sessionId || !p.data) return
-      const bytes = base64ToUint8Array(p.data)
-      if (settingsRef.current.keywordHighlightEnabled && term.buffer.active.type === 'normal') {
-        const text = decoder.decode(bytes, { stream: true })
-        if (text) term.write(highlightLogText(text))
-      } else {
-        term.write(bytes)
-      }
-    })
-
-    let roTimer: ReturnType<typeof setTimeout> | null = null
-    const ro = new ResizeObserver(() => {
-      if (roTimer) clearTimeout(roTimer)
-      roTimer = setTimeout(() => { try { fit.fit() } catch { /* ignore */ } }, 24)
-    })
+    let roT = 0
+    const ro = new ResizeObserver(() => { clearTimeout(roT); roT = window.setTimeout(() => { try { fit.fit() } catch { /**/ } }, 24) })
     ro.observe(el)
     return () => {
-      if (roTimer) clearTimeout(roTimer)
-      el.removeEventListener('paste', onNativePaste, true)
-      detachImeGuard()
-      ro.disconnect(); unsubData(); onData.dispose(); onResize.dispose(); term.dispose()
-      termRef.current = null; fitRef.current = null
+      clearTimeout(roT); el.removeEventListener('paste', onPaste, true); ime.detach(); imeRef.current = null
+      ro.disconnect(); unsub(); onData.dispose(); onResize.dispose(); term.dispose(); termRef.current = null; fitRef.current = null
     }
-  }, [opts.sessionId, enqueueWrite, pasteText])
+  }, [sessionId, enqueueWrite, pasteText])
 
   useEffect(() => {
-    if (opts.status !== 'connected') return
+    if (status !== 'connected') return
     syncSize()
-    const t = setTimeout(() => { syncSize(); if (opts.active) termRef.current?.focus() }, 120)
+    const t = setTimeout(() => { syncSize(); if (active) { termRef.current?.focus(); imeRef.current?.(true) } }, 120)
     return () => clearTimeout(t)
-  }, [opts.status, opts.active, syncSize])
+  }, [status, active, syncSize])
 
   useEffect(() => {
-    if (!opts.active) return
-    const id = setTimeout(() => {
-      syncSize()
-      termRef.current?.focus()
-      if (settingsRef.current.autoSwitchEnglishIme) void api.switchTerminalIme().catch(() => {})
-    }, 40)
+    if (!active) return
+    const id = setTimeout(() => { syncSize(); termRef.current?.focus(); imeRef.current?.(true) }, 40)
     return () => clearTimeout(id)
-  }, [opts.active, opts.showSftp, opts.rightDrawer, opts.settings.monitorBarEnabled, syncSize])
+  }, [active, showSftp, rightDrawer, settings.monitorBarEnabled, syncSize])
 
   return { containerRef, termRef, searchAddonRef, pasteText, commitPaste }
 }
