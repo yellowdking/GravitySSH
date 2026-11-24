@@ -61,3 +61,60 @@ func TestSuggestPrioritizesShortcutsAndHistory(t *testing.T) {
 		}
 	}
 }
+
+func TestSuggestWithFilesDirectoriesAndScripts(t *testing.T) {
+	entries := []models.SFTPFileEntry{
+		{Name: "app", IsDir: true},
+		{Name: "docker", IsDir: true},
+		{Name: "nginx.conf", IsDir: false, Size: 2048},
+		{Name: "backup.zip", IsDir: false, Size: 3 * 1024 * 1024},
+		{Name: "script.sh", IsDir: false, Size: 512},
+		{Name: ".env", IsDir: false, Size: 128},
+	}
+
+	// cd prioritizes directories only
+	cdItems := SuggestWithFiles("cd d", "/srv", entries, nil, nil, false, false, 8)
+	if len(cdItems) == 0 || cdItems[0].Command != "cd docker/" || cdItems[0].Source != "dir" || cdItems[0].InsertText != "ocker/" {
+		t.Fatalf("unexpected cd suggestions: %+v", cdItems)
+	}
+	for _, it := range cdItems {
+		if it.Source == "file" {
+			t.Fatalf("cd should not suggest files, got %+v", it)
+		}
+	}
+
+	// nano matches files and shows file size description
+	nanoItems := SuggestWithFiles("nano ng", "/srv", entries, nil, nil, false, false, 8)
+	if len(nanoItems) == 0 || nanoItems[0].Command != "nano nginx.conf" || nanoItems[0].Source != "file" || nanoItems[0].InsertText != "inx.conf" {
+		t.Fatalf("unexpected nano suggestions: %+v", nanoItems)
+	}
+
+	// ./ prefix matches local scripts/dirs
+	dotItems := SuggestWithFiles("./sc", "/srv", entries, nil, nil, false, false, 8)
+	if len(dotItems) == 0 || dotItems[0].Command != "./script.sh" || dotItems[0].InsertText != "ript.sh" {
+		t.Fatalf("unexpected ./ suggestions: %+v", dotItems)
+	}
+
+	// Hidden files only shown when prefix starts with '.'
+	hiddenOff := SuggestWithFiles("cat ", "/srv", entries, nil, nil, false, false, 10)
+	for _, it := range hiddenOff {
+		if it.Command == "cat .env" {
+			t.Fatal("dotfiles should be hidden unless prefix starts with '.'")
+		}
+	}
+	hiddenOn := SuggestWithFiles("cat .", "/srv", entries, nil, nil, false, false, 10)
+	if len(hiddenOn) == 0 || hiddenOn[0].Command != "cat .env" {
+		t.Fatalf("expected .env when typing 'cat .', got %+v", hiddenOn)
+	}
+
+	// ExtractPathContext handles relative, absolute, and flag skips
+	if dir, ok := ExtractPathContext("ls ./sub/fi", "/home/ubuntu"); !ok || dir != "/home/ubuntu/sub" {
+		t.Fatalf("unexpected relative path context: (%q, %v)", dir, ok)
+	}
+	if dir, ok := ExtractPathContext("nano /etc/ng", "/home/ubuntu"); !ok || dir != "/etc" {
+		t.Fatalf("unexpected abs path context: (%q, %v)", dir, ok)
+	}
+	if _, ok := ExtractPathContext("rm -rf", "/home/ubuntu"); ok {
+		t.Fatal("expected flag token '-rf' not to trigger file path context")
+	}
+}
