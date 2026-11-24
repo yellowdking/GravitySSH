@@ -39,6 +39,7 @@ func TestGenerateAndParseEncryptedKey(t *testing.T) {
 	if _, err := ParsePrivateKey(pemStr, ""); !errors.Is(err, ErrPassphraseRequired) {
 		t.Fatalf("expected ErrPassphraseRequired when passphrase omitted, got %v", err)
 	}
+
 	if _, err := ParsePrivateKey(pemStr, "wrong-pass"); err == nil {
 		t.Fatal("expected error with wrong passphrase")
 	}
