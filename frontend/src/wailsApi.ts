@@ -71,7 +71,6 @@ export const api = {
     callGo<void>('SetSessionCWD', sessionId, remotePath),
   getCurrentInputLine: (sessionId: string) => callGo<string>('GetCurrentInputLine', sessionId),
   getSessionMetrics: (sessionId: string) => callGo<HostMetrics>('GetSessionMetrics', sessionId),
-  wakeReconnect: () => callGo<void>('WakeReconnect'),
   switchTerminalIme: () => callGo<void>('SwitchTerminalIME'),
 
   // History & Shortcuts
