@@ -1,10 +1,12 @@
 package sshclient
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/pkg/sftp"
 )
@@ -27,8 +29,16 @@ func (m *Manager) SFTPRename(sessionID, oldPath, newPath string) error {
 	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(oldPath) == "" || strings.TrimSpace(newPath) == "" ||
+		strings.ContainsRune(oldPath, 0) || strings.ContainsRune(newPath, 0) {
+		return fmt.Errorf("无效的重命名路径")
+	}
 	cleanOld, cleanNew := path.Clean(oldPath), path.Clean(newPath)
-	if err := sc.Rename(cleanOld, cleanNew); err != nil {
+	if cleanOld == "/" || cleanOld == "." || cleanOld == ".." ||
+		cleanNew == "/" || cleanNew == "." || cleanNew == ".." {
+		return fmt.Errorf("无效的重命名路径")
+	}
+	if err := renameRemote(sc, cleanOld, cleanNew); err != nil {
 		return err
 	}
 	m.invalidateDirCache(sessionID, path.Dir(cleanOld))
@@ -41,35 +51,62 @@ func (m *Manager) SFTPDelete(sessionID, remotePath string) error {
 	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(remotePath) == "" || strings.ContainsRune(remotePath, 0) {
+		return fmt.Errorf("无效的远程路径")
+	}
 	clean := path.Clean(remotePath)
-	if clean == "/" || clean == "." {
+	if clean == "/" || clean == "." || clean == ".." {
 		return fmt.Errorf("禁止删除根目录")
 	}
+	_, preErr := sc.Lstat(clean)
+	hadTarget := preErr == nil
+
 	if err := removeRemoteRecursive(sc, clean); err != nil {
-		return err
+		if hadTarget {
+			if _, postErr := sc.Lstat(clean); errors.Is(postErr, os.ErrNotExist) {
+				m.invalidateDirCache(sessionID, path.Dir(clean))
+				return nil
+			}
+		}
+		if fbErr := m.deleteViaSSHFallback(sessionID, clean); fbErr != nil {
+			return err
+		}
 	}
 	m.invalidateDirCache(sessionID, path.Dir(clean))
 	return nil
 }
 
-func removeRemoteRecursive(sc *sftp.Client, target string) error {
-	info, err := sc.Lstat(target)
+func (m *Manager) deleteViaSSHFallback(sessionID, clean string) error {
+	if !strings.HasPrefix(clean, "/") || clean == "/" || clean == "." || clean == ".." {
+		return fmt.Errorf("skip unsafe fallback path")
+	}
+	client, err := m.getSSHClient(sessionID)
 	if err != nil {
 		return err
 	}
-	if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-		items, err := sc.ReadDir(target)
-		if err != nil {
-			return err
-		}
-		for _, item := range items {
-			if err := removeRemoteRecursive(sc, path.Join(target, item.Name())); err != nil {
-				return err
-			}
-		}
-		return sc.RemoveDirectory(target)
+	sshSess, err := client.NewSession()
+	if err != nil {
+		return err
 	}
-	return sc.Remove(target)
+	defer sshSess.Close()
+
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-done:
+		case <-time.After(60 * time.Second):
+			_ = sshSess.Close()
+		}
+	}()
+
+	q := shellQuote(clean)
+	cmd := fmt.Sprintf("if [ -e %s ] || [ -L %s ]; then rm -rf -- %s && [ ! -e %s ] && [ ! -L %s ]; else exit 44; fi", q, q, q, q, q)
+	out, runErr := sshSess.CombinedOutput(cmd)
+	close(done)
+	if runErr != nil {
+		return fmt.Errorf("ssh rm fallback: %w (%s)", runErr, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // SFTPAlignPermissions aligns remotePath's permissions (and best-effort uid/gid)
