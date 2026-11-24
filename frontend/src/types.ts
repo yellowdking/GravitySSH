@@ -269,3 +269,15 @@ export interface CompletionItem {
   insertText: string
   score: number
 }
+
+export interface SSHCacheInfo {
+  knownHostsPath: string
+  knownHostCount: number
+  dirCacheCount: number
+}
+
+export interface SSHCacheClearResult {
+  removedKnownHosts: number
+  clearedDirCaches: number
+  knownHostsPath: string
+}
