@@ -30,6 +30,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   sftpFollowTerminal: true,
   pasteGuardEnabled: true,
   keywordHighlightEnabled: true,
+  autoSwitchEnglishIme: true,
   checkUpdatesOnStartup: true,
 }
 
@@ -41,7 +42,7 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
   const [securityInfo, setSecurityInfo] = useState<VaultSecurityInfo | null>(null)
   const [lockState, setLockState] = useState<VaultLockState | null>(null)
-  const [appVersion, setAppVersion] = useState('1.2.1')
+  const [appVersion, setAppVersion] = useState('1.2.2')
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null)
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
