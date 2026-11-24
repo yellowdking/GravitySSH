@@ -14,7 +14,7 @@ import (
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
-const vaultSchemaVersion = 2
+const vaultSchemaVersion = 3
 
 type Store struct {
 	mu          sync.RWMutex
@@ -87,6 +87,14 @@ func Open(filePath string, protector crypto.KeyProtector) (*Store, error) {
 }
 
 func normalizeVault(v *models.VaultData) {
+	if v.Version < 3 {
+		v.Settings.MonitorBarEnabled = true
+		v.Settings.AutoReconnect = true
+		v.Settings.SFTPFollowTerminal = true
+		v.Settings.PasteGuardEnabled = true
+		v.Settings.KeywordHighlightEnabled = true
+		v.Settings.CheckUpdatesOnStartup = true
+	}
 	if v.Version < vaultSchemaVersion {
 		v.Version = vaultSchemaVersion
 	}
