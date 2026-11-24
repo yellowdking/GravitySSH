@@ -17,6 +17,29 @@ describe('autocomplete helpers', () => {
     })
   })
 
+  it('completes directory and file paths on command tail without duplicating prefixes', () => {
+    expect(computeCompletionInsert('cd doc', 'cd docker-compose/')).toEqual({
+      backspaces: 0,
+      insertText: 'ker-compose/',
+    })
+    expect(computeCompletionInsert('nano /etc/ng', 'nano /etc/nginx/')).toEqual({
+      backspaces: 0,
+      insertText: 'inx/',
+    })
+    expect(computeCompletionInsert('cd ', 'cd logs/')).toEqual({
+      backspaces: 0,
+      insertText: 'logs/',
+    })
+    expect(computeCompletionInsert('cd DOC', 'cd docker-compose/')).toEqual({
+      backspaces: 3,
+      insertText: 'docker-compose/',
+    })
+    expect(computeCompletionInsert('nano /etc/conf', 'nano /etc/nginx.conf')).toEqual({
+      backspaces: 4,
+      insertText: 'nginx.conf',
+    })
+  })
+
   it('replaces typed token when selecting a substring match', () => {
     expect(computeCompletionInsert('compose', 'docker compose up -d')).toEqual({
       backspaces: 7,

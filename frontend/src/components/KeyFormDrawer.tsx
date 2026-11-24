@@ -1,5 +1,5 @@
 import React from 'react'
-import { FileKey2, Lock, Sparkles, X } from 'lucide-react'
+import { FileKey2, KeyRound, Sparkles, X } from 'lucide-react'
 
 interface Props {
   mode: 'import' | 'generate'
@@ -42,7 +42,7 @@ export const KeyFormDrawer: React.FC<Props> = ({
     <div className="flex items-center justify-between mb-4">
       <h3 className="text-sm font-semibold text-ag-text flex items-center gap-2">
         {mode === 'import' ? <FileKey2 className="w-4 h-4 text-indigo-400" /> : <Sparkles className="w-4 h-4 text-indigo-400" />}
-        {mode === 'import' ? '导入 SSH 私钥到加密保险库' : '生成新的 SSH 密钥对'}
+        {mode === 'import' ? '导入 SSH 私钥' : '自定义生成 SSH 密钥对'}
       </h3>
       <button onClick={onCancel} className="p-1 rounded-lg hover:bg-ag-hover text-ag-muted">
         <X className="w-4 h-4" />
@@ -84,8 +84,8 @@ export const KeyFormDrawer: React.FC<Props> = ({
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onCancel} className="ag-btn-ghost">取消</button>
           <button type="submit" disabled={busy} className="ag-btn-primary">
-            <Lock className="w-3.5 h-3.5" />
-            {busy ? '加密保存中...' : '加密存入保险库'}
+            <KeyRound className="w-3.5 h-3.5" />
+            {busy ? '保存中...' : '保存私钥'}
           </button>
         </div>
       </form>
@@ -93,8 +93,8 @@ export const KeyFormDrawer: React.FC<Props> = ({
       <form onSubmit={onSubmitGenerate} className="space-y-3.5">
         <div className="grid grid-cols-3 gap-3">
           <div>
-            <label className="block text-xs text-ag-muted mb-1">密钥名称 *</label>
-            <input required className="ag-input" placeholder="例如：my-ed25519" value={name} onChange={(e) => onNameChange(e.target.value)} />
+            <label className="block text-xs text-ag-muted mb-1">密钥名称（留空自动命名）</label>
+            <input className="ag-input" placeholder="例如：my-ed25519" value={name} onChange={(e) => onNameChange(e.target.value)} />
           </div>
           <div>
             <label className="block text-xs text-ag-muted mb-1">加密算法</label>
@@ -109,14 +109,14 @@ export const KeyFormDrawer: React.FC<Props> = ({
           </div>
         </div>
         <div>
-          <label className="block text-xs text-ag-muted mb-1">公钥注释（可选）</label>
+          <label className="block text-xs text-ag-muted mb-1">备注（可选）</label>
           <input className="ag-input font-mono" placeholder="user@gravityssh" value={comment} onChange={(e) => onCommentChange(e.target.value)} />
         </div>
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onCancel} className="ag-btn-ghost">取消</button>
           <button type="submit" disabled={busy} className="ag-btn-primary">
             <Sparkles className="w-3.5 h-3.5" />
-            {busy ? '正在生成...' : '立即生成并加密保存'}
+            {busy ? '正在生成...' : '生成并保存'}
           </button>
         </div>
       </form>

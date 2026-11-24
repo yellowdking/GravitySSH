@@ -90,63 +90,13 @@ func (m *Manager) SFTPList(sessionID, remotePath string) (models.SFTPListResult,
 		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
 	})
 
-	parent := path.Dir(dir)
+	m.updateDirCache(sessionID, dir, entries)
+
 	return models.SFTPListResult{
 		Path:    dir,
-		Parent:  parent,
+		Parent:  path.Dir(dir),
 		Entries: entries,
 	}, nil
-}
-
-// SFTPMkdir creates a directory on the remote server.
-func (m *Manager) SFTPMkdir(sessionID, remotePath string) error {
-	sc, err := m.getSFTP(sessionID)
-	if err != nil {
-		return err
-	}
-	return sc.MkdirAll(path.Clean(remotePath))
-}
-
-// SFTPRename renames or moves a remote file/directory.
-func (m *Manager) SFTPRename(sessionID, oldPath, newPath string) error {
-	sc, err := m.getSFTP(sessionID)
-	if err != nil {
-		return err
-	}
-	return sc.Rename(path.Clean(oldPath), path.Clean(newPath))
-}
-
-// SFTPDelete deletes a remote file or recursively removes a remote directory.
-func (m *Manager) SFTPDelete(sessionID, remotePath string) error {
-	sc, err := m.getSFTP(sessionID)
-	if err != nil {
-		return err
-	}
-	clean := path.Clean(remotePath)
-	if clean == "/" || clean == "." {
-		return fmt.Errorf("禁止删除根目录")
-	}
-	return removeRemoteRecursive(sc, clean)
-}
-
-func removeRemoteRecursive(sc *sftp.Client, target string) error {
-	info, err := sc.Lstat(target)
-	if err != nil {
-		return err
-	}
-	if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-		items, err := sc.ReadDir(target)
-		if err != nil {
-			return err
-		}
-		for _, item := range items {
-			if err := removeRemoteRecursive(sc, path.Join(target, item.Name())); err != nil {
-				return err
-			}
-		}
-		return sc.RemoveDirectory(target)
-	}
-	return sc.Remove(target)
 }
 
 // SFTPUpload uploads a local file into remoteDir with live progress events.
@@ -171,7 +121,8 @@ func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
 	}
 
 	fileName := filepath.Base(localPath)
-	remotePath := path.Join(path.Clean(remoteDir), fileName)
+	cleanDir := path.Clean(remoteDir)
+	remotePath := path.Join(cleanDir, fileName)
 	transferID := uuid.NewString()
 
 	dst, err := sc.Create(remotePath)
@@ -191,7 +142,7 @@ func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
 	}
 	defer dst.Close()
 
-	if err := m.copyWithProgress(dst, src, models.TransferProgress{
+	err = m.copyWithProgress(dst, src, models.TransferProgress{
 		TransferID: transferID,
 		SessionID:  sessionID,
 		Direction:  "upload",
@@ -200,10 +151,9 @@ func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
 		LocalPath:  localPath,
 		Total:      st.Size(),
 		Status:     "running",
-	}); err != nil {
-		return err
-	}
-	return nil
+	})
+	m.invalidateDirCache(sessionID, cleanDir)
+	return err
 }
 
 // SFTPDownload downloads a remote file to localPath with live progress events.

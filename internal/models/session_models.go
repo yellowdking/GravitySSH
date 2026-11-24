@@ -69,7 +69,7 @@ func DefaultSettings() AppSettings {
 		AutocompleteFromShortcut: true,
 		AutoOpenSFTP:             true,
 		SFTPPanelPosition:        "right",
-		TerminalFontFamily:       "Cascadia Mono, JetBrains Mono, Consolas, monospace",
+		TerminalFontFamily:       "Cascadia Mono, Consolas, Courier New, monospace",
 		TerminalFontSize:         14,
 		DefaultKeepAliveSeconds:  30,
 		MaxHistoryEntries:        2000,
@@ -141,6 +141,20 @@ type SessionInfo struct {
 	Error      string    `json:"error,omitempty"`
 	ViaSummary string    `json:"viaSummary,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
+}
+
+type VaultLockState struct {
+	Locked        bool   `json:"locked"`
+	HasPassword   bool   `json:"hasPassword"`
+	VaultPath     string `json:"vaultPath"`
+	SchemaVersion int    `json:"schemaVersion"`
+}
+
+type KeyDeployResult struct {
+	ServerID   string `json:"serverId"`
+	ServerName string `json:"serverName"`
+	OK         bool   `json:"ok"`
+	Message    string `json:"message"`
 }
 
 type CompletionItem struct {

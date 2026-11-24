@@ -11,12 +11,19 @@ func TestCommandRecorderBasicAndEditing(t *testing.T) {
 		recorded = append(recorded, cmd)
 	})
 
+	// Simple command
 	rec.Feed([]byte("docker ps -a\r"))
+	// Backspace correction
 	rec.Feed([]byte("apt updaet\x7f\x7fte\r"))
+	// Ctrl+C cancels line
 	rec.Feed([]byte("rm -rf /tmp/oops\x03"))
+	// Ctrl+U clears line then new command
 	rec.Feed([]byte("wrong\x15systemctl status nginx\n"))
+	// Left arrow edit
 	rec.Feed([]byte("ls -l\x1b[Da\r"))
+	// Bracketed paste with multiple lines
 	rec.Feed([]byte("\x1b[200~apk update\napk add curl\n\x1b[201~"))
+	// Ctrl+W deletes previous word
 	rec.Feed([]byte("git checkout wrong\x17main\r"))
 
 	want := []string{
@@ -44,11 +51,13 @@ func TestCommandRecorderCurrentLineAndUpArrow(t *testing.T) {
 		t.Fatalf("expected CurrentLine 'dock', got %q", got)
 	}
 
+	// Up arrow enters shell history navigation -> should not emit garbled escape sequence
 	rec.Feed([]byte("\x1b[A\r"))
 	if len(recorded) != 0 {
 		t.Fatalf("expected no recorded command on up-arrow history recall, got %#v", recorded)
 	}
 
+	// Typing again resets cleanly
 	rec.Feed([]byte("free -h\r"))
 	if len(recorded) != 1 || recorded[0] != "free -h" {
 		t.Fatalf("expected ['free -h'], got %#v", recorded)

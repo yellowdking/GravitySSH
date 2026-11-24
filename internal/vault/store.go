@@ -14,21 +14,16 @@ import (
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
-const vaultSchemaVersion = 1
+const vaultSchemaVersion = 2
 
 type Store struct {
-	mu       sync.RWMutex
-	filePath string
-	enc      *crypto.EnvelopeCrypto
-	data     models.VaultData
-}
-
-func DefaultVaultPath() (string, error) {
-	cfgDir, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user config dir: %w", err)
-	}
-	return filepath.Join(cfgDir, "GravitySSH", "vault.gsv"), nil
+	mu          sync.RWMutex
+	filePath    string
+	enc         *crypto.EnvelopeCrypto
+	data        models.VaultData
+	locked      bool
+	hasPassword bool
+	password    string
 }
 
 func Open(filePath string, protector crypto.KeyProtector) (*Store, error) {
@@ -67,7 +62,17 @@ func Open(filePath string, protector crypto.KeyProtector) (*Store, error) {
 		return nil, fmt.Errorf("read vault file: %w", err)
 	}
 
-	plain, err := s.enc.Open(raw)
+	isPw, err := s.enc.IsPasswordProtected(raw)
+	if err != nil {
+		return nil, err
+	}
+	if isPw {
+		s.locked = true
+		s.hasPassword = true
+		return s, nil
+	}
+
+	plain, err := s.enc.OpenWithPassword(raw, "")
 	if err != nil {
 		return nil, err
 	}
@@ -82,6 +87,9 @@ func Open(filePath string, protector crypto.KeyProtector) (*Store, error) {
 }
 
 func normalizeVault(v *models.VaultData) {
+	if v.Version < vaultSchemaVersion {
+		v.Version = vaultSchemaVersion
+	}
 	if v.Servers == nil {
 		v.Servers = []models.ServerConfig{}
 	}
@@ -155,11 +163,17 @@ func defaultShortcuts() []models.CommandShortcut {
 }
 
 func (s *Store) saveLocked() error {
+	if s.locked {
+		return errors.New("配置文件处于锁定状态，请先输入密码解锁")
+	}
+	if s.data.Version < vaultSchemaVersion {
+		s.data.Version = vaultSchemaVersion
+	}
 	plain, err := json.Marshal(s.data)
 	if err != nil {
 		return fmt.Errorf("marshal vault: %w", err)
 	}
-	sealed, err := s.enc.Seal(plain)
+	sealed, err := s.enc.SealWithPassword(plain, s.password)
 	if err != nil {
 		return fmt.Errorf("encrypt vault: %w", err)
 	}

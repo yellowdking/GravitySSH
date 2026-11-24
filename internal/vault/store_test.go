@@ -19,6 +19,7 @@ func TestVaultEncryptedPersistenceAndSecretIsolation(t *testing.T) {
 		t.Fatalf("Open vault failed: %v", err)
 	}
 
+	// Import an SSH key
 	privPEM, _, err := sshkey.GenerateKeyPair("ed25519", "prod@srv", "key-secret-pass")
 	if err != nil {
 		t.Fatalf("GenerateKeyPair failed: %v", err)
@@ -31,6 +32,7 @@ func TestVaultEncryptedPersistenceAndSecretIsolation(t *testing.T) {
 		t.Fatal("expected HasPassphrase=true")
 	}
 
+	// Save a server with password, proxy password, and jump host
 	srv, err := store.SaveServer(models.ServerSaveRequest{
 		Name:     "HK-Node",
 		Group:    "Prod",
@@ -55,6 +57,7 @@ func TestVaultEncryptedPersistenceAndSecretIsolation(t *testing.T) {
 		t.Fatal("expected HasPassword flags to be true")
 	}
 
+	// Save a shortcut
 	sc, err := store.SaveShortcut(models.CommandShortcut{
 		Name:        "重启Nginx",
 		Command:     "sudo nginx -t && sudo systemctl reload nginx",
@@ -65,10 +68,12 @@ func TestVaultEncryptedPersistenceAndSecretIsolation(t *testing.T) {
 		t.Fatalf("SaveShortcut failed: %v", err)
 	}
 
+	// Record a command
 	if _, err := store.RecordCommand(srv.ID, srv.Name, "sess-1", "docker compose up -d"); err != nil {
 		t.Fatalf("RecordCommand failed: %v", err)
 	}
 
+	// Verify raw file on disk contains NO plaintext secrets (keys, passwords, shortcuts)
 	diskBytes, err := os.ReadFile(vaultPath)
 	if err != nil {
 		t.Fatalf("read vault file failed: %v", err)
@@ -86,6 +91,7 @@ func TestVaultEncryptedPersistenceAndSecretIsolation(t *testing.T) {
 		}
 	}
 
+	// Re-open vault from disk and verify everything loads back cleanly
 	store2, err := Open(vaultPath, nil)
 	if err != nil {
 		t.Fatalf("Re-open vault failed: %v", err)
@@ -100,6 +106,7 @@ func TestVaultEncryptedPersistenceAndSecretIsolation(t *testing.T) {
 		t.Fatalf("internal key reload mismatch: %v", err)
 	}
 
+	// Update server keeping existing password
 	updated, err := store2.SaveServer(models.ServerSaveRequest{
 		ID:                   srv.ID,
 		Name:                 "HK-Node-Renamed",
@@ -128,6 +135,7 @@ func TestVaultEncryptedPersistenceAndSecretIsolation(t *testing.T) {
 		t.Fatalf("preserved passwords mismatch")
 	}
 
+	// Verify shortcut and history persisted
 	foundSc := false
 	for _, item := range store2.ListShortcuts() {
 		if item.ID == sc.ID && item.Command == "sudo nginx -t && sudo systemctl reload nginx" {

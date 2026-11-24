@@ -3,7 +3,6 @@ package sshclient
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -29,17 +28,31 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 		return
 	}
 
+	sess.mu.Lock()
+	ptyCols, ptyRows := sess.lastCols, sess.lastRows
+	sess.mu.Unlock()
+	if ptyCols <= 0 {
+		ptyCols = cols
+	}
+	if ptyRows <= 0 {
+		ptyRows = rows
+	}
+
 	modes := ssh.TerminalModes{
 		ssh.ECHO:          1,
 		ssh.TTY_OP_ISPEED: 14400,
 		ssh.TTY_OP_OSPEED: 14400,
 	}
-	if err := sshSess.RequestPty("xterm-256color", rows, cols, modes); err != nil {
+	if err := sshSess.RequestPty("xterm-256color", ptyRows, ptyCols, modes); err != nil {
 		_ = sshSess.Close()
 		dialRes.Close()
 		m.failSession(sess, fmt.Sprintf("请求 PTY 终端失败: %v", err))
 		return
 	}
+
+	// Best-effort UTF-8 locale so full-screen TUIs (nano/vim/htop) render borders and CJK cleanly.
+	_ = sshSess.Setenv("LANG", "en_US.UTF-8")
+	_ = sshSess.Setenv("LC_CTYPE", "en_US.UTF-8")
 
 	stdin, err := sshSess.StdinPipe()
 	if err != nil {
@@ -70,6 +83,14 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 		return
 	}
 
+	// If window was resized during SSH dial / Shell startup, immediately sync PTY size.
+	sess.mu.Lock()
+	latestCols, latestRows := sess.lastCols, sess.lastRows
+	sess.mu.Unlock()
+	if latestCols > 0 && latestRows > 0 && (latestCols != ptyCols || latestRows != ptyRows) {
+		_ = sshSess.WindowChange(latestRows, latestCols)
+	}
+
 	var sftpClient *sftp.Client
 	homeDir := srv.DefaultRemotePath
 	sftpReady := false
@@ -83,6 +104,9 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 				homeDir = "/"
 			}
 		}
+	}
+	if homeDir == "" {
+		homeDir = "/"
 	}
 
 	sess.mu.Lock()
@@ -103,6 +127,9 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 	sess.info.SFTPReady = sftpReady
 	sess.info.HomeDir = homeDir
 	sess.info.ViaSummary = dialRes.ViaSummary
+	if sess.currentDir == "" {
+		sess.currentDir = homeDir
+	}
 	infoSnap := sess.info
 	sess.mu.Unlock()
 
@@ -224,79 +251,4 @@ func (m *Manager) markDisconnected(sess *sessionState, reason string) {
 
 	m.sendTerminalText(sess.info.SessionID, fmt.Sprintf("\r\n\x1b[38;5;245m● %s\x1b[0m\r\n", reason))
 	m.emit("session:status", infoSnap)
-}
-
-func (m *Manager) WriteInput(sessionID, data string) error {
-	m.mu.RLock()
-	sess, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if !ok {
-		return fmt.Errorf("会话不存在: %s", sessionID)
-	}
-	sess.mu.Lock()
-	stdin := sess.stdin
-	rec := sess.recorder
-	sess.mu.Unlock()
-	if stdin == nil {
-		return errors.New("终端尚未就绪")
-	}
-	raw := []byte(data)
-	if _, err := stdin.Write(raw); err != nil {
-		return err
-	}
-	if rec != nil {
-		rec.Feed(raw)
-	}
-	return nil
-}
-
-func (m *Manager) CurrentInputLine(sessionID string) string {
-	m.mu.RLock()
-	sess, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if !ok || sess.recorder == nil {
-		return ""
-	}
-	return sess.recorder.CurrentLine()
-}
-
-func (m *Manager) Resize(sessionID string, cols, rows int) error {
-	m.mu.RLock()
-	sess, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if !ok {
-		return nil
-	}
-	sess.mu.Lock()
-	sshSess := sess.sshSession
-	sess.mu.Unlock()
-	if sshSess == nil || cols <= 0 || rows <= 0 {
-		return nil
-	}
-	return sshSess.WindowChange(rows, cols)
-}
-
-func (m *Manager) Disconnect(sessionID string) {
-	m.mu.Lock()
-	sess, ok := m.sessions[sessionID]
-	if ok {
-		delete(m.sessions, sessionID)
-	}
-	m.mu.Unlock()
-	if ok {
-		m.markDisconnected(sess, "已主动断开连接")
-	}
-}
-
-func (m *Manager) CloseAll() {
-	m.mu.Lock()
-	all := make([]*sessionState, 0, len(m.sessions))
-	for id, s := range m.sessions {
-		all = append(all, s)
-		delete(m.sessions, id)
-	}
-	m.mu.Unlock()
-	for _, s := range all {
-		m.markDisconnected(s, "应用关闭")
-	}
 }

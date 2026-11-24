@@ -1,17 +1,15 @@
 package main
 
 import (
-	"errors"
 	"path"
 	"strings"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
-	"github.com/yellowdking/GravitySSH/internal/autocomplete"
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
 func (a *App) ConnectServer(serverID string, cols, rows int) (models.SessionInfo, error) {
-	if err := a.ensureReady(); err != nil {
+	if err := a.ensureUnlocked(); err != nil {
 		return models.SessionInfo{}, err
 	}
 	return a.sshMgr.Connect(a.ctx, serverID, cols, rows)
@@ -44,6 +42,14 @@ func (a *App) ResizeTerminal(sessionID string, cols, rows int) error {
 		return err
 	}
 	return a.sshMgr.Resize(sessionID, cols, rows)
+}
+
+func (a *App) SetSessionCWD(sessionID, remotePath string) error {
+	if err := a.ensureReady(); err != nil {
+		return err
+	}
+	a.sshMgr.SetSessionCWD(sessionID, remotePath)
+	return nil
 }
 
 func (a *App) GetCurrentInputLine(sessionID string) (string, error) {
@@ -79,6 +85,20 @@ func (a *App) SFTPDelete(sessionID, remotePath string) error {
 		return err
 	}
 	return a.sshMgr.SFTPDelete(sessionID, remotePath)
+}
+
+func (a *App) SFTPAlignPermissions(sessionID, remotePath string) (string, error) {
+	if err := a.ensureReady(); err != nil {
+		return "", err
+	}
+	return a.sshMgr.SFTPAlignPermissions(sessionID, remotePath)
+}
+
+func (a *App) SFTPExtractArchive(sessionID, remotePath string) (string, error) {
+	if err := a.ensureReady(); err != nil {
+		return "", err
+	}
+	return a.sshMgr.SFTPExtractArchive(sessionID, remotePath)
 }
 
 func (a *App) SFTPUploadDialog(sessionID, remoteDir string) (int, error) {
@@ -126,105 +146,4 @@ func (a *App) SFTPDownloadDialog(sessionID, remotePath string) (string, error) {
 		return "", err
 	}
 	return savePath, nil
-}
-
-func (a *App) ListCommandHistory(serverID string, limit int) ([]models.CommandRecord, error) {
-	if err := a.ensureReady(); err != nil {
-		return nil, err
-	}
-	return a.store.ListHistory(serverID, limit), nil
-}
-
-func (a *App) DeleteHistoryEntry(id string) error {
-	if err := a.ensureReady(); err != nil {
-		return err
-	}
-	return a.store.DeleteHistoryEntry(id)
-}
-
-func (a *App) ClearHistory(serverID string) error {
-	if err := a.ensureReady(); err != nil {
-		return err
-	}
-	return a.store.ClearHistory(serverID)
-}
-
-func (a *App) ListShortcuts() ([]models.CommandShortcut, error) {
-	if err := a.ensureReady(); err != nil {
-		return nil, err
-	}
-	return a.store.ListShortcuts(), nil
-}
-
-func (a *App) SaveShortcut(sc models.CommandShortcut) (models.CommandShortcut, error) {
-	if err := a.ensureReady(); err != nil {
-		return models.CommandShortcut{}, err
-	}
-	return a.store.SaveShortcut(sc)
-}
-
-func (a *App) DeleteShortcut(id string) error {
-	if err := a.ensureReady(); err != nil {
-		return err
-	}
-	return a.store.DeleteShortcut(id)
-}
-
-func (a *App) RunShortcut(sessionID, shortcutID string, forceExecute bool) error {
-	if err := a.ensureReady(); err != nil {
-		return err
-	}
-	var target *models.CommandShortcut
-	for _, sc := range a.store.ListShortcuts() {
-		if sc.ID == shortcutID {
-			cp := sc
-			target = &cp
-			break
-		}
-	}
-	if target == nil {
-		return errors.New("快捷命令不存在")
-	}
-	a.store.IncrementShortcutUse(shortcutID)
-	payload := target.Command
-	if forceExecute || target.AutoExecute {
-		if !strings.HasSuffix(payload, "\n") && !strings.HasSuffix(payload, "\r") {
-			payload += "\r"
-		}
-	}
-	return a.sshMgr.WriteInput(sessionID, payload)
-}
-
-func (a *App) SuggestCommands(input string, serverID string) ([]models.CompletionItem, error) {
-	if err := a.ensureReady(); err != nil {
-		return nil, err
-	}
-	settings := a.store.GetSettings()
-	if !settings.AutocompleteEnabled {
-		return []models.CompletionItem{}, nil
-	}
-	shortcuts := a.store.ListShortcuts()
-	history := a.store.ListHistory(serverID, 150)
-	if len(history) < 30 && serverID != "" {
-		history = append(history, a.store.ListHistory("", 150)...)
-	}
-	items := autocomplete.Suggest(input, shortcuts, history, settings.AutocompleteFromShortcut, settings.AutocompleteFromHistory, 8)
-	if items == nil {
-		return []models.CompletionItem{}, nil
-	}
-	return items, nil
-}
-
-func (a *App) GetSettings() (models.AppSettings, error) {
-	if err := a.ensureReady(); err != nil {
-		return models.AppSettings{}, err
-	}
-	return a.store.GetSettings(), nil
-}
-
-func (a *App) SaveSettings(settings models.AppSettings) (models.AppSettings, error) {
-	if err := a.ensureReady(); err != nil {
-		return models.AppSettings{}, err
-	}
-	return a.store.SaveSettings(settings)
 }

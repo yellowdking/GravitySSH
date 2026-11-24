@@ -6,9 +6,11 @@ import type {
   ServerView,
   SessionInfo,
   SSHKeyMeta,
+  VaultLockState,
   VaultSecurityInfo,
 } from '../types'
 import { api } from '../wailsApi'
+import { DEFAULT_TERMINAL_FONT } from '../components/terminalTheme'
 
 const DEFAULT_SETTINGS: AppSettings = {
   autocompleteEnabled: true,
@@ -16,7 +18,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   autocompleteFromShortcut: true,
   autoOpenSftp: true,
   sftpPanelPosition: 'right',
-  terminalFontFamily: 'Cascadia Mono, JetBrains Mono, Consolas, monospace',
+  terminalFontFamily: DEFAULT_TERMINAL_FONT,
   terminalFontSize: 14,
   defaultKeepAliveSeconds: 30,
   maxHistoryEntries: 2000,
@@ -31,30 +33,54 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
   const [history, setHistory] = useState<CommandRecord[]>([])
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
   const [securityInfo, setSecurityInfo] = useState<VaultSecurityInfo | null>(null)
-  const [appVersion, setAppVersion] = useState('1.0.0')
+  const [lockState, setLockState] = useState<VaultLockState | null>(null)
+  const [appVersion, setAppVersion] = useState('1.1.0')
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sftpOpenBySession, setSftpOpenBySession] = useState<Record<string, boolean>>({})
 
   const loadAll = useCallback(async () => {
     try {
-      const [srvs, keys, scs, hist, cfg, sec, ver] = await Promise.all([
-        api.listServers(), api.listSSHKeys(), api.listShortcuts(), api.listCommandHistory('', 400),
-        api.getSettings(), api.getVaultSecurityInfo(), api.getAppVersion(),
+      const [lock, ver] = await Promise.all([
+        api.getVaultLockState().catch(() => null),
+        api.getAppVersion().catch(() => ''),
       ])
-      setServers(srvs || []); setSshKeys(keys || []); setShortcuts(scs || []); setHistory(hist || [])
-      if (cfg) setSettings(cfg); if (sec) setSecurityInfo(sec); if (ver) setAppVersion(ver)
-    } catch (err) { showToast(`加载保险库失败: ${err}`, 'error') }
+      if (ver) setAppVersion(ver)
+      if (lock) {
+        setLockState(lock)
+        if (lock.locked) return
+      }
+      const [srvs, keys, scs, hist, cfg, sec] = await Promise.all([
+        api.listServers(),
+        api.listSSHKeys(),
+        api.listShortcuts(),
+        api.listCommandHistory('', 400),
+        api.getSettings(),
+        api.getVaultSecurityInfo(),
+      ])
+      setServers(srvs || [])
+      setSshKeys(keys || [])
+      setShortcuts(scs || [])
+      setHistory(hist || [])
+      if (cfg) setSettings(cfg)
+      if (sec) setSecurityInfo(sec)
+    } catch (err) {
+      showToast(`加载配置失败: ${err}`, 'error')
+    }
   }, [showToast])
 
-  useEffect(() => { void loadAll() }, [loadAll])
+  useEffect(() => {
+    void loadAll()
+  }, [loadAll])
 
   useEffect(() => {
     const unsubStatus = api.onEvent<SessionInfo>('session:status', (info) => {
       setSessions((prev) => {
         const idx = prev.findIndex((s) => s.sessionId === info.sessionId)
         if (idx === -1) return [...prev, info]
-        const next = [...prev]; next[idx] = info; return next
+        const next = [...prev]
+        next[idx] = info
+        return next
       })
       if (info.status === 'connected' && info.sftpReady && settings.autoOpenSftp) {
         setSftpOpenBySession((prev) => ({ ...prev, [info.sessionId]: prev[info.sessionId] ?? true }))
@@ -63,11 +89,29 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
     const unsubCmd = api.onEvent<CommandRecord>('command:recorded', (rec) => {
       setHistory((prev) => [rec, ...prev].slice(0, 500))
     })
-    return () => { unsubStatus(); unsubCmd() }
+    return () => {
+      unsubStatus()
+      unsubCmd()
+    }
   }, [settings.autoOpenSftp])
 
   return {
-    servers, sshKeys, shortcuts, setShortcuts, history, settings, setSettings, securityInfo, appVersion,
-    sessions, setSessions, activeSessionId, setActiveSessionId, sftpOpenBySession, setSftpOpenBySession, loadAll,
+    servers,
+    sshKeys,
+    shortcuts,
+    setShortcuts,
+    history,
+    settings,
+    setSettings,
+    securityInfo,
+    lockState,
+    appVersion,
+    sessions,
+    setSessions,
+    activeSessionId,
+    setActiveSessionId,
+    sftpOpenBySession,
+    setSftpOpenBySession,
+    loadAll,
   }
 }

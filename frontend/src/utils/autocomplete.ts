@@ -1,3 +1,8 @@
+/**
+ * Computes the exact backspaces and remaining text to write into the terminal when the user
+ * selects an autocomplete suggestion, avoiding duplicate prefixes for both full commands
+ * and directory/file path completions (e.g. `cd doc` -> `cd docker-compose/`, `nano /etc/ng` -> `nano /etc/nginx/`).
+ */
 export function computeCompletionInsert(currentLine: string, fullCommand: string): {
   backspaces: number
   insertText: string
@@ -9,13 +14,30 @@ export function computeCompletionInsert(currentLine: string, fullCommand: string
   if (fullCommand.startsWith(trimmed)) {
     return { backspaces: 0, insertText: fullCommand.slice(trimmed.length) }
   }
-  if (fullCommand.toLowerCase().startsWith(trimmed.toLowerCase())) {
-    return { backspaces: trimmed.length, insertText: fullCommand }
+
+  // Find longest exact common prefix so shared command/path prefixes are never duplicated or re-typed.
+  let common = 0
+  const maxLen = Math.min(trimmed.length, fullCommand.length)
+  while (common < maxLen && trimmed[common] === fullCommand[common]) {
+    common++
   }
+
+  if (common > 0) {
+    return {
+      backspaces: trimmed.length - common,
+      insertText: fullCommand.slice(common),
+    }
+  }
+
+  // Substring or case-mismatch from start (e.g. "compose" -> "docker compose up -d")
   return { backspaces: trimmed.length, insertText: fullCommand }
 }
 
+/**
+ * Lightweight client-side input buffer mirror for zero-latency autocomplete triggering.
+ */
 export function applyTerminalInputToLine(currentLine: string, rawData: string): string {
+  // Ignore escape sequences (arrows, function keys, etc.)
   if (rawData.startsWith('\x1b')) {
     if (rawData === '\x1b[A' || rawData === '\x1b[B') {
       return ''
@@ -32,6 +54,7 @@ export function applyTerminalInputToLine(currentLine: string, rawData: string): 
     } else if (code === 0x7f || code === 0x08) {
       line = line.slice(0, -1)
     } else if (code === 0x17) {
+      // Ctrl+W delete previous word
       line = line.replace(/\S+\s*$/, '')
     } else if (code >= 0x20) {
       line += ch
