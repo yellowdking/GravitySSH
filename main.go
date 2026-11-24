@@ -11,7 +11,7 @@ import (
 )
 
 // AppVersion can be overridden at build time via -ldflags "-X main.AppVersion=..."
-var AppVersion = "1.0.0"
+var AppVersion = "1.1.0"
 
 //go:embed all:frontend/dist
 var assets embed.FS
@@ -23,8 +23,8 @@ func main() {
 		Title:            "GravitySSH",
 		Width:            1380,
 		Height:           860,
-		MinWidth:         1024,
-		MinHeight:        640,
+		MinWidth:         860,
+		MinHeight:        540,
 		BackgroundColour: &options.RGBA{R: 11, G: 13, B: 18, A: 255},
 		DragAndDrop: &options.DragAndDrop{
 			EnableFileDrop:     true,
