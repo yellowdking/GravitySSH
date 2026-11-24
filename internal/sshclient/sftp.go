@@ -1,6 +1,7 @@
 package sshclient
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -44,10 +45,13 @@ func (m *Manager) SFTPList(sessionID, remotePath string) (models.SFTPListResult,
 	}
 
 	dir := strings.TrimSpace(remotePath)
-	if dir == "" || dir == "~" {
+	if dir == "" || dir == "~" || strings.HasPrefix(dir, "~/") {
 		wd, wdErr := sc.Getwd()
 		if wdErr != nil || wd == "" {
-			dir = "/"
+			wd = "/"
+		}
+		if strings.HasPrefix(dir, "~/") {
+			dir = path.Join(wd, dir[2:])
 		} else {
 			dir = wd
 		}
@@ -105,6 +109,97 @@ func commitRemotePart(sc *sftp.Client, partPath, remotePath string) error {
 	}
 	_ = sc.Remove(remotePath)
 	return sc.Rename(partPath, remotePath)
+}
+
+func renameRemote(sc *sftp.Client, oldPath, newPath string) error {
+	if oldPath == newPath {
+		return nil
+	}
+	_, preErr := sc.Lstat(oldPath)
+	hadOld := preErr == nil
+
+	var err error
+	if _, hasPosix := sc.HasExtension("posix-rename@openssh.com"); hasPosix {
+		err = sc.PosixRename(oldPath, newPath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, os.ErrPermission) {
+			if rErr := sc.Rename(oldPath, newPath); rErr == nil {
+				return nil
+			} else {
+				err = rErr
+			}
+		}
+	} else {
+		err = sc.Rename(oldPath, newPath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, os.ErrPermission) {
+			if pErr := sc.PosixRename(oldPath, newPath); pErr == nil {
+				return nil
+			}
+		}
+	}
+
+	if err != nil && hadOld && errors.Is(err, os.ErrNotExist) {
+		_, oldErr := sc.Lstat(oldPath)
+		_, newErr := sc.Lstat(newPath)
+		if errors.Is(oldErr, os.ErrNotExist) && newErr == nil {
+			return nil
+		}
+	}
+	return err
+}
+
+func removeRemoteRecursive(sc *sftp.Client, target string) error {
+	return removeRemoteNode(sc, target, false)
+}
+
+func removeRemoteNode(sc *sftp.Client, target string, ignoreNotExist bool) error {
+	info, err := sc.Lstat(target)
+	if err != nil {
+		if ignoreNotExist && errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		if info.Mode().Perm()&0o200 == 0 {
+			_ = sc.Chmod(target, info.Mode().Perm()|0o700)
+		}
+		items, err := sc.ReadDir(target)
+		if err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				_ = sc.Chmod(target, 0o700)
+				items, err = sc.ReadDir(target)
+			}
+			if err != nil {
+				if ignoreNotExist && errors.Is(err, os.ErrNotExist) {
+					return nil
+				}
+				return err
+			}
+		}
+		for _, item := range items {
+			name := item.Name()
+			if name == "" || name == "." || name == ".." {
+				continue
+			}
+			if err := removeRemoteNode(sc, path.Join(target, name), true); err != nil {
+				return err
+			}
+		}
+		if err := sc.RemoveDirectory(target); err != nil {
+			if _, lerr := sc.Lstat(target); errors.Is(lerr, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+	if err := sc.Remove(target); err != nil {
+		if _, lerr := sc.Lstat(target); errors.Is(lerr, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (m *Manager) copyChunked(dst io.Writer, src io.Reader, prog *models.TransferProgress) error {
