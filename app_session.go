@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"github.com/yellowdking/GravitySSH/internal/ime"
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
@@ -72,6 +73,14 @@ func (a *App) WakeReconnect() error {
 	}
 	a.sshMgr.WakeReconnect()
 	return nil
+}
+
+// SwitchTerminalIME switches Windows IME to English when enabled in settings.
+func (a *App) SwitchTerminalIME() {
+	if a.store != nil && !a.store.GetSettings().AutoSwitchEnglishIME {
+		return
+	}
+	ime.SwitchToEnglish()
 }
 
 func (a *App) SFTPList(sessionID, remotePath string) (models.SFTPListResult, error) {
