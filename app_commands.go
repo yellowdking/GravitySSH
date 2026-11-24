@@ -39,7 +39,38 @@ func (a *App) ListShortcuts() ([]models.CommandShortcut, error) {
 }
 
 func (a *App) ListBuiltinTemplates() []models.BuiltinTemplate {
-	return vault.BuiltinOpsTemplates()
+	if err := a.ensureReady(); err != nil {
+		return vault.BuiltinOpsTemplates()
+	}
+	return a.store.ListTemplates()
+}
+
+func (a *App) ListOpsTemplates() ([]models.BuiltinTemplate, error) {
+	if err := a.ensureReady(); err != nil {
+		return nil, err
+	}
+	return a.store.ListTemplates(), nil
+}
+
+func (a *App) SaveOpsTemplate(tpl models.BuiltinTemplate) (models.BuiltinTemplate, error) {
+	if err := a.ensureUnlocked(); err != nil {
+		return models.BuiltinTemplate{}, err
+	}
+	return a.store.SaveTemplate(tpl)
+}
+
+func (a *App) DeleteOpsTemplate(id string) error {
+	if err := a.ensureUnlocked(); err != nil {
+		return err
+	}
+	return a.store.DeleteTemplate(id)
+}
+
+func (a *App) LoadPresetTemplates() (models.PresetLoadResult, error) {
+	if err := a.ensureUnlocked(); err != nil {
+		return models.PresetLoadResult{}, err
+	}
+	return a.store.LoadPresetTemplates()
 }
 
 func (a *App) SaveShortcut(sc models.CommandShortcut) (models.CommandShortcut, error) {
