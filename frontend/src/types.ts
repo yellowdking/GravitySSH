@@ -130,6 +130,12 @@ export interface AppSettings {
   maxHistoryEntries: number
   recordCommands: boolean
   language: 'zh' | 'en'
+  monitorBarEnabled: boolean
+  autoReconnect: boolean
+  sftpFollowTerminal: boolean
+  pasteGuardEnabled: boolean
+  keywordHighlightEnabled: boolean
+  checkUpdatesOnStartup: boolean
 }
 
 export interface VaultSecurityInfo {
@@ -194,12 +200,57 @@ export interface SessionInfo {
   host: string
   port: number
   username: string
-  status: 'connecting' | 'connected' | 'disconnected' | 'error'
+  status: 'connecting' | 'connected' | 'reconnecting' | 'disconnected' | 'error'
   sftpReady: boolean
   homeDir: string
   error?: string
   viaSummary?: string
   createdAt: string
+}
+
+export interface HostMetrics {
+  sessionId: string
+  supported: boolean
+  latencyMs: number
+  cpuPercent: number
+  memUsedMb: number
+  memTotalMb: number
+  memPercent: number
+  diskMount: string
+  diskPercent: number
+  netRxKbps: number
+  netTxKbps: number
+  load1: number
+  cores: number
+  hasGpu: boolean
+  gpuUtil: number
+  gpuName?: string
+  updatedAt: string
+}
+
+export interface UpdateCheckResult {
+  currentVersion: string
+  latestVersion: string
+  hasUpdate: boolean
+  releaseUrl: string
+  downloadUrl: string
+  releaseNotes: string
+  publishedAt: string
+}
+
+export interface RemoteFileContent {
+  path: string
+  content: string
+  size: number
+}
+
+export interface BuiltinTemplate {
+  id: string
+  name: string
+  category: string
+  description: string
+  safetyNote: string
+  command: string
 }
 
 export interface CompletionItem {
