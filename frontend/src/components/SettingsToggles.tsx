@@ -42,7 +42,6 @@ export const SettingsToggles: React.FC<Props> = ({ draft, patch }) => (
       </div>
       <div className="rounded-xl bg-[#0d1017] border border-ag-border divide-y divide-ag-border/70">
         <ToggleRow label="终端底部实时监控条" sub="显示网络延迟、CPU、内存、磁盘、网速、负载及 GPU（切后台自动暂停）" checked={draft.monitorBarEnabled} onChange={(v) => patch({ monitorBarEnabled: v })} />
-        <ToggleRow label="断线自动重连（指数退避 + 休眠唤醒立即恢复）" checked={draft.autoReconnect} onChange={(v) => patch({ autoReconnect: v })} />
         <ToggleRow label="连接服务器后自动打开 SFTP 面板" checked={draft.autoOpenSftp} onChange={(v) => patch({ autoOpenSftp: v })} />
         <ToggleRow label="SFTP 自动跟随终端 cd 切换目录" checked={draft.sftpFollowTerminal} onChange={(v) => patch({ sftpFollowTerminal: v })} />
         <ToggleRow label="自动记录每条操作命令" checked={draft.recordCommands} onChange={(v) => patch({ recordCommands: v })} />
