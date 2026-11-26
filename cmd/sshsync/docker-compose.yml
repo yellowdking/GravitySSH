@@ -1,0 +1,15 @@
+services:
+  sshsync:
+    image: bbplin/sshsync:latest
+    container_name: sshsync
+    restart: unless-stopped
+    ports:
+      - "54843:54843"
+    read_only: true
+    mem_limit: 64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - ./certs:/data
