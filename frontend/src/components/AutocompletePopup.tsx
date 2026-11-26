@@ -1,13 +1,18 @@
-import React, { useEffect, useRef } from 'react'
+import React from 'react'
 import { FileText, Folder, Sparkles } from 'lucide-react'
 import type { CompletionItem } from '../types'
+import { getActiveTokenPrefix } from '../utils/autocomplete'
 
 interface Props {
   suggestions: CompletionItem[]
   selectedIdx: number
+  activePrefix?: string
+  inputLine?: string
   onSelectIndex: (idx: number) => void
   onApply: (item: CompletionItem) => void
 }
+
+const HIDE_DESC = new Set(['dir', 'file', 'history', 'history_local'])
 
 function getSourceBadge(item: CompletionItem): { label: string; cls: string; icon?: React.ReactNode } {
   switch (item.source) {
@@ -20,29 +25,52 @@ function getSourceBadge(item: CompletionItem): { label: string; cls: string; ico
     case 'file':
       return {
         label: '文件',
-        cls: 'bg-slate-500/20 text-slate-300 border-slate-400/30',
+        cls: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/35',
         icon: <FileText className="w-2.5 h-2.5" />,
       }
-    case 'shortcut':
-      return { label: '快捷', cls: 'bg-violet-500/20 text-violet-300 border-violet-500/30' }
+    case 'subcmd':
+      return { label: item.category || '命令', cls: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/35' }
+    case 'flag':
+      return { label: '参数', cls: 'bg-amber-500/20 text-amber-300 border-amber-500/35' }
+    case 'history_local':
+      return { label: '本机历史', cls: 'bg-slate-500/20 text-slate-300 border-slate-400/30' }
     case 'history':
-      return { label: '历史', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/25' }
+      return { label: '历史', cls: 'bg-slate-500/15 text-slate-300 border-slate-400/25' }
     default:
-      return { label: item.category || '内置', cls: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/25' }
+      return { label: item.category || '命令', cls: 'bg-violet-500/20 text-violet-300 border-violet-500/30' }
   }
 }
 
-export const AutocompletePopup: React.FC<Props> = ({ suggestions, selectedIdx, onSelectIndex, onApply }) => {
-  const activeRowRef = useRef<HTMLButtonElement | null>(null)
+function resolvePrefix(item: CompletionItem, inputLine?: string, activePrefix?: string): string {
+  if (inputLine === undefined) return activePrefix || ''
+  if (item.source === 'history' || item.source === 'history_local') {
+    const full = inputLine.trimStart()
+    if (full && item.command.toLowerCase().startsWith(full.toLowerCase())) return full
+  }
+  return getActiveTokenPrefix(inputLine, item.source)
+}
 
-  useEffect(() => {
-    activeRowRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-  }, [selectedIdx, suggestions.length])
+function renderHighlighted(command: string, prefix: string) {
+  if (prefix && command.toLowerCase().startsWith(prefix.toLowerCase())) {
+    const n = Math.min(prefix.length, command.length)
+    return (
+      <>
+        <span className="text-sky-400 font-semibold">{command.slice(0, n)}</span>
+        <span className="text-ag-text">{command.slice(n)}</span>
+      </>
+    )
+  }
+  return <span className="text-ag-text">{command}</span>
+}
 
-  if (suggestions.length === 0) return null
+export const AutocompletePopup: React.FC<Props> = ({
+  suggestions, selectedIdx, activePrefix, inputLine, onSelectIndex, onApply,
+}) => {
+  const visible = suggestions.slice(0, 5)
+  if (visible.length === 0) return null
 
   return (
-    <div className="pointer-events-auto absolute top-2 right-3 z-30 w-[340px] max-w-[42%] rounded-xl bg-[#111622]/90 backdrop-blur-md border border-indigo-500/35 shadow-ag overflow-hidden">
+    <div className="pointer-events-auto absolute top-2 right-3 z-30 w-[340px] max-w-[42%] rounded-xl bg-[#111622]/92 backdrop-blur-md border border-indigo-500/35 shadow-ag overflow-hidden">
       <div className="px-2.5 py-1 bg-[#0c101a]/95 border-b border-ag-border/80 flex items-center justify-between text-[10px] text-ag-muted">
         <span className="flex items-center gap-1 text-indigo-300 font-medium">
           <Sparkles className="w-3 h-3 shrink-0" />
@@ -50,22 +78,23 @@ export const AutocompletePopup: React.FC<Props> = ({ suggestions, selectedIdx, o
         </span>
         <span className="text-ag-subtle">↑↓ · Tab · Esc</span>
       </div>
-      <div className="max-h-[156px] overflow-y-auto scroll-smooth divide-y divide-ag-border/35">
-        {suggestions.map((item, idx) => {
+      <div className="overflow-hidden divide-y divide-ag-border/35">
+        {visible.map((item, idx) => {
           const isSelected = idx === selectedIdx
           const badge = getSourceBadge(item)
+          const prefix = resolvePrefix(item, inputLine, activePrefix)
+          const showDesc = Boolean(item.description) && !HIDE_DESC.has(item.source)
 
           return (
             <button
               key={`${item.source}-${item.command}-${idx}`}
-              ref={isSelected ? activeRowRef : null}
               type="button"
               onMouseDown={(e) => {
                 e.preventDefault()
                 onApply(item)
               }}
               onMouseEnter={() => onSelectIndex(idx)}
-              className={`w-full text-left px-2.5 py-1.5 flex items-center justify-between gap-2 transition ${
+              className={`w-full h-[30px] text-left px-2.5 flex items-center justify-between gap-2 transition ${
                 isSelected ? 'bg-indigo-500/22' : 'hover:bg-ag-hover/70'
               }`}
             >
@@ -74,10 +103,12 @@ export const AutocompletePopup: React.FC<Props> = ({ suggestions, selectedIdx, o
                   {badge.icon}
                   {badge.label}
                 </span>
-                <span className="font-mono text-[11px] text-ag-text font-medium truncate">{item.command}</span>
+                <span className="font-mono text-[11px] font-medium truncate">
+                  {renderHighlighted(item.command, prefix)}
+                </span>
               </div>
-              {item.description && (
-                <span className="text-[10px] text-ag-muted truncate max-w-[96px] shrink-0">{item.description}</span>
+              {showDesc && (
+                <span className="text-[10px] text-ag-muted truncate max-w-[112px] shrink-0">{item.description}</span>
               )}
             </button>
           )
