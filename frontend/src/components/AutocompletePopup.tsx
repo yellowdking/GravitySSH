@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect, useRef } from 'react'
 import { FileText, Folder, Sparkles } from 'lucide-react'
 import type { CompletionItem } from '../types'
 
@@ -33,18 +33,24 @@ function getSourceBadge(item: CompletionItem): { label: string; cls: string; ico
 }
 
 export const AutocompletePopup: React.FC<Props> = ({ suggestions, selectedIdx, onSelectIndex, onApply }) => {
+  const activeRowRef = useRef<HTMLButtonElement | null>(null)
+
+  useEffect(() => {
+    activeRowRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, [selectedIdx, suggestions.length])
+
   if (suggestions.length === 0) return null
 
   return (
-    <div className="absolute left-4 bottom-4 z-30 w-[560px] max-w-[calc(100%-2rem)] rounded-xl bg-[#131824]/96 backdrop-blur-md border border-indigo-500/40 shadow-ag overflow-hidden">
-      <div className="px-3 py-1.5 bg-[#0f131e] border-b border-ag-border flex items-center justify-between text-[11px] text-ag-muted">
-        <span className="flex items-center gap-1.5 text-indigo-300 font-medium">
-          <Sparkles className="w-3 h-3" />
-          智能命令与路径补齐 · 点击自动补全
+    <div className="pointer-events-auto absolute top-2 right-3 z-30 w-[340px] max-w-[42%] rounded-xl bg-[#111622]/90 backdrop-blur-md border border-indigo-500/35 shadow-ag overflow-hidden">
+      <div className="px-2.5 py-1 bg-[#0c101a]/95 border-b border-ag-border/80 flex items-center justify-between text-[10px] text-ag-muted">
+        <span className="flex items-center gap-1 text-indigo-300 font-medium">
+          <Sparkles className="w-3 h-3 shrink-0" />
+          智能补齐
         </span>
-        <span className="text-ag-subtle">↑↓ 选择 · Tab / 点击补齐 · Esc 关闭</span>
+        <span className="text-ag-subtle">↑↓ · Tab · Esc</span>
       </div>
-      <div className="max-h-64 overflow-y-auto divide-y divide-ag-border/40">
+      <div className="max-h-[156px] overflow-y-auto scroll-smooth divide-y divide-ag-border/35">
         {suggestions.map((item, idx) => {
           const isSelected = idx === selectedIdx
           const badge = getSourceBadge(item)
@@ -52,24 +58,27 @@ export const AutocompletePopup: React.FC<Props> = ({ suggestions, selectedIdx, o
           return (
             <button
               key={`${item.source}-${item.command}-${idx}`}
+              ref={isSelected ? activeRowRef : null}
               type="button"
               onMouseDown={(e) => {
                 e.preventDefault()
                 onApply(item)
               }}
               onMouseEnter={() => onSelectIndex(idx)}
-              className={`w-full text-left px-3 py-2 flex items-center justify-between gap-3 transition ${
-                isSelected ? 'bg-indigo-500/20' : 'hover:bg-ag-hover/70'
+              className={`w-full text-left px-2.5 py-1.5 flex items-center justify-between gap-2 transition ${
+                isSelected ? 'bg-indigo-500/22' : 'hover:bg-ag-hover/70'
               }`}
             >
-              <div className="flex items-center gap-2 min-w-0 flex-1">
-                <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border shrink-0 font-medium ${badge.cls}`}>
+              <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                <span className={`inline-flex items-center gap-0.5 text-[10px] leading-none px-1.5 py-0.5 rounded border shrink-0 font-medium ${badge.cls}`}>
                   {badge.icon}
                   {badge.label}
                 </span>
-                <span className="font-mono text-xs text-ag-text font-medium truncate">{item.command}</span>
+                <span className="font-mono text-[11px] text-ag-text font-medium truncate">{item.command}</span>
               </div>
-              <span className="text-[11px] text-ag-muted truncate max-w-[200px] shrink-0">{item.description}</span>
+              {item.description && (
+                <span className="text-[10px] text-ag-muted truncate max-w-[96px] shrink-0">{item.description}</span>
+              )}
             </button>
           )
         })}
