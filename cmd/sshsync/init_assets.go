@@ -91,59 +91,69 @@ func ensureAssets(baseDir, sanIP string) (*relayAssets, error) {
 	return a, nil
 }
 
-func generateSelfSignedCert(certPath, keyPath, sanIP string) (string, error) {
+func generateSelfSignedCertBytes(sanHost string) ([]byte, []byte, string, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return "", fmt.Errorf("gen ecdsa key: %w", err)
+		return nil, nil, "", fmt.Errorf("gen ecdsa key: %w", err)
 	}
 	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serial, err := rand.Int(rand.Reader, serialLimit)
 	if err != nil {
-		return "", fmt.Errorf("gen serial: %w", err)
+		return nil, nil, "", fmt.Errorf("gen serial: %w", err)
+	}
+	cn := strings.TrimSpace(sanHost)
+	if cn == "" {
+		cn = "sshsync"
 	}
 	now := time.Now().UTC()
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: sanIP},
+		Subject:               pkix.Name{CommonName: cn},
 		NotBefore:             now.Add(-5 * time.Minute),
 		NotAfter:              now.AddDate(10, 0, 0),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 	}
-	if ip := net.ParseIP(sanIP); ip != nil {
+	if ip := net.ParseIP(cn); ip != nil {
 		tmpl.IPAddresses = []net.IP{ip}
-	} else if sanIP != "" {
-		tmpl.DNSNames = []string{sanIP}
+	} else {
+		tmpl.DNSNames = []string{cn}
 	}
 
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
 	if err != nil {
-		return "", fmt.Errorf("create cert: %w", err)
+		return nil, nil, "", fmt.Errorf("create cert: %w", err)
 	}
 	parsed, err := x509.ParseCertificate(der)
 	if err != nil {
-		return "", fmt.Errorf("parse cert: %w", err)
+		return nil, nil, "", fmt.Errorf("parse cert: %w", err)
 	}
 	sum := sha256.Sum256(parsed.RawSubjectPublicKeyInfo)
 	spkiHex := hex.EncodeToString(sum[:])
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
-		return "", fmt.Errorf("write cert: %w", err)
-	}
-
 	keyDER, err := x509.MarshalECPrivateKey(priv)
 	if err != nil {
-		return "", fmt.Errorf("marshal key: %w", err)
+		return nil, nil, "", fmt.Errorf("marshal key: %w", err)
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	clear(keyDER)
+	return certPEM, keyPEM, spkiHex, nil
+}
+
+func generateSelfSignedCert(certPath, keyPath, sanIP string) (string, error) {
+	certPEM, keyPEM, spkiHex, err := generateSelfSignedCertBytes(sanIP)
+	if err != nil {
+		return "", err
+	}
+	defer clear(keyPEM)
+	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+		return "", fmt.Errorf("write cert: %w", err)
+	}
 	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		clear(keyPEM)
 		return "", fmt.Errorf("write key: %w", err)
 	}
-	clear(keyPEM)
 	return spkiHex, nil
 }
 
