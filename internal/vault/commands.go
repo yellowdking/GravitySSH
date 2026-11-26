@@ -197,6 +197,7 @@ func (s *Store) SaveSettings(settings models.AppSettings) (models.AppSettings, e
 	if settings.Language != "zh" && settings.Language != "en" {
 		settings.Language = "zh"
 	}
+	settings.SyncRelayURL = strings.TrimSpace(settings.SyncRelayURL)
 
 	s.data.Settings = settings
 	if err := s.saveLocked(); err != nil {
