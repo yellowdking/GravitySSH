@@ -1,0 +1,138 @@
+package vault
+
+import (
+	"path/filepath"
+	"testing"
+
+	"github.com/yellowdking/GravitySSH/internal/models"
+	"github.com/yellowdking/GravitySSH/internal/sshkey"
+)
+
+func TestVaultSyncExportAndMerge(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "vault.gsv"), nil)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	pem1, parsed1, err := sshkey.GenerateKeyPair("ed25519", "local@pc", "")
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	localKey, err := store.ImportSSHKey("LocalKey", pem1, "", "local")
+	if err != nil {
+		t.Fatalf("ImportSSHKey failed: %v", err)
+	}
+	localSrv, err := store.SaveServer(models.ServerSaveRequest{
+		Name: "Existing-Web", Host: "10.0.0.1", Port: 22, Username: "ubuntu",
+		AuthType: models.AuthKey, SSHKeyID: localKey.ID,
+	})
+	if err != nil {
+		t.Fatalf("SaveServer failed: %v", err)
+	}
+	localOnlySrv, err := store.SaveServer(models.ServerSaveRequest{
+		Name: "Local-Only-DB", Host: "10.0.0.99", Port: 22, Username: "postgres",
+		AuthType: models.AuthPassword, Password: "db-secret",
+	})
+	if err != nil {
+		t.Fatalf("SaveServer local-only failed: %v", err)
+	}
+
+	exported, err := store.ExportSyncBundle("WIN-WORKSTATION")
+	if err != nil || exported.SchemaVersion != 1 || exported.SourcePlatform != "windows" || len(exported.Servers) != 2 || len(exported.SSHKeys) != 1 {
+		t.Fatalf("unexpected exported bundle: %+v err=%v", exported, err)
+	}
+
+	incoming := models.SyncBundle{
+		SchemaVersion: 1, SourcePlatform: "android", SourceDevice: "Pixel-9",
+		SSHKeys: []models.SSHKeyRecord{{
+			ID: "android-key-id", Name: "LocalKey-Synced", KeyType: parsed1.KeyType,
+			Fingerprint: parsed1.Fingerprint, PublicKey: parsed1.PublicKey, PrivateKeyPEM: pem1,
+		}},
+		Servers: []models.ServerConfig{
+			{ID: "android-srv-1", Name: "Existing-Web-Updated", Host: "10.0.0.1", Port: 22, Username: "ubuntu", AuthType: models.AuthKey, SSHKeyID: "android-key-id"},
+			{ID: "android-srv-2", Name: "HK-New", Host: "10.0.0.2", Port: 2222, Username: "root", AuthType: models.AuthKey, SSHKeyID: "android-key-id"},
+		},
+		Shortcuts: []models.CommandShortcut{{ID: "sc-new", Name: "Nginx Test", Command: "nginx -t", Category: "Ops", AutoExecute: true}},
+		Templates: []models.BuiltinTemplate{{ID: "tpl-custom-1", Name: "Custom Backup", Category: "Ops", Command: "tar -czf /tmp/a.tgz /etc"}},
+	}
+
+	sum, err := store.ImportSyncBundle(incoming, "merge")
+	if err != nil {
+		t.Fatalf("ImportSyncBundle merge failed: %v", err)
+	}
+	if sum.KeysUpdated != 1 || sum.KeysAdded != 0 || sum.ServersUpdated != 1 || sum.ServersAdded != 1 || sum.ShortcutsAdded != 1 || sum.TemplatesAdded != 1 {
+		t.Fatalf("unexpected merge summary: %+v", sum)
+	}
+	servers := store.ListServers()
+	if len(servers) != 3 {
+		t.Fatalf("expected 3 servers after merge, got %d", len(servers))
+	}
+	var foundLocalOnly, foundNew bool
+	for _, s := range servers {
+		if s.ID == localOnlySrv.ID {
+			foundLocalOnly = true
+		}
+		if s.ID == localSrv.ID && s.Name != "Existing-Web-Updated" {
+			t.Fatalf("expected Existing-Web updated in place, got %+v", s)
+		}
+		if s.Host == "10.0.0.2" {
+			foundNew = true
+			if s.SSHKeyID != localKey.ID {
+				t.Fatalf("expected remapped sshKeyId %s, got %s", localKey.ID, s.SSHKeyID)
+			}
+		}
+	}
+	if !foundLocalOnly || !foundNew {
+		t.Fatalf("missing servers after merge: localOnly=%v new=%v", foundLocalOnly, foundNew)
+	}
+}
+
+func TestVaultSyncOverwritePreservesSettingsAndPassword(t *testing.T) {
+	vp := filepath.Join(t.TempDir(), "vault.gsv")
+	store, err := Open(vp, nil)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	if err := store.SetPassword("", "my-vault-pass"); err != nil {
+		t.Fatalf("SetPassword failed: %v", err)
+	}
+	cfg := store.GetSettings()
+	cfg.TerminalFontSize = 19
+	if _, err := store.SaveSettings(cfg); err != nil {
+		t.Fatalf("SaveSettings failed: %v", err)
+	}
+	if _, err := store.SaveServer(models.ServerSaveRequest{Name: "Old", Host: "1.1.1.1", Port: 22, Username: "root"}); err != nil {
+		t.Fatalf("SaveServer failed: %v", err)
+	}
+
+	incoming := models.SyncBundle{
+		SchemaVersion: 1, SourcePlatform: "android", SourceDevice: "Phone",
+		Servers:   []models.ServerConfig{{ID: "s-only", Name: "NewOnly", Host: "2.2.2.2", Port: 22, Username: "admin"}},
+		SSHKeys:   []models.SSHKeyRecord{},
+		Shortcuts: []models.CommandShortcut{},
+		Templates: []models.BuiltinTemplate{},
+	}
+	sum, err := store.ImportSyncBundle(incoming, "overwrite")
+	if err != nil || sum.Mode != "overwrite" || sum.ServersAdded != 1 || len(store.ListServers()) != 1 {
+		t.Fatalf("unexpected overwrite result: %+v err=%v", sum, err)
+	}
+
+	store2, err := Open(vp, nil)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	if !store2.IsLocked() {
+		t.Fatal("expected vault to remain password-protected")
+	}
+	if _, err := store2.ExportSyncBundle("PC"); err == nil {
+		t.Fatal("expected ExportSyncBundle to fail while locked")
+	}
+	if err := store2.Unlock("my-vault-pass"); err != nil {
+		t.Fatalf("Unlock failed: %v", err)
+	}
+	if store2.GetSettings().TerminalFontSize != 19 {
+		t.Fatalf("expected local settings preserved, got fontSize=%d", store2.GetSettings().TerminalFontSize)
+	}
+	if len(store2.ListServers()) != 1 || store2.ListServers()[0].Host != "2.2.2.2" {
+		t.Fatalf("unexpected persisted servers: %+v", store2.ListServers())
+	}
+}
