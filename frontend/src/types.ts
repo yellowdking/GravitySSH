@@ -265,7 +265,7 @@ export interface CompletionItem {
   command: string
   description: string
   category: string
-  source: 'builtin' | 'shortcut' | 'history' | 'dir' | 'file'
+  source: 'dir' | 'file' | 'subcmd' | 'flag' | 'history_local' | 'history' | 'builtin'
   insertText: string
   score: number
 }
