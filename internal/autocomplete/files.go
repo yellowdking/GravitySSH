@@ -2,107 +2,44 @@ package autocomplete
 
 import (
 	"fmt"
-	"path"
 	"strings"
 
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
-var fileCentricCommands = map[string]bool{
-	"cd": true, "ls": true, "ll": true, "la": true, "dir": true,
-	"cat": true, "less": true, "more": true, "head": true, "tail": true,
-	"nano": true, "vi": true, "vim": true, "nvim": true, "code": true,
-	"rm": true, "cp": true, "mv": true, "ln": true, "touch": true,
-	"mkdir": true, "rmdir": true, "chmod": true, "chown": true,
-	"unzip": true, "tar": true, "gunzip": true, "7z": true, "gzip": true,
-	"sh": true, "bash": true, "zsh": true, "source": true,
-	"python": true, "python3": true, "node": true, "go": true,
-	"grep": true, "stat": true, "file": true, "du": true, "wc": true,
-	"scp": true, "rsync": true, "diff": true, "sed": true, "awk": true,
-	"find": true, "tree": true, "pushd": true,
-}
-
-var dirPrimaryCommands = map[string]bool{
-	"cd": true, "pushd": true, "rmdir": true, "tree": true,
-}
-
 // ExtractPathContext checks whether input is completing a file/directory path
 // and returns the remote directory to list.
 func ExtractPathContext(input, cwd string) (targetDir string, active bool) {
-	query := strings.TrimLeft(input, " \t")
-	if query == "" {
-		return "", false
-	}
-
-	_, token, ok := splitPathToken(query)
-	if !ok {
-		return "", false
-	}
-	if strings.HasPrefix(token, "-") {
-		return "", false
-	}
-
-	baseDir := cwd
-	if baseDir == "" {
-		baseDir = "/"
-	}
-
-	if slash := strings.LastIndex(token, "/"); slash >= 0 {
-		dirPart := token[:slash+1]
-		switch {
-		case strings.HasPrefix(dirPart, "/"):
-			return path.Clean(dirPart), true
-		case dirPart == "~/", strings.HasPrefix(dirPart, "~/"):
-			return dirPart, true
-		default:
-			return path.Clean(path.Join(baseDir, dirPart)), true
-		}
-	}
-	return baseDir, true
+	return ExtractPathContextWithHome(input, cwd, "")
 }
 
-func splitPathToken(query string) (cmdPrefix, token string, ok bool) {
-	if idx := strings.LastIndexAny(query, " \t"); idx >= 0 {
-		return query[:idx+1], query[idx+1:], true
+// ExtractPathContextWithHome resolves active path completion including ~/ home expansion.
+func ExtractPathContextWithHome(input, cwd, homeDir string) (targetDir string, active bool) {
+	p := ParseLine(input, cwd, homeDir)
+	if !p.PathActive {
+		return "", false
 	}
-	if strings.HasPrefix(query, "./") || strings.HasPrefix(query, "../") || strings.HasPrefix(query, "/") || strings.HasPrefix(query, "~/") {
-		return "", query, true
-	}
-	return "", "", false
+	return p.TargetDir, true
 }
 
-func suggestFileCandidates(input, query, _ string, dirEntries []models.SFTPFileEntry) []models.CompletionItem {
-	cmdPrefix, token, ok := splitPathToken(query)
-	if !ok || strings.HasPrefix(token, "-") {
+func suggestFileCandidates(p ParsedLine, input string, entries []models.SFTPFileEntry, _ FolderSignals) []models.CompletionItem {
+	if !p.PathActive || len(entries) == 0 {
 		return nil
 	}
 
-	firstWord := ""
-	if fields := strings.Fields(query); len(fields) > 0 && cmdPrefix != "" {
-		firstWord = strings.ToLower(fields[0])
+	cmd := ""
+	if len(p.Effective) > 0 {
+		cmd = strings.ToLower(p.Effective[0])
 	}
+	isFirstTok := len(p.Effective) == 0 || (len(p.Effective) == 1 && !p.EndsWithSpace)
+	lowerPref := strings.ToLower(p.NamePrefix)
+	prevLo := strings.ToLower(p.PrevTok)
+	showHidden := strings.HasPrefix(p.NamePrefix, ".") || prevLo == "--env-file"
+	arcOrFileFlag := prevLo == "-f" || prevLo == "--file" ||
+		strings.Contains(" tar unzip gunzip 7z gzip zcat ", " "+cmd+" ")
 
-	tokenDir := ""
-	namePrefix := token
-	if slash := strings.LastIndex(token, "/"); slash >= 0 {
-		tokenDir = token[:slash+1]
-		namePrefix = token[slash+1:]
-	}
-
-	isFileCmd := fileCentricCommands[firstWord]
-	isDirPrimary := dirPrimaryCommands[firstWord]
-	hasExplicitPath := tokenDir != ""
-
-	// Avoid flooding non-file commands like "apt " or "docker " when no filename prefix is typed.
-	if !isFileCmd && !hasExplicitPath && namePrefix == "" {
-		return nil
-	}
-
-	lowerPrefix := strings.ToLower(namePrefix)
-	showHidden := strings.HasPrefix(namePrefix, ".")
-	out := make([]models.CompletionItem, 0, len(dirEntries))
-
-	for _, entry := range dirEntries {
+	out := make([]models.CompletionItem, 0, len(entries))
+	for _, entry := range entries {
 		name := entry.Name
 		if name == "" || name == "." || name == ".." {
 			continue
@@ -110,60 +47,59 @@ func suggestFileCandidates(input, query, _ string, dirEntries []models.SFTPFileE
 		if strings.HasPrefix(name, ".") && !showHidden {
 			continue
 		}
-		if firstWord == "cd" && !entry.IsDir {
+		if p.DirsOnly && !entry.IsDir {
 			continue
 		}
 
 		lowerName := strings.ToLower(name)
-		matchScore := 0
-		if lowerPrefix == "" {
-			matchScore = 1000 - min(len(name), 120)
-		} else if strings.HasPrefix(lowerName, lowerPrefix) {
-			matchScore = 1050 - min(len(name), 120)
-		} else if len(lowerPrefix) >= 2 {
-			if idx := strings.Index(lowerName, lowerPrefix); idx > 0 {
-				matchScore = 420 - idx
-			}
-		}
-		if matchScore <= 0 {
+		if lowerPref != "" && !strings.HasPrefix(lowerName, lowerPref) {
 			continue
 		}
 
-		entryToken := tokenDir + name
-		if entry.IsDir {
-			entryToken += "/"
-		}
-		fullCmd := cmdPrefix + entryToken
-		if strings.EqualFold(strings.TrimSpace(fullCmd), strings.TrimSpace(query)) {
-			continue
+		matchBonus := 80
+		if lowerPref != "" {
+			excess := max(0, len(name)-len(p.NamePrefix))
+			matchBonus = 100 - min(excess, 40)
 		}
 
-		baseScore := 110
-		if isDirPrimary && entry.IsDir {
-			baseScore = 320
-		} else if isFileCmd || hasExplicitPath {
-			baseScore = 260
-			if entry.IsDir {
-				baseScore += 20
+		dirBonus := 0
+		if entry.IsDir {
+			switch {
+			case p.DirsOnly:
+				dirBonus = 120
+			case cmd == "chmod":
+				dirBonus = 0
+			case isFirstTok || arcOrFileFlag:
+				dirBonus = 20
+			default:
+				dirBonus = 30
 			}
 		}
 
-		source := "file"
-		cat := "文件"
-		desc := formatSizeDesc(entry.Size)
+		extDelta := FileExtDelta(cmd, p.PrevTok, entry, isFirstTok)
+		score := min(960, max(550, 700+dirBonus+matchBonus+extDelta))
+
+		displayName := name
 		if entry.IsDir {
-			source = "dir"
-			cat = "目录"
-			desc = "当前目录文件夹"
+			displayName += "/"
+		}
+		fullLine := p.TokPrefix + EscapePathToken(p.TokenDir, name, entry.IsDir, p.CurTok.Quote)
+		if fullLine == input || (!entry.IsDir && strings.EqualFold(strings.TrimSpace(fullLine), strings.TrimSpace(input))) {
+			continue
+		}
+
+		source, cat, desc := "file", "文件", formatSizeDesc(entry.Size)
+		if entry.IsDir {
+			source, cat, desc = "dir", "目录", "当前目录文件夹"
 		}
 
 		out = append(out, models.CompletionItem{
-			Command:     fullCmd,
+			Command:     displayName,
 			Description: desc,
 			Category:    cat,
 			Source:      source,
-			InsertText:  ComputeInsertSuffix(input, fullCmd),
-			Score:       baseScore + matchScore,
+			InsertText:  fullLine,
+			Score:       score,
 		})
 	}
 	return out
