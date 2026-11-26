@@ -30,6 +30,7 @@ var (
 		"df":                  parseSpecs("-h:人性化容量;-Th:含文件类型"),
 		"du":                  parseSpecs("-sh:汇总大小;-h --max-depth=1:一级目录"),
 		"ps":                  parseSpecs("-ef:完整进程;-aux:BSD进程"),
+		"free":                parseSpecs("-h:人类可读;-m:MB显示;-g:GB显示;-s 2:每2秒刷新;-w:宽格式"),
 		"docker":              parseSpecs("--help:查看帮助;-v:查看版本"),
 		"docker ps":           parseSpecs("-a:含已停止;--format :输出模板;-q:仅容器ID;--filter :条件筛选"),
 		"docker logs":         dockerLogsFlags,
