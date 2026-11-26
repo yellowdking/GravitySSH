@@ -136,6 +136,7 @@ export interface AppSettings {
   keywordHighlightEnabled: boolean
   autoSwitchEnglishIme: boolean
   checkUpdatesOnStartup: boolean
+  syncRelayUrl?: string
 }
 
 export interface VaultSecurityInfo {
