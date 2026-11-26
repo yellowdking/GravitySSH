@@ -21,10 +21,10 @@ func parseTree(raw string) map[string][]SubcmdSpec {
 var (
 	FileCentricCommands = wordSet("cd ls ll la dir cat less more head tail nano vi vim nvim code rm cp mv ln touch mkdir rmdir chmod chown unzip tar gunzip 7z gzip zcat sh bash zsh source . python python3 node go grep stat file du wc scp rsync diff sed awk find tree pushd")
 	DirOnlyCommands     = wordSet("cd rmdir pushd tree")
-	SubcmdRoots         = wordSet("docker systemctl journalctl apt apt-get apk dnf yum git kubectl pm2 tmux nginx ufw firewall-cmd ss ip curl df ps kill")
+	SubcmdRoots         = wordSet("docker systemctl journalctl apt apt-get apk dnf yum git kubectl pm2 tmux nginx ufw firewall-cmd ss ip curl df ps kill free")
 	FileFlags           = wordSet("-f --file -c --config -i -o --env-file")
 
-	RootCommandList = parseSpecs("docker :容器;systemctl :服务;journalctl :日志;git :Git;kubectl :K8s;apt :APT;apt-get :APT;apk :APK;dnf :DNF;yum :YUM;pm2 :PM2;tmux :终端;nginx :Nginx;ufw :防火墙;firewall-cmd :防火墙;ss :端口;ip :网络;curl :HTTP;tar :归档;rsync :同步;chmod :权限;chown :属主;find :查找;grep :搜索;ls :列表;cd :目录;df :磁盘;du :大小;ps :进程;cat :查看;tail :末尾;head :开头;less :分页;nano :编辑;vim :编辑;rm :删除;cp :复制;mv :移动;mkdir :目录;scp :复制;ssh :SSH;sudo :提权;free :内存;top:监控;htop:监控;kill :终止;lsof :端口;ping :连通;unzip :解压;python3 :Py3;node :Node;npm :NPM;go :Go;make :构建;certbot :证书;crontab :定时")
+	RootCommandList = parseSpecs("docker :容器;systemctl :服务;journalctl :日志;git :Git;kubectl :K8s;apt :APT;apt-get :APT;apk :APK;dnf :DNF;yum :YUM;pm2 :PM2;tmux :终端;nginx :Nginx;ufw :防火墙;free :内存;find :查找;firewall-cmd :防火墙;ss :端口;ip :网络;curl :HTTP;tar :归档;rsync :同步;chmod :权限;chown :属主;grep :搜索;ls :列表;cd :目录;df :磁盘;du :大小;ps :进程;cat :查看;tail :末尾;head :开头;less :分页;nano :编辑;vim :编辑;rm :删除;cp :复制;mv :移动;mkdir :目录;scp :复制;ssh :SSH;sudo :提权;top:监控;htop:监控;kill :终止;lsof :端口;ping :连通;unzip :解压;python3 :Py3;node :Node;npm :NPM;go :Go;make :构建;certbot :证书;crontab :定时")
 
 	subcmdTree = parseTree(`
 docker=ps -a:全部容器;compose :编排;logs -f --tail 100 :日志;exec -it :终端;images:镜像;restart :重启;pull :拉取;stats:统计;rm -f :强删;inspect :详情;network ls:网络;volume ls:数据卷;system prune -af:清理;build -t :构建
@@ -56,7 +56,8 @@ grep=-rn :递归;-i :忽略大小写;-E :正则
 ls=-la:全部;-lh:大小;-lt:时间
 df=-h:磁盘;-Th:类型
 du=-sh *:各项;-h --max-depth=1:一级
-ps=aux:全部;aux | grep :筛选;-ef:完整`)
+ps=aux:全部;aux | grep :筛选;-ef:完整
+free=-h:人类可读;-m:MB显示;-g:GB显示;-h -s 2:每2秒刷新`)
 )
 
 func NormalizedCmdPath(eff []string, endsWithSpace bool) string {
