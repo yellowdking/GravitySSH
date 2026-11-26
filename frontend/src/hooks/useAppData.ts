@@ -16,7 +16,7 @@ import { DEFAULT_TERMINAL_FONT } from '../components/terminalTheme'
 const DEFAULT_SETTINGS: AppSettings = {
   autocompleteEnabled: true,
   autocompleteFromHistory: true,
-  autocompleteFromShortcut: true,
+  autocompleteFromShortcut: false,
   autoOpenSftp: true,
   sftpPanelPosition: 'right',
   terminalFontFamily: DEFAULT_TERMINAL_FONT,
@@ -42,7 +42,7 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
   const [securityInfo, setSecurityInfo] = useState<VaultSecurityInfo | null>(null)
   const [lockState, setLockState] = useState<VaultLockState | null>(null)
-  const [appVersion, setAppVersion] = useState('1.3.1')
+  const [appVersion, setAppVersion] = useState('1.3.2')
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null)
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
