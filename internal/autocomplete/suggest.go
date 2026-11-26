@@ -130,18 +130,23 @@ func SuggestWithContext(req SuggestRequest) []models.CompletionItem {
 			add(it)
 		}
 	}
-	if isFirst && !p.PathActive && len(cur) >= 2 {
+	if isFirst && !p.PathActive && len(cur) >= 1 {
 		loCur := strings.ToLower(cur)
 		for i, s := range FolderRootSuggestions(cur, sig) {
 			add(mkItem(s.Token, s.Desc, "目录上下文", "builtin", specInsert(p.TokPrefix, s), max(440, 470-i*10)))
 		}
+		rank := 0
 		for _, s := range RootCommandList {
 			loTok := strings.ToLower(s.Token)
 			if !strings.HasPrefix(loTok, loCur) || (loTok == loCur && !s.AppendSpace) {
 				continue
 			}
-			sc := min(340, max(240, 310-min(max(0, len(s.Token)-len(cur)), 60)+rootFolderBonus(loTok, sig)))
-			add(mkItem(s.Token, s.Desc, "命令", "builtin", specInsert(p.TokPrefix, s), sc))
+			sc := 310 - rank*4 + rootFolderBonus(loTok, sig)
+			if loTok == loCur {
+				sc += 15
+			}
+			add(mkItem(s.Token, s.Desc, "命令", "builtin", specInsert(p.TokPrefix, s), min(340, max(240, sc))))
+			rank++
 		}
 	}
 
