@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
-import type { AppSettings, CompletionItem, SessionInfo } from '../types'
+import React, { useRef, useState } from 'react'
+import type { AppSettings, SessionInfo } from '../types'
 import type { PasteInspection } from '../utils/pasteGuard'
-import { api } from '../wailsApi'
-import { computeCompletionInsert } from '../utils/autocomplete'
+import { getActiveTokenPrefix } from '../utils/autocomplete'
+import { useAutocomplete } from '../hooks/useAutocomplete'
 import { useTerminalInstance } from '../hooks/useTerminalInstance'
 import { TerminalToolbar } from './TerminalToolbar'
 import { TerminalSearchBar } from './TerminalSearchBar'
@@ -25,29 +25,19 @@ interface TerminalPaneProps {
 export const TerminalPane: React.FC<TerminalPaneProps> = ({
   session, active, settings, showSftp, rightDrawer, onToggleSftp, onToggleRightDrawer, onToggleAutocomplete, onReconnect,
 }) => {
-  const inputLineRef = useRef<string>('')
-  const reqSeqRef = useRef(0)
-  const [suggestions, setSuggestions] = useState<CompletionItem[]>([])
-  const [selectedIdx, setSelectedIdx] = useState(0)
+  const inputLineRef = useRef('')
+  const focusTermRef = useRef<() => void>(() => {})
   const [showSearch, setShowSearch] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
   const [pendingPaste, setPendingPaste] = useState<{ text: string; inspection: PasteInspection } | null>(null)
 
-  const suggestionsRef = useRef(suggestions); suggestionsRef.current = suggestions
-  const selectedIdxRef = useRef(selectedIdx); selectedIdxRef.current = selectedIdx
-
-  const requestSuggestions = useCallback(async (line: string) => {
-    if (!settings.autocompleteEnabled || line.trimStart().length < 1) { setSuggestions([]); return }
-    const seq = ++reqSeqRef.current
-    try {
-      const list = await api.suggestCommandsForSession(line, session.serverId, session.sessionId)
-      if (seq === reqSeqRef.current) { setSuggestions(list || []); setSelectedIdx(0) }
-    } catch {
-      if (seq === reqSeqRef.current) setSuggestions([])
-    }
-  }, [settings.autocompleteEnabled, session.serverId, session.sessionId])
-
-  useEffect(() => { if (!settings.autocompleteEnabled) setSuggestions([]) }, [settings.autocompleteEnabled])
+  const ac = useAutocomplete({
+    enabled: settings.autocompleteEnabled,
+    serverId: session.serverId,
+    sessionId: session.sessionId,
+    inputLineRef,
+    onFocusTerminal: () => focusTermRef.current(),
+  })
 
   const { containerRef, termRef, searchAddonRef, pasteText, commitPaste } = useTerminalInstance({
     sessionId: session.sessionId,
@@ -56,31 +46,19 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     showSftp,
     rightDrawer,
     settings,
-    suggestionsRef,
-    selectedIdxRef,
+    suggestionsRef: ac.suggestionsRef,
+    selectedIdxRef: ac.selectedIdxRef,
     inputLineRef,
-    onRequestSuggestions: (line) => { void requestSuggestions(line) },
-    onClearSuggestions: () => setSuggestions([]),
-    onMoveSelection: (delta) => setSelectedIdx((p) => {
-      const len = suggestionsRef.current.length
-      return len > 0 ? (p + delta + len) % len : 0
-    }),
-    onApplySelected: () => {
-      const chosen = suggestionsRef.current[selectedIdxRef.current] || suggestionsRef.current[0]
-      if (chosen) void applySuggestion(chosen)
-    },
+    onRequestSuggestions: (line) => ac.requestSuggestions(line),
+    onClearSuggestions: () => ac.clearSuggestions(true),
+    onMoveSelection: ac.moveSelection,
+    onApplySelected: ac.applySelected,
     onOpenSearch: () => setShowSearch(true),
     onPasteGuard: (text, inspection) => setPendingPaste({ text, inspection }),
   })
+  focusTermRef.current = () => termRef.current?.focus()
 
-  const applySuggestion = useCallback(async (item: CompletionItem) => {
-    const { backspaces, insertText } = computeCompletionInsert(inputLineRef.current, item.command)
-    const payload = '\x7f'.repeat(backspaces) + insertText
-    if (payload) await api.writeTerminal(session.sessionId, payload)
-    inputLineRef.current = item.command
-    setSuggestions([])
-    termRef.current?.focus()
-  }, [session.sessionId, termRef])
+  const activePrefix = getActiveTokenPrefix(inputLineRef.current, ac.suggestions[0]?.source || '')
 
   return (
     <div className="flex flex-col h-full min-w-0 flex-1 bg-ag-bg relative">
@@ -122,10 +100,12 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         />
         {settings.autocompleteEnabled && (
           <AutocompletePopup
-            suggestions={suggestions}
-            selectedIdx={selectedIdx}
-            onSelectIndex={setSelectedIdx}
-            onApply={(item) => void applySuggestion(item)}
+            suggestions={ac.suggestions}
+            selectedIdx={ac.selectedIdx}
+            activePrefix={activePrefix}
+            inputLine={inputLineRef.current}
+            onSelectIndex={ac.setSelectedIdx}
+            onApply={(item) => void ac.applySuggestion(item)}
           />
         )}
       </div>
