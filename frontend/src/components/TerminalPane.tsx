@@ -105,29 +105,31 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           onClose={() => setShowSearch(false)}
         />
       )}
-      <div
-        ref={containerRef}
-        className="flex-1 min-h-0 w-full relative overflow-hidden"
-        onContextMenu={(e) => {
-          e.preventDefault()
-          const sel = termRef.current?.getSelection()
-          if (sel) {
-            void navigator.clipboard.writeText(sel)
-            termRef.current?.clearSelection()
-          } else {
-            void navigator.clipboard.readText().then((t) => { if (t) pasteText(t) })
-          }
-        }}
-      />
-      <MonitorBar sessionId={session.sessionId} status={session.status} active={active} enabled={settings.monitorBarEnabled} />
-      {settings.autocompleteEnabled && (
-        <AutocompletePopup
-          suggestions={suggestions}
-          selectedIdx={selectedIdx}
-          onSelectIndex={setSelectedIdx}
-          onApply={(item) => void applySuggestion(item)}
+      <div className="flex-1 min-h-0 w-full relative overflow-hidden">
+        <div
+          ref={containerRef}
+          className="w-full h-full"
+          onContextMenu={(e) => {
+            e.preventDefault()
+            const sel = termRef.current?.getSelection()
+            if (sel) {
+              void navigator.clipboard.writeText(sel)
+              termRef.current?.clearSelection()
+            } else {
+              void navigator.clipboard.readText().then((t) => { if (t) pasteText(t) })
+            }
+          }}
         />
-      )}
+        {settings.autocompleteEnabled && (
+          <AutocompletePopup
+            suggestions={suggestions}
+            selectedIdx={selectedIdx}
+            onSelectIndex={setSelectedIdx}
+            onApply={(item) => void applySuggestion(item)}
+          />
+        )}
+      </div>
+      <MonitorBar sessionId={session.sessionId} status={session.status} active={active} enabled={settings.monitorBarEnabled} />
       <PasteGuardModal
         open={!!pendingPaste}
         initialText={pendingPaste?.text || ''}
