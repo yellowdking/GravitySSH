@@ -30,8 +30,7 @@ export const SettingsToggles: React.FC<Props> = ({ draft, patch }) => (
         <Sparkles className="w-3.5 h-3.5" />智能命令补齐
       </div>
       <div className="rounded-xl bg-[#0d1017] border border-ag-border divide-y divide-ag-border/70">
-        <ToggleRow label="启用命令与路径智能推荐" sub="输入命令或路径时实时推荐，点击或按 Tab 自动补齐" checked={draft.autocompleteEnabled} onChange={(v) => patch({ autocompleteEnabled: v })} />
-        <ToggleRow label="包含已保存的快捷方式" checked={draft.autocompleteFromShortcut} disabled={!draft.autocompleteEnabled} onChange={(v) => patch({ autocompleteFromShortcut: v })} />
+        <ToggleRow label="启用命令与路径智能推荐" sub="实时推荐目录/文件、子命令、参数与本机历史（快捷命令请使用右侧面板）" checked={draft.autocompleteEnabled} onChange={(v) => patch({ autocompleteEnabled: v })} />
         <ToggleRow label="包含历史执行过的命令" checked={draft.autocompleteFromHistory} disabled={!draft.autocompleteEnabled} onChange={(v) => patch({ autocompleteFromHistory: v })} />
       </div>
     </section>
