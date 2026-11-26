@@ -113,6 +113,8 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handlePickup(w, ip, rawBody)
 	case "/v1/cancel":
 		s.handleCancel(w, rawBody)
+	case "/v1/ping":
+		s.handlePing(w)
 	default:
 		s.guard.RecordStrike(ip)
 		silentNotFound(w)
@@ -120,7 +122,7 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func isValidEndpoint(p string) bool {
-	return p == "/v1/drop" || p == "/v1/pickup" || p == "/v1/cancel"
+	return p == "/v1/drop" || p == "/v1/pickup" || p == "/v1/cancel" || p == "/v1/ping"
 }
 
 func (s *relayServer) validateHeaders(r *http.Request) (string, []byte, bool) {
