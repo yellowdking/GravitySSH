@@ -93,3 +93,7 @@ func (s *relayServer) handleCancel(w http.ResponseWriter, rawBody []byte) {
 	s.store.Cancel(req.ChannelID)
 	writeJSON(w, http.StatusOK, []byte(`{"ok":true}`))
 }
+
+func (s *relayServer) handlePing(w http.ResponseWriter) {
+	writeJSON(w, http.StatusOK, []byte(`{"ok":true,"service":"sshsync","protocol":"gssh-sync-v1"}`))
+}
