@@ -87,8 +87,7 @@ func (a *App) DeleteShortcut(id string) error {
 	return a.store.DeleteShortcut(id)
 }
 
-// RunShortcut sends single-line or multi-line command scripts to the terminal.
-// For multi-line execution, lines are paced at 35ms intervals to prevent remote TTY buffer overflow.
+// RunShortcut sends single- or multi-line command scripts (35ms pacing for multi-line).
 func (a *App) RunShortcut(sessionID, shortcutID string, forceExecute bool) error {
 	if err := a.ensureUnlocked(); err != nil {
 		return err
@@ -106,31 +105,21 @@ func (a *App) RunShortcut(sessionID, shortcutID string, forceExecute bool) error
 	}
 	a.store.IncrementShortcutUse(shortcutID)
 
-	normalized := strings.ReplaceAll(target.Command, "\r\n", "\n")
-	normalized = strings.ReplaceAll(normalized, "\r", "\n")
-
-	execute := forceExecute || target.AutoExecute
-	if !execute {
-		return a.sshMgr.WriteInput(sessionID, normalized)
+	norm := strings.ReplaceAll(strings.ReplaceAll(target.Command, "\r\n", "\n"), "\r", "\n")
+	if !forceExecute && !target.AutoExecute {
+		return a.sshMgr.WriteInput(sessionID, norm)
 	}
 
-	rawLines := strings.Split(normalized, "\n")
-	lines := make([]string, 0, len(rawLines))
-	for _, line := range rawLines {
-		if strings.TrimSpace(line) == "" {
-			continue
+	var lines []string
+	for _, line := range strings.Split(norm, "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
 		}
-		lines = append(lines, line)
 	}
 	if len(lines) == 0 {
 		return nil
 	}
-	if len(lines) == 1 {
-		return a.sshMgr.WriteInput(sessionID, lines[0]+"\r")
-	}
-
-	// Send first line synchronously so immediate session/stdin errors surface right away.
-	if err := a.sshMgr.WriteInput(sessionID, lines[0]+"\r"); err != nil {
+	if err := a.sshMgr.WriteInput(sessionID, lines[0]+"\r"); err != nil || len(lines) == 1 {
 		return err
 	}
 	rest := lines[1:]
@@ -145,11 +134,11 @@ func (a *App) RunShortcut(sessionID, shortcutID string, forceExecute bool) error
 	return nil
 }
 
-func (a *App) SuggestCommands(input string, serverID string) ([]models.CompletionItem, error) {
+func (a *App) SuggestCommands(input, serverID string) ([]models.CompletionItem, error) {
 	return a.SuggestCommandsForSession(input, serverID, "")
 }
 
-func (a *App) SuggestCommandsForSession(input string, serverID string, sessionID string) ([]models.CompletionItem, error) {
+func (a *App) SuggestCommandsForSession(input, serverID, sessionID string) ([]models.CompletionItem, error) {
 	if err := a.ensureReady(); err != nil {
 		return nil, err
 	}
@@ -158,33 +147,42 @@ func (a *App) SuggestCommandsForSession(input string, serverID string, sessionID
 		return []models.CompletionItem{}, nil
 	}
 
-	var (
-		cwd        string
-		dirEntries []models.SFTPFileEntry
-	)
+	var cwd, homeDir string
+	var cwdEntries, targetEntries []models.SFTPFileEntry
 	if sessionID != "" {
 		cwd = a.sshMgr.GetSessionCWD(sessionID)
-		if targetDir, active := autocomplete.ExtractPathContext(input, cwd); active {
-			dirEntries = a.sshMgr.CachedDirEntries(sessionID, targetDir)
+		homeDir = a.sshMgr.GetSessionHomeDir(sessionID)
+		cwdEntries = a.sshMgr.PeekCachedDirEntries(sessionID, cwd)
+		if targetDir, active := autocomplete.ExtractPathContextWithHome(input, cwd, homeDir); active {
+			if targetDir == cwd && len(cwdEntries) > 0 {
+				targetEntries = cwdEntries
+			} else {
+				targetEntries = a.sshMgr.CachedDirEntries(sessionID, targetDir)
+			}
 		}
 	}
 
-	shortcuts := a.store.ListShortcuts()
-	history := a.store.ListHistory(serverID, 150)
-	if len(history) < 30 && serverID != "" {
-		history = append(history, a.store.ListHistory("", 150)...)
+	var history []models.CommandRecord
+	if settings.AutocompleteFromHistory {
+		history = a.store.ListHistory(serverID, 150)
+		if serverID != "" && len(history) < 200 {
+			for _, rec := range a.store.ListHistory("", 200) {
+				if rec.ServerID == serverID {
+					continue
+				}
+				history = append(history, rec)
+				if len(history) >= 200 {
+					break
+				}
+			}
+		}
 	}
 
-	items := autocomplete.SuggestWithFiles(
-		input,
-		cwd,
-		dirEntries,
-		shortcuts,
-		history,
-		settings.AutocompleteFromShortcut,
-		settings.AutocompleteFromHistory,
-		8,
-	)
+	items := autocomplete.SuggestWithContext(autocomplete.SuggestRequest{
+		Input: input, CWD: cwd, HomeDir: homeDir, ServerID: serverID,
+		CWDEntries: cwdEntries, TargetEntries: targetEntries,
+		History: history, IncludeHistory: settings.AutocompleteFromHistory, Limit: 5,
+	})
 	if items == nil {
 		return []models.CompletionItem{}, nil
 	}
