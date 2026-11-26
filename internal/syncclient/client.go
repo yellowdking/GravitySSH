@@ -3,8 +3,6 @@ package syncclient
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,31 +21,35 @@ type Client struct {
 	nowFn      func() time.Time
 }
 
-// NewClient builds a sync relay client using built-in SPKI pinning for the default relay
-// and standard HTTPS CA verification for user-supplied custom relay domains.
+// NewClient builds a sync relay client using SPKI pinning for the default relay,
+// TLS 1.3 self-signed cert acceptance for custom raw IP relays, and system CA for domains.
 func NewClient(relayURL string) (*Client, error) {
-	cleanURL, isDefault, err := NormalizeRelayURL(relayURL)
+	cleanURL, mode, err := NormalizeRelayURL(relayURL)
 	if err != nil {
 		return nil, err
 	}
-	return NewCustomClient(cleanURL, AppGateKey, PinnedSPKISHA256, isDefault)
+	return NewClientWithMode(cleanURL, AppGateKey, PinnedSPKISHA256, mode)
 }
 
 // NewCustomClient creates a client with explicit credentials and pinning control.
 func NewCustomClient(relayURL, appGateKey, spkiSHA256 string, usePin bool) (*Client, error) {
+	mode := RelayTLSModeSystemCA
+	if usePin {
+		mode = RelayTLSModePinned
+	} else if IsRawIPHost(relayURL) {
+		mode = RelayTLSModeSelfSignedIP
+	}
+	return NewClientWithMode(relayURL, appGateKey, spkiSHA256, mode)
+}
+
+// NewClientWithMode creates a client with explicit credentials and TLS mode.
+func NewClientWithMode(relayURL, appGateKey, spkiSHA256 string, mode RelayTLSMode) (*Client, error) {
 	if strings.TrimSpace(appGateKey) == "" {
 		return nil, errors.New("同步客户端未配置 App Gate 密钥")
 	}
-	pin := strings.ToLower(strings.TrimSpace(spkiSHA256))
-	if usePin && len(pin) != 64 {
-		return nil, errors.New("内置中继 SPKI 指纹未配置")
-	}
-	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS13}
-	if usePin {
-		tlsCfg.InsecureSkipVerify = true
-		tlsCfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			return verifyPinnedSPKI(rawCerts, pin, time.Now())
-		}
+	tlsCfg, err := buildTLSConfig(mode, spkiSHA256)
+	if err != nil {
+		return nil, err
 	}
 	tr := &http.Transport{
 		TLSClientConfig:     tlsCfg,
@@ -95,11 +97,8 @@ func (c *Client) Drop(ctx context.Context, payload EncryptedPayload, ttlSeconds 
 		ttlSeconds = DefaultTTLSeconds
 	}
 	req := map[string]any{
-		"channelId":  payload.ChannelID,
-		"salt":       payload.Salt,
-		"nonce":      payload.Nonce,
-		"ciphertext": payload.Ciphertext,
-		"ttlSeconds": ttlSeconds,
+		"channelId": payload.ChannelID, "salt": payload.Salt,
+		"nonce": payload.Nonce, "ciphertext": payload.Ciphertext, "ttlSeconds": ttlSeconds,
 	}
 	code, body, err := c.postJSON(ctx, "/v1/drop", req)
 	if err != nil {
@@ -145,7 +144,7 @@ func (c *Client) Pickup(ctx context.Context, channelID string) (EncryptedPayload
 		out.ChannelID = channelID
 		return out, nil
 	case http.StatusNotFound:
-		return EncryptedPayload{}, errors.New("未找到对应的同步数据（可能同步码错误、已过期或已被其他设备领取）")
+		return EncryptedPayload{}, errors.New("未找到对应同步数据（可能同步码错误、已过期或已被领取）")
 	case http.StatusTooManyRequests:
 		return EncryptedPayload{}, errors.New("请求过于频繁，请稍后再试")
 	default:
