@@ -25,10 +25,11 @@ func (w *wailsEventSink) Emit(eventName string, data ...any) {
 }
 
 type App struct {
-	ctx     context.Context
-	store   *vault.Store
-	sshMgr  *sshclient.Manager
-	initErr error
+	ctx       context.Context
+	store     *vault.Store
+	sshMgr    *sshclient.Manager
+	syncCache *syncPreviewCache
+	initErr   error
 }
 
 func NewApp() *App {
