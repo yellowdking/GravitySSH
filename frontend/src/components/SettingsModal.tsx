@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Settings, X } from 'lucide-react'
+import { RefreshCw, Settings, X } from 'lucide-react'
 import type { AppSettings, UpdateCheckResult, VaultLockState, VaultSecurityInfo } from '../types'
 import { api } from '../wailsApi'
 import { SettingsToggles } from './SettingsToggles'
@@ -16,13 +16,14 @@ interface SettingsModalProps {
   updateInfo: UpdateCheckResult | null
   onUpdateFound: (info: UpdateCheckResult) => void
   onClose: () => void
+  onOpenSync: () => void
   onSaved: (next: AppSettings) => void
   onLockStateChanged: () => void
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
-  open, settings, securityInfo, lockState, appVersion, updateInfo, onUpdateFound, onClose, onSaved, onLockStateChanged, onToast,
+  open, settings, securityInfo, lockState, appVersion, updateInfo, onUpdateFound, onClose, onOpenSync, onSaved, onLockStateChanged, onToast,
 }) => {
   const [draft, setDraft] = useState<AppSettings>(settings)
   const [saving, setSaving] = useState(false)
@@ -53,13 +54,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <div className="w-8 h-8 rounded-lg bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-300"><Settings className="w-4 h-4" /></div>
             <div>
               <h2 className="text-sm font-semibold text-ag-text">设置 · GravitySSH v{appVersion}</h2>
-              <p className="text-[11px] text-ag-muted">自定义命令补齐、监控、SFTP、终端防护与更新</p>
+              <p className="text-[11px] text-ag-muted">自定义命令补齐、监控、SFTP、多设备同步与更新</p>
             </div>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text"><X className="w-4 h-4" /></button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          <div className="rounded-xl bg-[#0d111a] border border-cyan-500/25 p-3.5 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-semibold text-ag-text">多设备零知识同步（Windows ↔ Android）</div>
+              <p className="text-[11px] text-ag-muted mt-0.5">通过一次性同步码或二维码端到端加密互传服务器、密钥与命令</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => { onClose(); onOpenSync() }}
+              className="shrink-0 px-3 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-200 border border-cyan-500/35 text-xs font-medium flex items-center gap-1.5 transition"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              打开同步
+            </button>
+          </div>
           <SettingsToggles draft={draft} patch={patch} />
           <UpdateCheckSection appVersion={appVersion} updateInfo={updateInfo} checkOnStartup={draft.checkUpdatesOnStartup} onToggleCheckOnStartup={(v) => patch({ checkUpdatesOnStartup: v })} onUpdateFound={onUpdateFound} onToast={onToast} />
           <SshCacheSection onToast={onToast} />
