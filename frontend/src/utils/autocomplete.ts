@@ -1,60 +1,76 @@
 /**
- * Computes the exact backspaces and remaining text to write into the terminal when the user
- * selects an autocomplete suggestion, avoiding duplicate prefixes for both full commands
- * and directory/file path completions (e.g. `cd doc` -> `cd docker-compose/`, `nano /etc/ng` -> `nano /etc/nginx/`).
+ * Computes exact backspaces and suffix text to write into the terminal when selecting
+ * an autocomplete suggestion, using Unicode code-point case-sensitive LCP so CJK/emoji
+ * filenames and chained commands never over-backspace.
  */
-export function computeCompletionInsert(currentLine: string, fullCommand: string): {
+export function computeCompletionInsert(currentLine: string, targetLine: string): {
   backspaces: number
   insertText: string
 } {
-  const trimmed = currentLine.trimStart()
-  if (!trimmed) {
-    return { backspaces: 0, insertText: fullCommand }
-  }
-  if (fullCommand.startsWith(trimmed)) {
-    return { backspaces: 0, insertText: fullCommand.slice(trimmed.length) }
+  const hasLeadingWs = currentLine.length > 0 && /^\s/.test(currentLine)
+  const base = hasLeadingWs && !/^\s/.test(targetLine) ? currentLine.trimStart() : currentLine
+  if (!base.trim()) {
+    return { backspaces: 0, insertText: targetLine }
   }
 
-  // Find longest exact common prefix so shared command/path prefixes are never duplicated or re-typed.
+  const cur = [...base]
+  const tgt = [...targetLine]
   let common = 0
-  const maxLen = Math.min(trimmed.length, fullCommand.length)
-  while (common < maxLen && trimmed[common] === fullCommand[common]) {
+  const maxLen = Math.min(cur.length, tgt.length)
+  while (common < maxLen && cur[common] === tgt[common]) {
     common++
   }
 
-  if (common > 0) {
-    return {
-      backspaces: trimmed.length - common,
-      insertText: fullCommand.slice(common),
-    }
+  return {
+    backspaces: cur.length - common,
+    insertText: tgt.slice(common).join(''),
   }
-
-  // Substring or case-mismatch from start (e.g. "compose" -> "docker compose up -d")
-  return { backspaces: trimmed.length, insertText: fullCommand }
 }
+
+/**
+ * Extracts the active matched token prefix from the current input line for cyan
+ * prefix highlighting in AutocompletePopup.
+ */
+export function getActiveTokenPrefix(line: string, source: string): string {
+  const trimmed = line.trimStart()
+  if (!trimmed) return ''
+  if (source === 'history' || source === 'history_local') {
+    const seg = trimmed.split(/(?:&&|\|\||\|&|[;|])/).pop() ?? trimmed
+    return seg.trimStart()
+  }
+  if (/\s$/.test(line)) return ''
+  const parts = trimmed.split(/(?<!\\)\s+/)
+  let tok = (parts[parts.length - 1] || '').replace(/\\ /g, ' ')
+  if (tok.startsWith('"') || tok.startsWith("'")) tok = tok.slice(1)
+  if (source === 'dir' || source === 'file') {
+    const slash = tok.lastIndexOf('/')
+    if (slash >= 0) tok = tok.slice(slash + 1)
+  }
+  return tok
+}
+
+const RESET_ESCAPES = new Set([
+  '\x1b[A', '\x1b[B', '\x1b[C', '\x1b[D',
+  '\x1b[H', '\x1b[F', '\x1b[1~', '\x1b[4~',
+  '\x1bOA', '\x1bOB', '\x1bOC', '\x1bOD', '\x1bOH', '\x1bOF',
+])
 
 /**
  * Lightweight client-side input buffer mirror for zero-latency autocomplete triggering.
  */
 export function applyTerminalInputToLine(currentLine: string, rawData: string): string {
-  // Ignore escape sequences (arrows, function keys, etc.)
   if (rawData.startsWith('\x1b')) {
-    if (rawData === '\x1b[A' || rawData === '\x1b[B') {
-      return ''
-    }
-    return currentLine
+    return RESET_ESCAPES.has(rawData) ? '' : currentLine
   }
 
   let line = currentLine
-  for (let i = 0; i < rawData.length; i++) {
-    const ch = rawData[i]
-    const code = rawData.charCodeAt(i)
-    if (ch === '\r' || ch === '\n' || code === 0x03 || code === 0x04 || code === 0x15) {
+  for (const ch of rawData) {
+    const code = ch.charCodeAt(0)
+    if (ch === '\r' || ch === '\n' || ch === '\t' || code === 0x03 || code === 0x04 || code === 0x15) {
       line = ''
     } else if (code === 0x7f || code === 0x08) {
-      line = line.slice(0, -1)
+      line = [...line].slice(0, -1).join('')
     } else if (code === 0x17) {
-      // Ctrl+W delete previous word
       line = line.replace(/\S+\s*$/, '')
     } else if (code >= 0x20) {
       line += ch
