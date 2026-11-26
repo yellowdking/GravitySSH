@@ -29,6 +29,14 @@
   - 所有 SSH 私钥、口令、服务器密码、代理密码、快捷命令与历史记录均统一保存在程序同目录 `gsshconfig\vault.gsv`（支持自定义主密码双重加密与版本升级平滑读取）。
   - 采用 **Windows DPAPI (`CryptProtectData`) + `HKLM MachineGuid` + 应用独立高熵 HKDF-SHA256 + AES-256-GCM 认证加密**。
   - 即使他人拷贝 `vault.gsv` 到其他电脑或其他 Windows 账户，也**无法解密取走任何数据**。
+- **零知识多端同步（Windows ↔ Android）**：
+  - 配套安卓客户端：[GravitySSH-Android](https://github.com/yellowdking/GravitySSH-Android)。
+  - 非云端托管：通过 8 位一次性同步码 / 二维码端到端加密传输（PBKDF2 200k + AES-256-GCM），中继纯内存阅后即焚，接收端可预览并自由选择安全合并或覆盖导入。
+  - 换机/自建中继支持 Docker 一键部署（源码与配置位于 [`cmd/sshsync/`](cmd/sshsync/README.md)）：
+    ```bash
+    docker run -d --name sshsync --restart unless-stopped -p 54843:54843 --read-only --memory=64m --cap-drop=ALL --security-opt no-new-privileges:true bbplin/sshsync:latest
+    ```
+    部署后在客户端输入 `VPS_IP:54843` 并测试连通即可切换。
 
 ## 下载与使用
 
