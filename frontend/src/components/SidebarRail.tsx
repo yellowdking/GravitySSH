@@ -5,6 +5,7 @@ import {
   KeyRound,
   PanelLeftClose,
   PanelLeftOpen,
+  RefreshCw,
   Server,
   Settings,
   Terminal,
@@ -16,6 +17,7 @@ interface Props {
   collapsed: boolean
   onSelectNav: (tab: SidebarTab) => void
   onToggleCollapse: () => void
+  onOpenSync: () => void
   onOpenSettings: () => void
 }
 
@@ -24,6 +26,7 @@ export const SidebarRail: React.FC<Props> = ({
   collapsed,
   onSelectNav,
   onToggleCollapse,
+  onOpenSync,
   onOpenSettings,
 }) => {
   const navItems: { id: SidebarTab; icon: React.ReactNode; label: string }[] = [
@@ -65,6 +68,13 @@ export const SidebarRail: React.FC<Props> = ({
       </div>
 
       <div className="flex flex-col items-center gap-2">
+        <button
+          onClick={onOpenSync}
+          title="多设备零知识同步"
+          className="w-9 h-9 rounded-lg flex items-center justify-center text-cyan-300/85 hover:text-cyan-200 hover:bg-cyan-500/15 transition"
+        >
+          <RefreshCw className="w-[17px] h-[17px]" />
+        </button>
         <button
           onClick={onOpenSettings}
           title="设置"
