@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,13 +70,34 @@ func (a *App) syncContext() context.Context {
 	return context.Background()
 }
 
-// GetDefaultSyncRelayURL returns the built-in zero-knowledge relay URL.
-func (a *App) GetDefaultSyncRelayURL() string {
+func (a *App) resolveRelayURL(relayURL string) string {
+	if trimmed := strings.TrimSpace(relayURL); trimmed != "" {
+		return trimmed
+	}
+	if a.store != nil {
+		if saved := strings.TrimSpace(a.store.GetSettings().SyncRelayURL); saved != "" {
+			return saved
+		}
+	}
 	return syncclient.DefaultRelayURL
 }
 
-// StartSyncSend exports the unlocked vault, encrypts it with a fresh 8-char code,
-// and drops the ciphertext into the ephemeral relay.
+func (a *App) GetDefaultSyncRelayURL() string { return syncclient.DefaultRelayURL }
+
+// TestSyncRelay checks TLS 1.3 + App Gate connectivity to the given or saved relay URL.
+func (a *App) TestSyncRelay(relayURL string) (int64, error) {
+	if err := a.ensureReady(); err != nil {
+		return 0, err
+	}
+	client, err := syncclient.NewClient(a.resolveRelayURL(relayURL))
+	if err != nil {
+		return 0, err
+	}
+	ctx, cancel := context.WithTimeout(a.syncContext(), 10*time.Second)
+	defer cancel()
+	return client.Ping(ctx)
+}
+
 func (a *App) StartSyncSend(relayURL string) (models.SyncSendSession, error) {
 	if err := a.ensureUnlocked(); err != nil {
 		return models.SyncSendSession{}, err
@@ -100,7 +122,7 @@ func (a *App) StartSyncSend(relayURL string) (models.SyncSendSession, error) {
 	if err != nil {
 		return models.SyncSendSession{}, err
 	}
-	cleanURL, _, err := syncclient.NormalizeRelayURL(relayURL)
+	cleanURL, _, err := syncclient.NormalizeRelayURL(a.resolveRelayURL(relayURL))
 	if err != nil {
 		return models.SyncSendSession{}, err
 	}
@@ -124,7 +146,6 @@ func (a *App) StartSyncSend(relayURL string) (models.SyncSendSession, error) {
 	}, nil
 }
 
-// CancelSyncSend revokes an active sync code on the relay.
 func (a *App) CancelSyncSend(code, relayURL string) error {
 	if err := a.ensureUnlocked(); err != nil {
 		return err
@@ -133,15 +154,13 @@ func (a *App) CancelSyncSend(code, relayURL string) error {
 	if err != nil {
 		return err
 	}
-	client, err := syncclient.NewClient(relayURL)
+	client, err := syncclient.NewClient(a.resolveRelayURL(relayURL))
 	if err != nil {
 		return err
 	}
 	return client.Cancel(a.syncContext(), syncclient.DeriveChannelID(canonical))
 }
 
-// PreviewSyncReceive fetches and decrypts a sync payload from the relay and caches
-// it in memory for 10 minutes so the user can choose Merge or Overwrite.
 func (a *App) PreviewSyncReceive(code, relayURL string) (models.SyncReceivePreview, error) {
 	if err := a.ensureUnlocked(); err != nil {
 		return models.SyncReceivePreview{}, err
@@ -150,7 +169,7 @@ func (a *App) PreviewSyncReceive(code, relayURL string) (models.SyncReceivePrevi
 	if err != nil {
 		return models.SyncReceivePreview{}, err
 	}
-	client, err := syncclient.NewClient(relayURL)
+	client, err := syncclient.NewClient(a.resolveRelayURL(relayURL))
 	if err != nil {
 		return models.SyncReceivePreview{}, err
 	}
@@ -162,9 +181,8 @@ func (a *App) PreviewSyncReceive(code, relayURL string) (models.SyncReceivePrevi
 	if err != nil {
 		return models.SyncReceivePreview{}, err
 	}
-	previewID := a.getSyncCache().put(bundle)
 	return models.SyncReceivePreview{
-		PreviewID:      previewID,
+		PreviewID:      a.getSyncCache().put(bundle),
 		SchemaVersion:  bundle.SchemaVersion,
 		ExportedAt:     bundle.ExportedAt,
 		SourcePlatform: bundle.SourcePlatform,
@@ -176,7 +194,6 @@ func (a *App) PreviewSyncReceive(code, relayURL string) (models.SyncReceivePrevi
 	}, nil
 }
 
-// ApplySyncReceive imports a previewed sync bundle into the encrypted vault.
 func (a *App) ApplySyncReceive(previewID, mode string) (models.SyncImportSummary, error) {
 	if err := a.ensureUnlocked(); err != nil {
 		return models.SyncImportSummary{}, err
