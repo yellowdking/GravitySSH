@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { applyTerminalInputToLine, computeCompletionInsert, formatBytes, sanitizePasteText } from './autocomplete'
+import {
+  applyTerminalInputToLine,
+  computeCompletionInsert,
+  formatBytes,
+  getActiveTokenPrefix,
+  sanitizePasteText,
+} from './autocomplete'
 
 describe('autocomplete helpers', () => {
   it('computes clean suffix insertion for prefix matches', () => {
@@ -40,6 +46,29 @@ describe('autocomplete helpers', () => {
     })
   })
 
+  it('uses Unicode code-point case-sensitive LCP for CJK, emoji, and chained commands', () => {
+    expect(computeCompletionInsert('cd 项目', 'cd 项目文档/')).toEqual({
+      backspaces: 0,
+      insertText: '文档/',
+    })
+    expect(computeCompletionInsert('cd 项目A', 'cd 项目文档/')).toEqual({
+      backspaces: 1,
+      insertText: '文档/',
+    })
+    expect(computeCompletionInsert('cd 🚀a', 'cd 🚀b')).toEqual({
+      backspaces: 1,
+      insertText: 'b',
+    })
+    expect(computeCompletionInsert('cd 🚀', 'cd 📦')).toEqual({
+      backspaces: 1,
+      insertText: '📦',
+    })
+    expect(computeCompletionInsert('cd /opt && Docker c', 'cd /opt && docker compose ')).toEqual({
+      backspaces: 8,
+      insertText: 'docker compose ',
+    })
+  })
+
   it('replaces typed token when selecting a substring match', () => {
     expect(computeCompletionInsert('compose', 'docker compose up -d')).toEqual({
       backspaces: 7,
@@ -47,7 +76,7 @@ describe('autocomplete helpers', () => {
     })
   })
 
-  it('tracks local terminal input accurately for instant suggestions', () => {
+  it('tracks local terminal input and clears on horizontal arrows, Home/End, and Tab', () => {
     let line = ''
     line = applyTerminalInputToLine(line, 'dock')
     expect(line).toBe('dock')
@@ -55,8 +84,30 @@ describe('autocomplete helpers', () => {
     expect(line).toBe('docker p')
     line = applyTerminalInputToLine(line, '\x7f')
     expect(line).toBe('docker ')
+    expect(applyTerminalInputToLine('cd /opt', '\x1b[C')).toBe('')
+    expect(applyTerminalInputToLine('cd /opt', '\x1b[D')).toBe('')
+    expect(applyTerminalInputToLine('cd /opt', '\x1b[H')).toBe('')
+    expect(applyTerminalInputToLine('cd /opt', '\x1b[F')).toBe('')
+    expect(applyTerminalInputToLine('cd /opt', '\x1b[1~')).toBe('')
+    expect(applyTerminalInputToLine('cd /opt', '\x1b[4~')).toBe('')
+    expect(applyTerminalInputToLine('cd /opt', '\t')).toBe('')
+    expect(applyTerminalInputToLine('cd 🚀', '\x7f')).toBe('cd ')
     line = applyTerminalInputToLine(line, '\r')
     expect(line).toBe('')
+  })
+
+  it('extracts active token prefix by source for cyan prefix highlighting', () => {
+    expect(getActiveTokenPrefix('cd /opt/ng', 'dir')).toBe('ng')
+    expect(getActiveTokenPrefix('cd /opt/', 'dir')).toBe('')
+    expect(getActiveTokenPrefix('nano /etc/nginx.c', 'file')).toBe('nginx.c')
+    expect(getActiveTokenPrefix('nano doc', 'file')).toBe('doc')
+    expect(getActiveTokenPrefix('docker c', 'subcmd')).toBe('c')
+    expect(getActiveTokenPrefix('docker ', 'subcmd')).toBe('')
+    expect(getActiveTokenPrefix('ls -l', 'flag')).toBe('-l')
+    expect(getActiveTokenPrefix('cd /opt && dock', 'builtin')).toBe('dock')
+    expect(getActiveTokenPrefix('docker co', 'history_local')).toBe('docker co')
+    expect(getActiveTokenPrefix('cd /opt && docker co', 'history')).toBe('docker co')
+    expect(getActiveTokenPrefix('   ', 'dir')).toBe('')
   })
 
   it('formats byte sizes cleanly', () => {
