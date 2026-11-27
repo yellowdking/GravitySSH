@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -104,5 +105,101 @@ func TestRunShortcutPayloadFillVsExecute(t *testing.T) {
 	defer mu.Unlock()
 	if len(execWrites) != 2 || execWrites[0] != "echo first\r" || execWrites[1] != "echo second\r" {
 		t.Fatalf("unexpected execute writes: %#v", execWrites)
+	}
+}
+
+func TestSplitShortcutExecLinesPreservesHeredocBlankLines(t *testing.T) {
+	script := strings.Join([]string{
+		"",
+		"cat <<'EOF' > /tmp/app.conf",
+		"key1=val1",
+		"",
+		"key2=val2",
+		"EOF",
+		"",
+		"cat <<-END",
+		"\tlineA",
+		"",
+		"\tEND",
+		"grep foo <<< \"bar\"",
+		"",
+		"echo done",
+	}, "\n")
+
+	got := splitShortcutExecLines(script)
+	want := []string{
+		"cat <<'EOF' > /tmp/app.conf",
+		"key1=val1",
+		"",
+		"key2=val2",
+		"EOF",
+		"cat <<-END",
+		"\tlineA",
+		"",
+		"\tEND",
+		"grep foo <<< \"bar\"",
+		"echo done",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("splitShortcutExecLines mismatch:\ngot:  %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestSessionShortcutRunnerCancelsPriorRunWithoutInterleaving(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		written []string
+	)
+	writeFn := func(s string) error {
+		mu.Lock()
+		written = append(written, s)
+		mu.Unlock()
+		return nil
+	}
+
+	var runner sessionShortcutRunner
+	// Start run 1 (5 lines, paced at 35ms each).
+	if err := runner.run(nil, nil, "r1-1\nr1-2\nr1-3\nr1-4\nr1-5", true, writeFn); err != nil {
+		t.Fatalf("run 1 failed: %v", err)
+	}
+	// Immediately start run 2 on the same session: must cancel run 1 cleanly before writing r2-1.
+	if err := runner.run(nil, nil, "r2-1\nr2-2", true, writeFn); err != nil {
+		t.Fatalf("run 2 failed: %v", err)
+	}
+	// Wait for run 2 to finish.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		done := len(written) >= 3 && written[len(written)-1] == "r2-2\r"
+		mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Extra wait to ensure no leaked r1 lines arrive after r2 finishes.
+	time.Sleep(100 * time.Millisecond)
+	runner.cancelAndWait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	r2Start := -1
+	for i, line := range written {
+		if line == "r2-1\r" {
+			r2Start = i
+			break
+		}
+	}
+	if r2Start < 0 {
+		t.Fatalf("expected r2-1 to be written, got %#v", written)
+	}
+	// After r2-1 starts, NO r1-* line may appear.
+	for _, line := range written[r2Start:] {
+		if strings.HasPrefix(line, "r1-") {
+			t.Fatalf("run 1 interleaved after run 2 started: %#v", written)
+		}
+	}
+	if written[len(written)-1] != "r2-2\r" {
+		t.Fatalf("expected r2-2 as final line, got %#v", written)
 	}
 }
