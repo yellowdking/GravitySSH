@@ -6,6 +6,7 @@ import { ServerListItem } from './ServerListItem'
 interface Props {
   totalServers: number
   groupedServers: [string, ServerView[]][]
+  hasSearch: boolean
   connectedServerIds: Set<string>
   onAddServer: () => void
   onConnectServer: (srv: ServerView) => void
@@ -16,6 +17,7 @@ interface Props {
 export const SidebarServerList: React.FC<Props> = ({
   totalServers,
   groupedServers,
+  hasSearch,
   connectedServerIds,
   onAddServer,
   onConnectServer,
@@ -45,7 +47,7 @@ export const SidebarServerList: React.FC<Props> = ({
   return (
     <>
       {groupedServers.map(([group, list]) => {
-        const isGroupCollapsed = !!collapsedGroups[group]
+        const isGroupCollapsed = !hasSearch && !!collapsedGroups[group]
         return (
           <div key={group}>
             <button

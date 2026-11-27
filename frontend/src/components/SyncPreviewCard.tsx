@@ -11,8 +11,27 @@ interface Props {
   onApply: () => void
 }
 
+function formatPlatformLabel(raw: string): string {
+  const p = (raw || '').trim().toLowerCase()
+  if (p === 'android') return 'Android'
+  if (p === 'windows') return 'Windows'
+  if (p === 'darwin' || p === 'macos') return 'macOS'
+  if (p === 'ios') return 'iOS'
+  if (p === 'linux') return 'Linux'
+  return raw?.trim() || '未知平台'
+}
+
+function formatExportedAt(raw: string): string {
+  if (!raw) return '未知时间'
+  const date = new Date(raw)
+  return Number.isNaN(date.getTime()) ? '未知时间' : date.toLocaleString()
+}
+
 export const SyncPreviewCard: React.FC<Props> = ({ preview, mode, applying, onModeChange, onDiscard, onApply }) => {
-  const isAndroid = preview.sourcePlatform.toLowerCase() === 'android'
+  const platformKey = (preview.sourcePlatform || '').trim().toLowerCase()
+  const isMobile = platformKey === 'android' || platformKey === 'ios'
+  const platformLabel = formatPlatformLabel(preview.sourcePlatform)
+  const exportedAtText = formatExportedAt(preview.exportedAt)
   const stats = [
     ['服务器', preview.serverCount],
     ['SSH 密钥', preview.keyCount],
@@ -26,14 +45,14 @@ export const SyncPreviewCard: React.FC<Props> = ({ preview, mode, applying, onMo
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-300">
-              {isAndroid ? <Smartphone className="w-4 h-4" /> : <Laptop className="w-4 h-4" />}
+              {isMobile ? <Smartphone className="w-4 h-4" /> : <Laptop className="w-4 h-4" />}
             </div>
             <div>
               <div className="text-xs font-semibold text-ag-text">
-                来自 {preview.sourceDevice || (isAndroid ? 'Android 设备' : 'Windows 设备')}
+                来自 {preview.sourceDevice || `${platformLabel} 设备`}
               </div>
               <div className="text-[11px] text-ag-muted">
-                {isAndroid ? 'Android' : 'Windows'} · 导出于 {new Date(preview.exportedAt).toLocaleString()}
+                {platformLabel} · 导出于 {exportedAtText}
               </div>
             </div>
           </div>
@@ -55,8 +74,9 @@ export const SyncPreviewCard: React.FC<Props> = ({ preview, mode, applying, onMo
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
         <button
           type="button"
+          disabled={applying}
           onClick={() => onModeChange('merge')}
-          className={`text-left p-3 rounded-xl border transition ${mode === 'merge' ? 'bg-indigo-500/15 border-indigo-400/60' : 'bg-[#0d111a] border-ag-border hover:border-ag-borderStrong'}`}
+          className={`text-left p-3 rounded-xl border transition disabled:opacity-60 disabled:cursor-not-allowed ${mode === 'merge' ? 'bg-indigo-500/15 border-indigo-400/60' : 'bg-[#0d111a] border-ag-border hover:border-ag-borderStrong'}`}
         >
           <div className="flex items-center gap-1.5 text-xs font-semibold text-ag-text">
             <GitMerge className="w-3.5 h-3.5 text-indigo-300" />
@@ -69,8 +89,9 @@ export const SyncPreviewCard: React.FC<Props> = ({ preview, mode, applying, onMo
 
         <button
           type="button"
+          disabled={applying}
           onClick={() => onModeChange('overwrite')}
-          className={`text-left p-3 rounded-xl border transition ${mode === 'overwrite' ? 'bg-rose-500/15 border-rose-400/60' : 'bg-[#0d111a] border-ag-border hover:border-ag-borderStrong'}`}
+          className={`text-left p-3 rounded-xl border transition disabled:opacity-60 disabled:cursor-not-allowed ${mode === 'overwrite' ? 'bg-rose-500/15 border-rose-400/60' : 'bg-[#0d111a] border-ag-border hover:border-ag-borderStrong'}`}
         >
           <div className="flex items-center gap-1.5 text-xs font-semibold text-rose-200">
             <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
@@ -83,11 +104,12 @@ export const SyncPreviewCard: React.FC<Props> = ({ preview, mode, applying, onMo
       </div>
 
       <div className="flex items-center justify-end gap-2">
-        <button onClick={onDiscard} className="ag-btn-ghost" disabled={applying}>放弃</button>
+        <button type="button" onClick={onDiscard} className="ag-btn-ghost" disabled={applying}>放弃</button>
         <button
+          type="button"
           onClick={onApply}
           disabled={applying}
-          className={`px-4 py-2 rounded-lg text-xs font-medium text-white transition flex items-center gap-1.5 ${mode === 'overwrite' ? 'bg-rose-600 hover:bg-rose-500' : 'bg-indigo-500 hover:bg-indigo-400 shadow-glow'}`}
+          className={`px-4 py-2 rounded-lg text-xs font-medium text-white transition flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed ${mode === 'overwrite' ? 'bg-rose-600 hover:bg-rose-500' : 'bg-indigo-500 hover:bg-indigo-400 shadow-glow'}`}
         >
           {applying ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCcw className="w-3.5 h-3.5" />}
           {applying ? '正在写入...' : mode === 'merge' ? '确认安全合并' : '确认覆盖本地'}

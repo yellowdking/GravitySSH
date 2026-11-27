@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Eraser, FileText, Loader2, RefreshCw, Trash2 } from 'lucide-react'
 import type { SSHCacheClearResult, SSHCacheInfo } from '../types'
 import { api } from '../wailsApi'
@@ -19,6 +19,8 @@ export const SshCacheSection: React.FC<{ onToast: (msg: string, type?: 'info' | 
   const [port, setPort] = useState('')
   const [busyHost, setBusyHost] = useState(false)
   const [busyAll, setBusyAll] = useState(false)
+  const busyHostRef = useRef(false)
+  const busyAllRef = useRef(false)
   const { confirm, dialogNode } = useActionDialogs()
 
   const refresh = async () => {
@@ -31,34 +33,63 @@ export const SshCacheSection: React.FC<{ onToast: (msg: string, type?: 'info' | 
   useEffect(() => { void refresh() }, [])
 
   const handleClearHost = async () => {
+    if (busyHostRef.current) return
     const h = host.trim()
     if (!h) return onToast('请输入要清理的主机地址或 IP', 'error')
+    const rawPort = port.trim()
+    let parsedPort = 0
+    if (rawPort !== '') {
+      if (!/^\d+$/.test(rawPort)) {
+        return onToast('端口必须为 1–65535 之间的整数', 'error')
+      }
+      parsedPort = Number.parseInt(rawPort, 10)
+      if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+        return onToast('端口必须为 1–65535 之间的整数', 'error')
+      }
+    }
+    busyHostRef.current = true
     setBusyHost(true)
     try {
-      const res = await api.clearSshHostCache(h, Number.parseInt(port.trim(), 10) || 0)
+      const res = await api.clearSshHostCache(h, parsedPort)
       onToast(`${h}：${formatCacheClearSummary(res)}`)
       setHost('')
       setPort('')
       await refresh()
     } catch (err) {
       onToast(errMsg(err), 'error')
-    } finally { setBusyHost(false) }
+    } finally {
+      busyHostRef.current = false
+      setBusyHost(false)
+    }
   }
 
   const handleClearAll = async () => {
+    if (busyAllRef.current) return
     const ok = await confirm({
       title: '清理全部 SSH 缓存',
       message: '确定清理全部 SSH 主机指纹缓存（known_hosts）与目录缓存吗？\n\n首次清理前会自动备份到 known_hosts.gssh.bak，不会删除已保存的服务器、私钥或快捷命令。',
       confirmLabel: '清理全部',
     })
-    if (!ok) return
+    if (!ok || busyAllRef.current) return
+    busyAllRef.current = true
     setBusyAll(true)
     try {
       onToast(formatCacheClearSummary(await api.clearAllSshCache()))
       await refresh()
     } catch (err) {
       onToast(errMsg(err), 'error')
-    } finally { setBusyAll(false) }
+    } finally {
+      busyAllRef.current = false
+      setBusyAll(false)
+    }
+  }
+
+  const onHostInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      if (!busyHostRef.current) void handleClearHost()
+    }
   }
 
   return (
@@ -87,8 +118,8 @@ export const SshCacheSection: React.FC<{ onToast: (msg: string, type?: 'info' | 
           </div>
         )}
         <div className="flex flex-wrap items-center gap-2">
-          <input type="text" className="ag-input font-mono text-xs py-1.5 flex-1 min-w-[160px]" placeholder="主机 IP 或域名（如 192.168.1.10）" value={host} onChange={(e) => setHost(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void handleClearHost() } }} />
-          <input type="number" min={1} max={65535} className="ag-input font-mono text-xs py-1.5 w-24" placeholder="端口(可选)" value={port} onChange={(e) => setPort(e.target.value)} />
+          <input type="text" disabled={busyHost} className="ag-input font-mono text-xs py-1.5 flex-1 min-w-[160px] disabled:opacity-60" placeholder="主机 IP 或域名（如 192.168.1.10）" value={host} onChange={(e) => setHost(e.target.value)} onKeyDown={onHostInputKeyDown} />
+          <input type="text" inputMode="numeric" disabled={busyHost} className="ag-input font-mono text-xs py-1.5 w-24 disabled:opacity-60" placeholder="端口(可选)" value={port} onChange={(e) => setPort(e.target.value)} onKeyDown={onHostInputKeyDown} />
           <button type="button" disabled={busyHost || !host.trim()} onClick={() => void handleClearHost()} className="ag-btn-secondary text-xs py-1.5 px-3 shrink-0">
             {busyHost ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Eraser className="w-3.5 h-3.5 text-cyan-400" />}清理指定主机
           </button>
@@ -107,13 +138,19 @@ export const SshCacheSection: React.FC<{ onToast: (msg: string, type?: 'info' | 
 
 export const ClearHostCacheButton: React.FC<{ host: string; port: number; onResult: (res: { ok: boolean; text: string }) => void }> = ({ host, port, onResult }) => {
   const [busy, setBusy] = useState(false)
+  const busyRef = useRef(false)
   const run = async () => {
+    if (busyRef.current) return
     const h = host.trim()
     if (!h) return
+    busyRef.current = true
     setBusy(true)
     try { onResult({ ok: true, text: formatCacheClearSummary(await api.clearSshHostCache(h, port || 22)) }) }
     catch (err) { onResult({ ok: false, text: errMsg(err) }) }
-    finally { setBusy(false) }
+    finally {
+      busyRef.current = false
+      setBusy(false)
+    }
   }
   return (
     <button type="button" disabled={busy || !host.trim()} onClick={() => void run()} title="清理 ~/.ssh/known_hosts 中该主机的旧指纹与目录缓存" className="ag-btn-secondary text-xs">

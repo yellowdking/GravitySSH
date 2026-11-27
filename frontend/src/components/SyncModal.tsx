@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { ArrowDownToLine, ArrowUpFromLine, RefreshCw, X } from 'lucide-react'
 import type { AppSettings } from '../types'
 import { api } from '../wailsApi'
@@ -24,9 +24,19 @@ export const SyncModal: React.FC<SyncModalProps> = ({
   const [tab, setTab] = useState<'send' | 'receive'>('send')
   const [defaultRelay, setDefaultRelay] = useState(FALLBACK_RELAY)
   const [relayInput, setRelayInput] = useState(settings.syncRelayUrl || '')
+  const [sendBusy, setSendBusy] = useState(false)
+  const [receiveBusy, setReceiveBusy] = useState(false)
+  const sendBusyRef = useRef(false)
+  const receiveBusyRef = useRef(false)
 
   useEffect(() => {
-    if (!open) return
+    if (!open) {
+      sendBusyRef.current = false
+      receiveBusyRef.current = false
+      setSendBusy(false)
+      setReceiveBusy(false)
+      return
+    }
     let cancelled = false
     setRelayInput(settings.syncRelayUrl || '')
     void api.getDefaultSyncRelayUrl().then((url) => {
@@ -35,10 +45,26 @@ export const SyncModal: React.FC<SyncModalProps> = ({
     return () => { cancelled = true }
   }, [open, settings.syncRelayUrl])
 
+  const handleSendBusyChange = useCallback((busy: boolean) => {
+    sendBusyRef.current = busy
+    setSendBusy(busy)
+  }, [])
+
+  const handleReceiveBusyChange = useCallback((busy: boolean) => {
+    receiveBusyRef.current = busy
+    setReceiveBusy(busy)
+  }, [])
+
+  const modalBusy = sendBusy || receiveBusy
+  const handleClose = () => {
+    if (sendBusyRef.current || receiveBusyRef.current) return
+    onClose()
+  }
+
   const activeRelay = relayInput.trim() || defaultRelay
 
   return (
-    <ModalShell open={open} onClose={onClose}>
+    <ModalShell open={open} onClose={handleClose}>
       <div className="w-full max-w-xl bg-ag-panel border border-ag-borderStrong rounded-2xl shadow-ag overflow-hidden flex flex-col max-h-[88vh]">
         <div className="px-5 py-4 border-b border-ag-border flex items-center justify-between bg-[#11151f]">
           <div className="flex items-center gap-2.5">
@@ -50,7 +76,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({
               <p className="text-[11px] text-ag-muted">端到端加密配置互传</p>
             </div>
           </div>
-          <button type="button" onClick={onClose} aria-label="关闭同步窗口" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text">
+          <button type="button" disabled={modalBusy} onClick={handleClose} aria-label="关闭同步窗口" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text disabled:opacity-40 disabled:cursor-not-allowed">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -87,10 +113,10 @@ export const SyncModal: React.FC<SyncModalProps> = ({
 
         <div className="flex-1 overflow-y-auto p-5">
           <div className={tab === 'send' ? '' : 'hidden'}>
-            <SyncSendTab relayUrl={activeRelay} onToast={onToast} />
+            <SyncSendTab relayUrl={activeRelay} onBusyChange={handleSendBusyChange} onToast={onToast} />
           </div>
           <div className={tab === 'receive' ? '' : 'hidden'}>
-            <SyncReceiveTab relayUrl={activeRelay} onSynced={onSynced} onToast={onToast} />
+            <SyncReceiveTab relayUrl={activeRelay} onBusyChange={handleReceiveBusyChange} onSynced={onSynced} onToast={onToast} />
           </div>
         </div>
       </div>

@@ -86,7 +86,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
 
             <div className="flex-1 overflow-y-auto px-2 py-2 space-y-2">
-              <SidebarServerList totalServers={servers.length} groupedServers={groupedServers} connectedServerIds={connectedServerIds} onAddServer={onAddServer} onConnectServer={onConnectServer} onEditServer={onEditServer} onDeleteServer={onDeleteServer} />
+              <SidebarServerList totalServers={servers.length} groupedServers={groupedServers} hasSearch={search.trim().length > 0} connectedServerIds={connectedServerIds} onAddServer={onAddServer} onConnectServer={onConnectServer} onEditServer={onEditServer} onDeleteServer={onDeleteServer} />
             </div>
 
             <div className="p-2 border-t border-ag-border/80 bg-[#0d1017]/80 grid grid-cols-2 gap-1.5">
