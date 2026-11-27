@@ -28,13 +28,14 @@ interface Props {
   onOpenSync: () => void
   onCloseSync: () => void
   onSelectNav: (tab: SidebarTab) => void
+  onServerSaved: () => void
   onReload: () => void
   onToast: (text: string, type?: 'info' | 'error') => void
 }
 
 export const AppOverlays: React.FC<Props> = ({
   serverModalOpen, editingServer, settingsOpen, syncModalOpen, toast, data,
-  onCloseServerModal, onCloseSettings, onOpenSync, onCloseSync, onSelectNav, onReload, onToast,
+  onCloseServerModal, onCloseSettings, onOpenSync, onCloseSync, onSelectNav, onServerSaved, onReload, onToast,
 }) => (
   <>
     <Suspense fallback={null}>
@@ -46,7 +47,7 @@ export const AppOverlays: React.FC<Props> = ({
           sshKeys={data.sshKeys}
           defaultKeepAliveSeconds={data.settings.defaultKeepAliveSeconds}
           onClose={onCloseServerModal}
-          onSaved={() => { onToast(editingServer ? '服务器配置已更新' : '新服务器已保存'); onReload() }}
+          onSaved={() => { onToast(editingServer ? '服务器配置已更新' : '新服务器已保存'); onServerSaved() }}
           onGoToKeyVault={() => onSelectNav('keys')}
         />
       )}

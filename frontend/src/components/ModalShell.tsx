@@ -58,6 +58,8 @@ export const ModalShell: React.FC<ModalShellProps> = ({
 
   return createPortal(
     <div
+      role="dialog"
+      aria-modal="true"
       className={`fixed inset-0 ${zIndexClass} ${backdropClassName} backdrop-blur-sm flex items-center justify-center p-4`}
       onMouseDown={
         closeOnBackdrop

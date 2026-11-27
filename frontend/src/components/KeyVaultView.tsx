@@ -2,6 +2,8 @@ import React, { useState } from 'react'
 import { FolderOpen, KeyRound, Loader2, Plus, SlidersHorizontal, Zap } from 'lucide-react'
 import type { ServerView, SSHKeyMeta } from '../types'
 import { api } from '../wailsApi'
+import { errMsg } from '../utils/errors'
+import { useActionDialogs } from '../hooks/useActionDialogs'
 import { KeyFormDrawer } from './KeyFormDrawer'
 import { KeyCardItem } from './KeyCardItem'
 import { KeyDeployModal } from './KeyDeployModal'
@@ -23,6 +25,7 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
   const [busy, setBusy] = useState(false)
   const [quickBusy, setQuickBusy] = useState(false)
   const [deployKey, setDeployKey] = useState<SSHKeyMeta | null>(null)
+  const { confirm, dialogNode } = useActionDialogs()
 
   const resetForm = () => { setName(''); setPemContent(''); setPassphrase(''); setComment(''); setMode('none') }
 
@@ -38,7 +41,7 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
         onToast(`已一键生成密钥 "${created.name}"`)
       }
     } catch (err) {
-      onToast(String(err), 'error')
+      onToast(errMsg(err), 'error')
     } finally {
       setQuickBusy(false)
     }
@@ -52,7 +55,7 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
       if (!name && res.fileName) setName(res.fileName.replace(/\.(pem|key)$/i, ''))
       setMode('import')
     } catch (err) {
-      onToast(String(err), 'error')
+      onToast(errMsg(err), 'error')
     }
   }
 
@@ -65,7 +68,7 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
       resetForm()
       onRefresh()
     } catch (err) {
-      onToast(String(err), 'error')
+      onToast(errMsg(err), 'error')
     } finally {
       setBusy(false)
     }
@@ -80,20 +83,25 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
       resetForm()
       onRefresh()
     } catch (err) {
-      onToast(String(err), 'error')
+      onToast(errMsg(err), 'error')
     } finally {
       setBusy(false)
     }
   }
 
   const handleDelete = async (k: SSHKeyMeta) => {
-    if (!window.confirm(`确定要永久删除密钥 "${k.name}" 吗？`)) return
+    const ok = await confirm({
+      title: '删除 SSH 密钥',
+      message: `确定要永久删除密钥 "${k.name}" 吗？`,
+      confirmLabel: '删除',
+    })
+    if (!ok) return
     try {
       await api.deleteSSHKey(k.id)
       onToast(`已删除密钥 ${k.name}`)
       onRefresh()
     } catch (err) {
-      onToast(String(err), 'error')
+      onToast(errMsg(err), 'error')
     }
   }
 
@@ -146,6 +154,7 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
       </div>
 
       <KeyDeployModal open={!!deployKey} sshKey={deployKey} servers={servers} onClose={() => setDeployKey(null)} onDeployed={onRefresh} onToast={onToast} />
+      {dialogNode}
     </div>
   )
 }

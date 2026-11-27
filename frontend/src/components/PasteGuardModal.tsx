@@ -29,8 +29,6 @@ export const PasteGuardModal: React.FC<Props> = ({
     [text, bracketedPasteActive]
   )
 
-  if (!open) return null
-
   return (
     <ModalShell open={open} onClose={onCancel} backdropClassName="bg-black/75">
       <div className="w-full max-w-xl rounded-2xl bg-ag-panel border border-amber-500/40 shadow-ag overflow-hidden flex flex-col max-h-[85vh]">
@@ -44,7 +42,7 @@ export const PasteGuardModal: React.FC<Props> = ({
               <p className="text-[11px] text-ag-muted">检测到潜在风险内容，可修改后再发送到终端</p>
             </div>
           </div>
-          <button type="button" onClick={onCancel} className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text">
+          <button type="button" onClick={onCancel} aria-label="关闭粘贴安全检查" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text">
             <X className="w-4 h-4" />
           </button>
         </div>

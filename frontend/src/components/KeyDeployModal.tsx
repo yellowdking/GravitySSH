@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { AlertCircle, CheckCircle2, KeyRound, Loader2, Server, UploadCloud, X } from 'lucide-react'
 import type { KeyDeployResult, ServerView, SSHKeyMeta } from '../types'
 import { api } from '../wailsApi'
+import { errMsg } from '../utils/errors'
 import { ModalShell } from './ModalShell'
 
 interface Props {
@@ -23,7 +24,7 @@ export const KeyDeployModal: React.FC<Props> = ({ open, sshKey, servers, onClose
     if (open) { setSelectedIds([]); setBindAsAuth(true); setResults(null) }
   }, [open, sshKey?.id])
 
-  if (!open || !sshKey) return null
+  if (!sshKey) return null
 
   const allSelected = servers.length > 0 && selectedIds.length === servers.length
   const toggleOne = (id: string) => setSelectedIds((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]))
@@ -44,7 +45,7 @@ export const KeyDeployModal: React.FC<Props> = ({ open, sshKey, servers, onClose
         fail === 0 ? 'info' : 'error',
       )
     } catch (err) {
-      onToast(String(err), 'error')
+      onToast(errMsg(err), 'error')
     } finally {
       setDeploying(false)
     }
@@ -65,7 +66,7 @@ export const KeyDeployModal: React.FC<Props> = ({ open, sshKey, servers, onClose
               </p>
             </div>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text"><X className="w-4 h-4" /></button>
+          <button type="button" onClick={onClose} aria-label="关闭密钥部署窗口" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text"><X className="w-4 h-4" /></button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-4">

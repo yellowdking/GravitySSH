@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { AlertCircle, CheckCircle2, Globe, KeyRound, Loader2, Server, Sliders, Waypoints, X } from 'lucide-react'
 import type { ServerSaveRequest, ServerView, SSHKeyMeta } from '../types'
 import { api } from '../wailsApi'
+import { errMsg } from '../utils/errors'
 import { ModalShell } from './ModalShell'
 import { makeInitialServerForm } from './serverForm'
 import { ServerBasicTab } from './ServerBasicTab'
@@ -37,7 +38,6 @@ export const ServerModal: React.FC<Props> = ({
     setNotice(null)
   }, [open, editingServer, defaultKeepAliveSeconds])
 
-  if (!open) return null
   const jumpServers = allServers.filter((s) => s.id !== editingServer?.id)
 
   const validateForm = (): boolean => {
@@ -63,7 +63,7 @@ export const ServerModal: React.FC<Props> = ({
       onSaved(await api.saveServer(form))
       onClose()
     } catch (err) {
-      setNotice({ ok: false, text: String(err) })
+      setNotice({ ok: false, text: errMsg(err) })
     } finally {
       setSaving(false)
     }
@@ -76,7 +76,7 @@ export const ServerModal: React.FC<Props> = ({
     try {
       setNotice({ ok: true, text: await api.testServerConnection(form) })
     } catch (err) {
-      setNotice({ ok: false, text: String(err) })
+      setNotice({ ok: false, text: errMsg(err) })
     } finally {
       setTesting(false)
     }
@@ -100,7 +100,7 @@ export const ServerModal: React.FC<Props> = ({
               <p className="text-[11px] text-ag-muted">密码 / SSH 密钥 / SOCKS5 & HTTP 代理 / 多级跳板机</p>
             </div>
           </div>
-          <button type="button" onClick={onClose} className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text"><X className="w-4 h-4" /></button>
+          <button type="button" onClick={onClose} aria-label="关闭服务器配置窗口" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text"><X className="w-4 h-4" /></button>
         </div>
 
         <div className="px-5 pt-3 border-b border-ag-border flex items-center gap-1 bg-[#11151f]/60">

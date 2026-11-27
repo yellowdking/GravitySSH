@@ -8,17 +8,31 @@ interface QrCodeSvgProps {
 }
 
 export const QrCodeSvg: React.FC<QrCodeSvgProps> = ({ value, size = 176, className = '' }) => {
-  const matrix = useMemo(() => {
+  const quiet = 3
+  const { dim, pathData } = useMemo(() => {
     try {
-      return generateQrMatrix(value)
+      const matrix = generateQrMatrix(value)
+      const parts: string[] = []
+      for (let r = 0; r < matrix.length; r++) {
+        const row = matrix[r]
+        let c = 0
+        while (c < row.length) {
+          if (!row[c]) {
+            c++
+            continue
+          }
+          const start = c
+          while (c < row.length && row[c]) c++
+          parts.push(`M${start + quiet} ${r + quiet}h${c - start}v1h-${c - start}z`)
+        }
+      }
+      return { dim: matrix.length + quiet * 2, pathData: parts.join('') }
     } catch {
-      return null
+      return { dim: 0, pathData: '' }
     }
   }, [value])
 
-  if (!matrix) return null
-  const quiet = 3
-  const dim = matrix.length + quiet * 2
+  if (!dim) return null
 
   return (
     <div className={`inline-flex p-2.5 rounded-xl bg-white shadow-lg border border-indigo-400/30 ${className}`}>
@@ -31,11 +45,7 @@ export const QrCodeSvg: React.FC<QrCodeSvgProps> = ({ value, size = 176, classNa
         aria-label={`QR code for ${value}`}
       >
         <rect width={dim} height={dim} fill="#ffffff" />
-        {matrix.map((row, r) =>
-          row.map((dark, c) =>
-            dark ? <rect key={`${r}-${c}`} x={c + quiet} y={r + quiet} width={1} height={1} fill="#0b0d12" /> : null,
-          ),
-        )}
+        {pathData && <path d={pathData} fill="#0b0d12" />}
       </svg>
     </div>
   )

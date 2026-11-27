@@ -57,6 +57,9 @@ export const ServerJumpTab: React.FC<Props> = ({
           onChange={(e) => onChange({ ...form, jumpHost: { ...form.jumpHost, serverId: e.target.value } })}
         >
           <option value="">-- 请选择一台已保存的服务器作为跳板机 --</option>
+          {form.jumpHost.serverId && !availableJumpServers.some((s) => s.id === form.jumpHost.serverId) && (
+            <option value={form.jumpHost.serverId}>-- 原跳板服务器已删除/不可用 --</option>
+          )}
           {availableJumpServers.map((s) => (
             <option key={s.id} value={s.id}>
               {s.name} ({s.username}@{s.host}:{s.port})
@@ -124,13 +127,21 @@ export const ServerJumpTab: React.FC<Props> = ({
               value={form.jumpHost.sshKeyId}
               onChange={(e) => onChange({ ...form, jumpHost: { ...form.jumpHost, sshKeyId: e.target.value } })}
             >
-              <option value="">-- 无 --</option>
+              <option value="">{sshKeys.length === 0 ? '-- 暂无可用密钥 --' : '-- 无 --'}</option>
+              {form.jumpHost.sshKeyId && !sshKeys.some((k) => k.id === form.jumpHost.sshKeyId) && (
+                <option value={form.jumpHost.sshKeyId}>-- 原关联密钥已删除/不可用 --</option>
+              )}
               {sshKeys.map((k) => (
                 <option key={k.id} value={k.id}>
                   {k.name} ({k.keyType})
                 </option>
               ))}
             </select>
+            {!form.jumpHost.sshKeyId && (form.jumpHost.authType === 'key' || (editingServer?.jumpHost?.mode === 'custom' && (editingServer.jumpHost.authType === 'key' || editingServer.jumpHost.authType === 'both'))) && (
+              <p className="text-[11px] text-amber-300/90 mt-1">
+                未关联跳板机密钥（若原密钥已删除，请重新选择）
+              </p>
+            )}
           </div>
         </div>
 

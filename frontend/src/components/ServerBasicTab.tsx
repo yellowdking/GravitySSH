@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { AlertCircle, CheckCircle2, Loader2, UploadCloud } from 'lucide-react'
 import type { AuthType, ServerSaveRequest, ServerView, SSHKeyMeta } from '../types'
 import { api } from '../wailsApi'
+import { errMsg } from '../utils/errors'
 import { COLOR_PRESETS } from './serverForm'
 import { NumericInput } from './NumericInput'
 
@@ -34,7 +35,7 @@ export const ServerBasicTab: React.FC<Props> = ({ form, editingServer, sshKeys, 
       const [first] = await api.deploySSHKeyToServers(form.sshKeyId, [editingServer.id], false)
       setDeployMsg(first ? { ok: first.ok, text: first.message } : { ok: true, text: '密钥部署完成' })
     } catch (err) {
-      setDeployMsg({ ok: false, text: String(err) })
+      setDeployMsg({ ok: false, text: errMsg(err) })
     } finally {
       setDeploying(false)
     }
@@ -86,9 +87,17 @@ export const ServerBasicTab: React.FC<Props> = ({ form, editingServer, sshKeys, 
             <button type="button" onClick={onGoToKeyVault} className="text-[11px] text-indigo-400 hover:text-indigo-300">+ 去密钥库加载/生成新密钥</button>
           </div>
           <select className="ag-input" value={form.sshKeyId} onChange={(e) => patch({ sshKeyId: e.target.value })}>
-            <option value="">-- 请选择 SSH 密钥 --</option>
+            <option value="">{sshKeys.length === 0 ? '-- 暂无可用 SSH 密钥 --' : '-- 请选择 SSH 密钥 --'}</option>
+            {form.sshKeyId && !sshKeys.some((k) => k.id === form.sshKeyId) && (
+              <option value={form.sshKeyId}>-- 原关联密钥已删除/不可用 --</option>
+            )}
             {sshKeys.map((k) => <option key={k.id} value={k.id}>{k.name} ({k.keyType})</option>)}
           </select>
+          {!form.sshKeyId && (form.authType === 'key' || (editingServer && (editingServer.authType === 'key' || editingServer.authType === 'both'))) && (
+            <p className="text-[11px] text-amber-300/90">
+              尚未关联 SSH 密钥（若原密钥已删除，请重新选择或前往密钥库生成）
+            </p>
+          )}
 
           {editingServer && form.sshKeyId && (
             <div className="space-y-2 pt-0.5">

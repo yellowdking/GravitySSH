@@ -2,6 +2,8 @@ import React, { useMemo, useState } from 'react'
 import { BookmarkPlus, History, Search, X } from 'lucide-react'
 import type { CommandRecord, CommandShortcut } from '../types'
 import { api } from '../wailsApi'
+import { copyToClipboard, errMsg } from '../utils/errors'
+import { useActionDialogs } from '../hooks/useActionDialogs'
 import { ShortcutEditorModal } from './ShortcutEditorModal'
 import { HistoryRow } from './HistoryRow'
 
@@ -10,7 +12,7 @@ interface HistoryPanelProps {
   activeServerId?: string
   activeSessionId?: string
   compact?: boolean
-  onRunCommand: (cmd: string, execute: boolean) => void
+  onRunCommand: (cmd: string, execute: boolean) => void | Promise<boolean | void>
   onShortcutSaved: (sc: CommandShortcut) => void
   onHistoryChanged: () => void
   onToast: (msg: string, type?: 'info' | 'error') => void
@@ -30,6 +32,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
   const [onlyCurrentServer, setOnlyCurrentServer] = useState(!!activeServerId)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [savingDraft, setSavingDraft] = useState<Partial<CommandShortcut> | null>(null)
+  const { confirm, dialogNode } = useActionDialogs()
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -60,16 +63,41 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
       setSelectedIds([])
       setSavingDraft(null)
       onToast(`已将命令加密保存为快捷方式 "${saved.name}"`)
-    } catch (err) { onToast(String(err), 'error') }
+    } catch (err) { onToast(errMsg(err), 'error') }
   }
 
   const handleClear = async () => {
     const scope = onlyCurrentServer && activeServerId ? '当前服务器' : '所有服务器'
-    if (!window.confirm(`确定清空${scope}的命令历史记录吗？`)) return
-    await api.clearHistory(onlyCurrentServer && activeServerId ? activeServerId : '')
-    setSelectedIds([])
-    onHistoryChanged()
-    onToast('已清空命令历史')
+    const ok = await confirm({
+      title: '清空命令历史',
+      message: `确定清空${scope}的命令历史记录吗？`,
+      confirmLabel: '清空',
+    })
+    if (!ok) return
+    try {
+      await api.clearHistory(onlyCurrentServer && activeServerId ? activeServerId : '')
+      setSelectedIds([])
+      onHistoryChanged()
+      onToast('已清空命令历史')
+    } catch (err) {
+      onToast(errMsg(err), 'error')
+    }
+  }
+
+  const handleCopyCommand = async (cmd: string) => {
+    const ok = await copyToClipboard(cmd)
+    if (ok) onToast('已复制命令')
+    else onToast('复制命令失败', 'error')
+  }
+
+  const handleDeleteEntry = async (id: string) => {
+    try {
+      await api.deleteHistoryEntry(id)
+      setSelectedIds((p) => p.filter((x) => x !== id))
+      onHistoryChanged()
+    } catch (err) {
+      onToast(errMsg(err), 'error')
+    }
   }
 
   return (
@@ -81,7 +109,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
             <span className="text-sm font-semibold text-ag-text">操作命令记录</span>
             <span className="text-[11px] px-1.5 py-0.5 rounded bg-ag-elevated text-ag-muted">{filtered.length}</span>
           </div>
-          {filtered.length > 0 && <button onClick={handleClear} className="text-[11px] text-ag-subtle hover:text-rose-400 transition">清空记录</button>}
+          {filtered.length > 0 && <button type="button" onClick={() => void handleClear()} className="text-[11px] text-ag-subtle hover:text-rose-400 transition">清空记录</button>}
         </div>
         <div className="flex items-center gap-2">
           <div className="relative flex-1">
@@ -103,7 +131,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
             <button onClick={() => openSaveModal(filtered.filter((h) => selectedIds.includes(h.id)).map((h) => h.command))} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-indigo-500 hover:bg-indigo-400 text-white font-medium transition">
               <BookmarkPlus className="w-3.5 h-3.5" />存为快捷方式
             </button>
-            <button onClick={() => setSelectedIds([])} className="p-1 rounded hover:bg-ag-hover text-ag-muted"><X className="w-3.5 h-3.5" /></button>
+            <button type="button" onClick={() => setSelectedIds([])} aria-label="取消选择" className="p-1 rounded hover:bg-ag-hover text-ag-muted"><X className="w-3.5 h-3.5" /></button>
           </div>
         </div>
       )}
@@ -123,15 +151,16 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
               hasActiveSession={!!activeSessionId}
               onToggle={() => setSelectedIds((p) => (p.includes(rec.id) ? p.filter((x) => x !== rec.id) : [...p, rec.id]))}
               onSaveAsShortcut={() => openSaveModal([rec.command])}
-              onRun={(exec) => onRunCommand(rec.command, exec)}
-              onCopy={() => { void navigator.clipboard.writeText(rec.command); onToast('已复制命令') }}
-              onDelete={() => { void api.deleteHistoryEntry(rec.id).then(() => { setSelectedIds((p) => p.filter((x) => x !== rec.id)); onHistoryChanged() }) }}
+              onRun={(exec) => { void onRunCommand(rec.command, exec) }}
+              onCopy={() => { void handleCopyCommand(rec.command) }}
+              onDelete={() => { void handleDeleteEntry(rec.id) }}
             />
           ))
         )}
       </div>
 
       <ShortcutEditorModal open={!!savingDraft} initial={savingDraft} title="保存为加密快捷方式" onClose={() => setSavingDraft(null)} onSubmit={submitShortcut} />
+      {dialogNode}
     </div>
   )
 }

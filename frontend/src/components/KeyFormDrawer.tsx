@@ -44,7 +44,7 @@ export const KeyFormDrawer: React.FC<Props> = ({
         {mode === 'import' ? <FileKey2 className="w-4 h-4 text-indigo-400" /> : <Sparkles className="w-4 h-4 text-indigo-400" />}
         {mode === 'import' ? '导入 SSH 私钥' : '自定义生成 SSH 密钥对'}
       </h3>
-      <button onClick={onCancel} className="p-1 rounded-lg hover:bg-ag-hover text-ag-muted">
+      <button type="button" onClick={onCancel} aria-label="关闭密钥表单" className="p-1 rounded-lg hover:bg-ag-hover text-ag-muted">
         <X className="w-4 h-4" />
       </button>
     </div>
