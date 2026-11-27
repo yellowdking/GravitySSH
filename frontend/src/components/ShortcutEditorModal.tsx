@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { BookmarkPlus, X } from 'lucide-react'
 import type { CommandShortcut } from '../types'
+import { ModalShell } from './ModalShell'
 
 interface Props {
   open: boolean
@@ -34,7 +35,7 @@ export const ShortcutEditorModal: React.FC<Props> = ({ open, initial, title, onC
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+    <ModalShell open={open} onClose={onClose}>
       <form
         onSubmit={handleSubmit}
         className="w-full max-w-2xl rounded-2xl bg-ag-panel border border-ag-borderStrong shadow-ag p-5 space-y-3.5 max-h-[90vh] flex flex-col"
@@ -74,7 +75,7 @@ export const ShortcutEditorModal: React.FC<Props> = ({ open, initial, title, onC
         <div className="flex-1 min-h-0 flex flex-col">
           <div className="flex items-center justify-between mb-1">
             <label className="text-xs text-ag-muted">命令脚本内容 *</label>
-            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-indigo-500/12 text-indigo-300 border border-indigo-500/20">
+            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-indigo-500/[0.12] text-indigo-300 border border-indigo-500/20">
               共 {lineCount} 行命令
             </span>
           </div>
@@ -116,7 +117,7 @@ export const ShortcutEditorModal: React.FC<Props> = ({ open, initial, title, onC
               onChange={(e) => setDraft({ ...draft, pinned: e.target.checked })}
               className="accent-indigo-500"
             />
-            置顶并在命令补齐中优先推荐
+            置顶显示
           </label>
         </div>
 
@@ -125,6 +126,6 @@ export const ShortcutEditorModal: React.FC<Props> = ({ open, initial, title, onC
           <button type="submit" className="ag-btn-primary">保存快捷方式</button>
         </div>
       </form>
-    </div>
+    </ModalShell>
   )
 }

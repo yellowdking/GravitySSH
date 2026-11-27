@@ -38,7 +38,7 @@ function fileIcon(entry: SFTPFileEntry) {
 }
 
 const actBtn = 'p-1 rounded text-ag-muted disabled:opacity-40'
-const badgeCls = 'text-[9px] px-1 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/25 shrink-0'
+const badgeCls = 'text-[9px] px-1 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/25 shrink-0'
 
 export const SftpFileList: React.FC<Props> = ({
   entries, busyPaths, onOpenDir, onEditFile, onDownload, onDownloadFolder, onCompress, onExtract, onAlignPerms, onRename, onDelete,
@@ -53,9 +53,8 @@ export const SftpFileList: React.FC<Props> = ({
         <div
           key={entry.path}
           onDoubleClick={() => {
-            if (isBusy) return
-            if (entry.isDir) onOpenDir(entry.path)
-            else if (archive) onExtract(entry)
+            if (isBusy || entry.isDir) return
+            if (archive) onExtract(entry)
             else if (editable) onEditFile(entry)
             else onDownload(entry)
           }}

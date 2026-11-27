@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { FileCode2, Loader2, Save, X } from 'lucide-react'
+import { ModalShell } from './ModalShell'
 
 interface Props {
   open: boolean
@@ -28,7 +29,7 @@ export const SftpEditorModal: React.FC<Props> = ({ open, remotePath, initialCont
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+    <ModalShell open={open} onClose={handleClose} backdropClassName="bg-black/75">
       <div className="w-full max-w-4xl h-[82vh] rounded-2xl bg-ag-panel border border-ag-borderStrong shadow-ag flex flex-col overflow-hidden">
         <div className="px-4 py-3 border-b border-ag-border bg-[#11151f] flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-2 min-w-0">
@@ -81,6 +82,6 @@ export const SftpEditorModal: React.FC<Props> = ({ open, remotePath, initialCont
           className="flex-1 w-full bg-[#0b0d12] text-[#e6eaf5] font-mono text-[13px] leading-relaxed p-4 resize-none focus:outline-none"
         />
       </div>
-    </div>
+    </ModalShell>
   )
 }

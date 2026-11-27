@@ -1,5 +1,6 @@
 import React from 'react'
 import type { ProxyType, ServerSaveRequest, ServerView } from '../types'
+import { NumericInput } from './NumericInput'
 
 interface Props {
   form: ServerSaveRequest
@@ -9,7 +10,7 @@ interface Props {
 
 export const ServerProxyTab: React.FC<Props> = ({ form, editingServer, onChange }) => (
   <div className="space-y-4">
-    <div className="p-3 rounded-xl bg-sky-500/8 border border-sky-500/20 text-xs text-sky-200/90 leading-relaxed">
+    <div className="p-3 rounded-xl bg-sky-500/[0.08] border border-sky-500/20 text-xs text-sky-200/90 leading-relaxed">
       配置代理后，SSH 和 SFTP 流量都将通过指定的 SOCKS5 或 HTTP CONNECT 代理隧道连接，适合跨境直连丢包严重或受限网络环境。
     </div>
 
@@ -53,12 +54,14 @@ export const ServerProxyTab: React.FC<Props> = ({ form, editingServer, onChange 
           </div>
           <div className="col-span-4">
             <label className="block text-xs text-ag-muted mb-1.5">代理端口</label>
-            <input
-              type="number"
+            <NumericInput
+              min={1}
+              max={65535}
+              fallback={7890}
               className="ag-input font-mono"
               placeholder="7890"
               value={form.proxy.port}
-              onChange={(e) => onChange({ ...form, proxy: { ...form.proxy, port: Number(e.target.value) || 0 } })}
+              onChange={(port) => onChange({ ...form, proxy: { ...form.proxy, port } })}
             />
           </div>
         </div>
