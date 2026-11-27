@@ -51,14 +51,18 @@ export const ShortcutCard: React.FC<Props> = ({ sc, hasActiveSession, onTogglePi
         <span className="text-[10px] text-ag-subtle">{sc.useCount > 0 ? `已调用 ${sc.useCount} 次` : '就绪'}</span>
         <div className="flex items-center gap-1.5">
           <button
+            type="button"
             disabled={!hasActiveSession}
+            title="仅填入终端（不自动执行）"
             onClick={() => onRun(false)}
             className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-ag-elevated hover:bg-ag-hover border border-ag-border text-[11px] text-ag-text transition disabled:opacity-40"
           >
             <Terminal className="w-3 h-3 text-sky-400" />填入
           </button>
           <button
+            type="button"
             disabled={!hasActiveSession}
+            title="立即在终端执行"
             onClick={() => onRun(true)}
             className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-indigo-500 hover:bg-indigo-400 text-[11px] text-white font-medium transition disabled:opacity-40"
           >

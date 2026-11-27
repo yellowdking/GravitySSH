@@ -35,7 +35,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({
     return () => { cancelled = true }
   }, [open, settings.syncRelayUrl])
 
-  const activeRelay = relayInput.trim()
+  const activeRelay = relayInput.trim() || defaultRelay
 
   return (
     <ModalShell open={open} onClose={onClose}>

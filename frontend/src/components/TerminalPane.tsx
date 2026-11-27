@@ -1,6 +1,8 @@
-import React, { Suspense, lazy, useCallback, useRef, useState } from 'react'
+import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
+import { AlertCircle } from 'lucide-react'
 import type { AppSettings, SessionInfo } from '../types'
 import type { PasteInspection } from '../utils/pasteGuard'
+import type { TerminalActions } from '../hooks/terminalStream'
 import { useAutocomplete } from '../hooks/useAutocomplete'
 import { useTerminalInstance } from '../hooks/useTerminalInstance'
 import { copyToClipboard, readFromClipboard } from '../utils/errors'
@@ -21,6 +23,7 @@ interface TerminalPaneProps {
   onToggleRightDrawer: (mode: 'history' | 'shortcuts') => void
   onToggleAutocomplete: () => void
   onReconnect: (serverId: string) => void
+  onRegisterTerminal?: (sessionId: string, actions: TerminalActions | null) => void
 }
 
 interface PendingPaste {
@@ -30,7 +33,7 @@ interface PendingPaste {
 }
 
 export const TerminalPane: React.FC<TerminalPaneProps> = React.memo(({
-  session, active, settings, showSftp, rightDrawer, onToggleSftp, onToggleRightDrawer, onToggleAutocomplete, onReconnect,
+  session, active, settings, showSftp, rightDrawer, onToggleSftp, onToggleRightDrawer, onToggleAutocomplete, onReconnect, onRegisterTerminal,
 }) => {
   const inputLineRef = useRef('')
   const focusTermRef = useRef<() => void>(() => {})
@@ -46,6 +49,11 @@ export const TerminalPane: React.FC<TerminalPaneProps> = React.memo(({
     onFocusTerminal: () => focusTermRef.current(),
   })
 
+  const resetInputLine = useCallback(() => {
+    inputLineRef.current = ''
+    ac.clearSuggestions(false)
+  }, [ac.clearSuggestions])
+
   const { containerRef, termRef, searchAddonRef, pasteText, commitPaste } = useTerminalInstance({
     sessionId: session.sessionId,
     status: session.status,
@@ -58,6 +66,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = React.memo(({
     inputLineRef,
     onRequestSuggestions: (line) => ac.requestSuggestions(line),
     onClearSuggestions: () => ac.clearSuggestions(true),
+    onResetAutocomplete: resetInputLine,
     onMoveSelection: ac.moveSelection,
     onApplySelected: ac.applySelected,
     onOpenSearch: () => setShowSearch(true),
@@ -65,6 +74,14 @@ export const TerminalPane: React.FC<TerminalPaneProps> = React.memo(({
       setPendingPaste({ text, inspection, bracketedPasteActive }),
   })
   focusTermRef.current = () => termRef.current?.focus()
+
+  useEffect(() => {
+    if (!onRegisterTerminal) return
+    onRegisterTerminal(session.sessionId, { pasteText, resetInputLine })
+    return () => {
+      onRegisterTerminal(session.sessionId, null)
+    }
+  }, [onRegisterTerminal, session.sessionId, pasteText, resetInputLine])
 
   const closeSearch = useCallback(() => {
     setShowSearch(false)
@@ -96,6 +113,26 @@ export const TerminalPane: React.FC<TerminalPaneProps> = React.memo(({
         onToggleSftp={onToggleSftp}
         onToggleRightDrawer={onToggleRightDrawer}
       />
+      {session.status === 'error' && session.error && (
+        <div
+          role="alert"
+          className="px-3 py-2 border-b border-rose-500/30 bg-rose-950/50 text-rose-200 text-xs flex items-center justify-between gap-2 shrink-0"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+            <span className="truncate font-mono" title={session.error}>
+              连接失败：{session.error}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => onReconnect(session.serverId)}
+            className="shrink-0 px-2 py-0.5 rounded bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/35 text-rose-100 text-[11px] transition"
+          >
+            重试连接
+          </button>
+        </div>
+      )}
       {showSearch && (
         <TerminalSearchBar
           value={searchTerm}

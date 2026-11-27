@@ -27,14 +27,19 @@ export const ServerProxyTab: React.FC<Props> = ({ form, editingServer, onChange 
           <button
             key={opt.id}
             type="button"
-            onClick={() => onChange({
-              ...form,
-              proxy: {
-                ...form.proxy,
-                type: opt.id,
-                port: opt.id !== 'none' && form.proxy.port <= 0 ? 7890 : form.proxy.port,
-              },
-            })}
+            onClick={() => {
+              const modeChanged = opt.id !== form.proxy.type
+              onChange({
+                ...form,
+                proxy: {
+                  ...form.proxy,
+                  type: opt.id,
+                  port: opt.id !== 'none' && (!Number.isInteger(form.proxy.port) || form.proxy.port <= 0) ? 7890 : form.proxy.port,
+                  ...(modeChanged ? { keepExistingPassword: false } : {}),
+                  ...(opt.id === 'none' ? { password: '', keepExistingPassword: false } : {}),
+                },
+              })
+            }}
             className={`py-2 px-3 rounded-lg text-xs font-medium border transition ${
               form.proxy.type === opt.id
                 ? 'bg-sky-500/15 border-sky-400/60 text-sky-200'
@@ -56,7 +61,19 @@ export const ServerProxyTab: React.FC<Props> = ({ form, editingServer, onChange 
               className="ag-input font-mono"
               placeholder="127.0.0.1"
               value={form.proxy.host}
-              onChange={(e) => onChange({ ...form, proxy: { ...form.proxy, host: e.target.value } })}
+              onChange={(e) => {
+                const nextHost = e.target.value
+                onChange({
+                  ...form,
+                  proxy: {
+                    ...form.proxy,
+                    host: nextHost,
+                    ...(nextHost !== form.proxy.host && form.proxy.keepExistingPassword
+                      ? { keepExistingPassword: false }
+                      : {}),
+                  },
+                })
+              }}
             />
           </div>
           <div className="col-span-4">
@@ -82,9 +99,32 @@ export const ServerProxyTab: React.FC<Props> = ({ form, editingServer, onChange 
             />
           </div>
           <div>
-            <label className="block text-xs text-ag-muted mb-1.5">
-              代理密码（可选） {form.proxy.keepExistingPassword && <span className="text-emerald-400">(已保存)</span>}
-            </label>
+            <div className="flex items-center justify-between gap-2 mb-1.5">
+              <label className="block text-xs text-ag-muted">
+                代理密码（可选）{' '}
+                {form.proxy.keepExistingPassword ? (
+                  <span className="text-emerald-400">(已保存)</span>
+                ) : (
+                  editingServer?.proxy?.hasPassword && !form.proxy.password && (
+                    <span className="text-amber-400">(已清除)</span>
+                  )
+                )}
+              </label>
+              {form.proxy.keepExistingPassword && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onChange({
+                      ...form,
+                      proxy: { ...form.proxy, password: '', keepExistingPassword: false },
+                    })
+                  }
+                  className="text-[11px] text-rose-400 hover:text-rose-300 transition shrink-0"
+                >
+                  清除已保存密码
+                </button>
+              )}
+            </div>
             <input
               type="password"
               className="ag-input font-mono"
@@ -96,7 +136,7 @@ export const ServerProxyTab: React.FC<Props> = ({ form, editingServer, onChange 
                   proxy: {
                     ...form.proxy,
                     password: e.target.value,
-                    keepExistingPassword: e.target.value === '' && !!editingServer?.proxy?.hasPassword,
+                    keepExistingPassword: false,
                   },
                 })
               }

@@ -35,7 +35,18 @@ export const ServerJumpTab: React.FC<Props> = ({
           <button
             key={opt.id}
             type="button"
-            onClick={() => onChange({ ...form, jumpHost: { ...form.jumpHost, mode: opt.id } })}
+            onClick={() => {
+              const modeChanged = opt.id !== form.jumpHost.mode
+              onChange({
+                ...form,
+                jumpHost: {
+                  ...form.jumpHost,
+                  mode: opt.id,
+                  ...(modeChanged ? { keepExistingPassword: false } : {}),
+                  ...(opt.id !== 'custom' ? { password: '', keepExistingPassword: false } : {}),
+                },
+              })
+            }}
             className={`py-2 px-3 rounded-lg text-xs font-medium border transition ${
               form.jumpHost.mode === opt.id
                 ? 'bg-amber-500/15 border-amber-400/60 text-amber-200'
@@ -81,7 +92,19 @@ export const ServerJumpTab: React.FC<Props> = ({
               className="ag-input font-mono"
               placeholder="bastion.example.com"
               value={form.jumpHost.host}
-              onChange={(e) => onChange({ ...form, jumpHost: { ...form.jumpHost, host: e.target.value } })}
+              onChange={(e) => {
+                const nextHost = e.target.value
+                onChange({
+                  ...form,
+                  jumpHost: {
+                    ...form.jumpHost,
+                    host: nextHost,
+                    ...(nextHost !== form.jumpHost.host && form.jumpHost.keepExistingPassword
+                      ? { keepExistingPassword: false }
+                      : {}),
+                  },
+                })
+              }}
             />
           </div>
           <div className="col-span-2">
@@ -111,9 +134,17 @@ export const ServerJumpTab: React.FC<Props> = ({
             <select
               className="ag-input"
               value={form.jumpHost.authType}
-              onChange={(e) =>
-                onChange({ ...form, jumpHost: { ...form.jumpHost, authType: e.target.value as AuthType } })
-              }
+              onChange={(e) => {
+                const nextAuth = e.target.value as AuthType
+                onChange({
+                  ...form,
+                  jumpHost: {
+                    ...form.jumpHost,
+                    authType: nextAuth,
+                    ...(nextAuth === 'key' ? { password: '', keepExistingPassword: false } : {}),
+                  },
+                })
+              }}
             >
               <option value="password">密码</option>
               <option value="key">已保存 SSH 密钥</option>
@@ -145,27 +176,52 @@ export const ServerJumpTab: React.FC<Props> = ({
           </div>
         </div>
 
-        <div>
-          <label className="block text-xs text-ag-muted mb-1.5">
-            跳板机密码 {form.jumpHost.keepExistingPassword && <span className="text-emerald-400">(已保存)</span>}
-          </label>
-          <input
-            type="password"
-            className="ag-input font-mono"
-            placeholder={form.jumpHost.keepExistingPassword ? '••••••••' : '输入跳板机密码'}
-            value={form.jumpHost.password}
-            onChange={(e) =>
-              onChange({
-                ...form,
-                jumpHost: {
-                  ...form.jumpHost,
-                  password: e.target.value,
-                  keepExistingPassword: e.target.value === '' && !!editingServer?.jumpHost?.hasPassword,
-                },
-              })
-            }
-          />
-        </div>
+        {form.jumpHost.authType !== 'key' && (
+          <div>
+            <div className="flex items-center justify-between gap-2 mb-1.5">
+              <label className="block text-xs text-ag-muted">
+                跳板机密码{' '}
+                {form.jumpHost.keepExistingPassword ? (
+                  <span className="text-emerald-400">(已保存)</span>
+                ) : (
+                  editingServer?.jumpHost?.hasPassword && !form.jumpHost.password && (
+                    <span className="text-amber-400">(保存后将清除原密码)</span>
+                  )
+                )}
+              </label>
+              {form.jumpHost.keepExistingPassword && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onChange({
+                      ...form,
+                      jumpHost: { ...form.jumpHost, password: '', keepExistingPassword: false },
+                    })
+                  }
+                  className="text-[11px] text-rose-400 hover:text-rose-300 transition shrink-0"
+                >
+                  清除已保存密码
+                </button>
+              )}
+            </div>
+            <input
+              type="password"
+              className="ag-input font-mono"
+              placeholder={form.jumpHost.keepExistingPassword ? '••••••••' : '输入跳板机密码'}
+              value={form.jumpHost.password}
+              onChange={(e) =>
+                onChange({
+                  ...form,
+                  jumpHost: {
+                    ...form.jumpHost,
+                    password: e.target.value,
+                    keepExistingPassword: false,
+                  },
+                })
+              }
+            />
+          </div>
+        )}
 
         <label className="flex items-center gap-2 text-xs text-ag-muted cursor-pointer">
           <input

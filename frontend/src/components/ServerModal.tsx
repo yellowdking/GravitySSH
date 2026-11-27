@@ -40,19 +40,77 @@ export const ServerModal: React.FC<Props> = ({
 
   const jumpServers = allServers.filter((s) => s.id !== editingServer?.id)
 
+  const isValidInt = (n: number, min: number, max: number) =>
+    Number.isInteger(n) && n >= min && n <= max
+
   const validateForm = (): boolean => {
     if (!form.host.trim()) {
       setTab('basic')
       setNotice({ ok: false, text: '请填写主机地址 (IP / 域名)' })
       return false
     }
-    if (form.jumpHost.mode === 'custom' && !form.jumpHost.host.trim()) {
-      setTab('jump')
-      setNotice({ ok: false, text: '请填写自定义跳板机地址' })
+    if (!isValidInt(form.port, 1, 65535)) {
+      setTab('basic')
+      setNotice({ ok: false, text: 'SSH 端口必须为 1–65535 之间的整数' })
+      return false
+    }
+    if (form.proxy.type !== 'none') {
+      if (!form.proxy.host.trim()) {
+        setTab('proxy')
+        setNotice({ ok: false, text: '请填写代理服务器地址' })
+        return false
+      }
+      if (!isValidInt(form.proxy.port, 1, 65535)) {
+        setTab('proxy')
+        setNotice({ ok: false, text: '代理端口必须为 1–65535 之间的整数' })
+        return false
+      }
+    }
+    if (form.jumpHost.mode === 'custom') {
+      if (!form.jumpHost.host.trim()) {
+        setTab('jump')
+        setNotice({ ok: false, text: '请填写自定义跳板机地址' })
+        return false
+      }
+      if (!isValidInt(form.jumpHost.port, 1, 65535)) {
+        setTab('jump')
+        setNotice({ ok: false, text: '跳板机端口必须为 1–65535 之间的整数' })
+        return false
+      }
+    }
+    if (!isValidInt(form.timeoutSeconds, 5, 120)) {
+      setTab('advanced')
+      setNotice({ ok: false, text: '连接超时必须为 5–120 秒之间的整数' })
+      return false
+    }
+    if (!isValidInt(form.keepAliveSeconds, 5, 300)) {
+      setTab('advanced')
+      setNotice({ ok: false, text: '心跳保活间隔必须为 5–300 秒之间的整数' })
       return false
     }
     return true
   }
+
+  const buildSanitizedPayload = (): ServerSaveRequest => ({
+    ...form,
+    password: form.authType === 'key' ? '' : form.password,
+    keepExistingPassword: form.authType === 'key' ? false : form.keepExistingPassword,
+    proxy: {
+      ...form.proxy,
+      port: isValidInt(form.proxy.port, 1, 65535) ? form.proxy.port : 7890,
+      password: form.proxy.type === 'none' ? '' : form.proxy.password,
+      keepExistingPassword: form.proxy.type === 'none' ? false : form.proxy.keepExistingPassword,
+    },
+    jumpHost: {
+      ...form.jumpHost,
+      port: isValidInt(form.jumpHost.port, 1, 65535) ? form.jumpHost.port : 22,
+      password: form.jumpHost.mode !== 'custom' || form.jumpHost.authType === 'key' ? '' : form.jumpHost.password,
+      keepExistingPassword:
+        form.jumpHost.mode !== 'custom' || form.jumpHost.authType === 'key'
+          ? false
+          : form.jumpHost.keepExistingPassword,
+    },
+  })
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -60,7 +118,7 @@ export const ServerModal: React.FC<Props> = ({
     if (!validateForm()) return
     setSaving(true)
     try {
-      onSaved(await api.saveServer(form))
+      onSaved(await api.saveServer(buildSanitizedPayload()))
       onClose()
     } catch (err) {
       setNotice({ ok: false, text: errMsg(err) })
@@ -74,7 +132,7 @@ export const ServerModal: React.FC<Props> = ({
     if (!validateForm()) return
     setTesting(true)
     try {
-      setNotice({ ok: true, text: await api.testServerConnection(form) })
+      setNotice({ ok: true, text: await api.testServerConnection(buildSanitizedPayload()) })
     } catch (err) {
       setNotice({ ok: false, text: errMsg(err) })
     } finally {
@@ -129,7 +187,7 @@ export const ServerModal: React.FC<Props> = ({
               <button type="button" onClick={() => void handleTest()} disabled={testing} className="ag-btn-secondary">
                 {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}测试连接
               </button>
-              {(editingServer || form.host.trim()) && <ClearHostCacheButton host={form.host} port={form.port} onResult={setNotice} />}
+              {(editingServer || form.host.trim()) && <ClearHostCacheButton host={form.host} port={isValidInt(form.port, 1, 65535) ? form.port : 22} onResult={setNotice} />}
             </div>
             <div className="flex items-center gap-2">
               <button type="button" onClick={onClose} className="ag-btn-ghost">取消</button>

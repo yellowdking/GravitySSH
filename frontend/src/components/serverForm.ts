@@ -44,6 +44,10 @@ export function makeInitialServerForm(editing: ServerView | null, defaultKeepAli
       notes: '',
     }
   }
+  const authType = editing.authType || 'password'
+  const proxyType = editing.proxy?.type || 'none'
+  const jumpMode = editing.jumpHost?.mode || 'none'
+  const jumpAuthType = editing.jumpHost?.authType || 'password'
   return {
     id: editing.id,
     name: editing.name,
@@ -52,27 +56,27 @@ export function makeInitialServerForm(editing: ServerView | null, defaultKeepAli
     host: editing.host,
     port: editing.port ?? 22,
     username: editing.username || 'root',
-    authType: editing.authType || 'password',
+    authType,
     password: '',
-    keepExistingPassword: editing.hasPassword,
+    keepExistingPassword: editing.hasPassword && authType !== 'key',
     sshKeyId: editing.sshKeyId || '',
     proxy: {
-      type: editing.proxy?.type || 'none',
+      type: proxyType,
       host: editing.proxy?.host || '127.0.0.1',
       port: editing.proxy?.port ?? 7890,
       username: editing.proxy?.username || '',
       password: '',
-      keepExistingPassword: !!editing.proxy?.hasPassword,
+      keepExistingPassword: !!editing.proxy?.hasPassword && proxyType !== 'none',
     },
     jumpHost: {
-      mode: editing.jumpHost?.mode || 'none',
+      mode: jumpMode,
       serverId: editing.jumpHost?.serverId || '',
       host: editing.jumpHost?.host || '',
       port: editing.jumpHost?.port ?? 22,
       username: editing.jumpHost?.username || 'root',
-      authType: editing.jumpHost?.authType || 'password',
+      authType: jumpAuthType,
       password: '',
-      keepExistingPassword: !!editing.jumpHost?.hasPassword,
+      keepExistingPassword: !!editing.jumpHost?.hasPassword && jumpMode === 'custom' && jumpAuthType !== 'key',
       sshKeyId: editing.jumpHost?.sshKeyId || '',
       useMainProxy: editing.jumpHost?.useMainProxy ?? true,
     },

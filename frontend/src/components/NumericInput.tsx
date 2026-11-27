@@ -19,15 +19,18 @@ export const NumericInput: React.FC<NumericInputProps> = ({
   className,
   onChange,
 }) => {
-  const [raw, setRaw] = useState(() => String(value))
+  const [raw, setRaw] = useState(() => (Number.isFinite(value) ? String(Math.round(value)) : ''))
   const focusedRef = useRef(false)
+  const allowNegative = min === undefined || min < 0
 
   useEffect(() => {
-    if (!focusedRef.current) setRaw(String(value))
+    if (!focusedRef.current && Number.isFinite(value)) {
+      setRaw(String(Math.round(value)))
+    }
   }, [value])
 
   const clamp = (n: number) => {
-    let v = Math.round(n)
+    let v = Math.trunc(n)
     if (min !== undefined && v < min) v = min
     if (max !== undefined && v > max) v = max
     return v
@@ -35,9 +38,9 @@ export const NumericInput: React.FC<NumericInputProps> = ({
 
   return (
     <input
-      type="number"
-      min={min}
-      max={max}
+      type="text"
+      inputMode="numeric"
+      pattern={allowNegative ? '-?[0-9]*' : '[0-9]*'}
       placeholder={placeholder}
       className={className}
       value={raw}
@@ -45,17 +48,23 @@ export const NumericInput: React.FC<NumericInputProps> = ({
         focusedRef.current = true
       }}
       onChange={(e) => {
-        const nextStr = e.target.value
+        const nextStr = e.target.value.trim()
+        const validRe = allowNegative ? /^-?\d*$/ : /^\d*$/
+        if (!validRe.test(nextStr)) return
         setRaw(nextStr)
-        if (nextStr.trim() === '') return
-        const parsed = Number(nextStr)
-        if (Number.isFinite(parsed)) onChange(parsed)
+        if (nextStr === '' || nextStr === '-') {
+          onChange(Number.NaN)
+          return
+        }
+        const parsed = parseInt(nextStr, 10)
+        if (Number.isSafeInteger(parsed)) onChange(parsed)
       }}
       onBlur={() => {
         focusedRef.current = false
         const trimmed = raw.trim()
-        const parsed = trimmed === '' ? NaN : Number(trimmed)
-        const finalVal = Number.isFinite(parsed) ? clamp(parsed) : fallback
+        const validRe = allowNegative ? /^-?\d+$/ : /^\d+$/
+        const parsed = validRe.test(trimmed) ? parseInt(trimmed, 10) : Number.NaN
+        const finalVal = Number.isSafeInteger(parsed) ? clamp(parsed) : fallback
         setRaw(String(finalVal))
         if (finalVal !== value) onChange(finalVal)
       }}

@@ -89,6 +89,7 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
   useSyncPolling({
     enabled: Boolean(waitSess),
     intervalMs: 1500,
+    resetKey: waitSess?.waitId ?? '',
     poll: async () => {
       const current = waitSessRef.current
       if (!current || !mountedRef.current) return false

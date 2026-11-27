@@ -81,6 +81,7 @@ export const SftpPanel: React.FC<SftpPanelProps> = React.memo(({ session, active
         <Suspense fallback={null}>
           <SftpEditorModal
             open
+            editorToken={sftp.editingFile.token}
             remotePath={sftp.editingFile.path}
             initialContent={sftp.editingFile.content}
             saving={sftp.savingFile}

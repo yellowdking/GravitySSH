@@ -57,7 +57,20 @@ export const ServerBasicTab: React.FC<Props> = ({ form, editingServer, sshKeys, 
       <div className="grid grid-cols-12 gap-3">
         <div className="col-span-6">
           <label className="block text-xs text-ag-muted mb-1.5">主机地址 (IP / 域名) *</label>
-          <input required className="ag-input font-mono" placeholder="192.168.1.10 或 server.example.com" value={form.host} onChange={(e) => patch({ host: e.target.value })} />
+          <input
+            required
+            className="ag-input font-mono"
+            placeholder="192.168.1.10 或 server.example.com"
+            value={form.host}
+            onChange={(e) => {
+              const nextHost = e.target.value
+              const hostChanged = nextHost !== form.host
+              patch({
+                host: nextHost,
+                ...(hostChanged && form.keepExistingPassword ? { keepExistingPassword: false } : {}),
+              })
+            }}
+          />
         </div>
         <div className="col-span-2">
           <label className="block text-xs text-ag-muted mb-1.5">端口</label>
@@ -73,7 +86,17 @@ export const ServerBasicTab: React.FC<Props> = ({ form, editingServer, sshKeys, 
         <label className="block text-xs text-ag-muted mb-1.5">认证方式</label>
         <div className="grid grid-cols-3 gap-2">
           {AUTH_OPTIONS.map((opt) => (
-            <button key={opt.id} type="button" onClick={() => patch({ authType: opt.id })} className={`py-2 px-3 rounded-lg text-xs font-medium border transition ${form.authType === opt.id ? 'bg-indigo-500/15 border-indigo-400/60 text-indigo-200' : 'bg-[#0d1017] border-ag-border text-ag-muted hover:text-ag-text'}`}>
+            <button
+              key={opt.id}
+              type="button"
+              onClick={() =>
+                patch({
+                  authType: opt.id,
+                  ...(opt.id === 'key' ? { password: '', keepExistingPassword: false } : {}),
+                })
+              }
+              className={`py-2 px-3 rounded-lg text-xs font-medium border transition ${form.authType === opt.id ? 'bg-indigo-500/15 border-indigo-400/60 text-indigo-200' : 'bg-[#0d1017] border-ag-border text-ag-muted hover:text-ag-text'}`}
+            >
               {opt.label}
             </button>
           ))}
@@ -118,15 +141,33 @@ export const ServerBasicTab: React.FC<Props> = ({ form, editingServer, sshKeys, 
 
       {(form.authType === 'password' || form.authType === 'both') && (
         <div>
-          <label className="block text-xs text-ag-muted mb-1.5">
-            SSH 密码 {form.keepExistingPassword && <span className="text-emerald-400">(已保存，留空保持不变)</span>}
-          </label>
+          <div className="flex items-center justify-between gap-2 mb-1.5">
+            <label className="block text-xs text-ag-muted">
+              SSH 密码{' '}
+              {form.keepExistingPassword ? (
+                <span className="text-emerald-400">(已保存，留空保持不变)</span>
+              ) : (
+                editingServer?.hasPassword && !form.password && (
+                  <span className="text-amber-400">(保存后将清除原密码)</span>
+                )
+              )}
+            </label>
+            {form.keepExistingPassword && (
+              <button
+                type="button"
+                onClick={() => patch({ password: '', keepExistingPassword: false })}
+                className="text-[11px] text-rose-400 hover:text-rose-300 transition"
+              >
+                清除已保存密码
+              </button>
+            )}
+          </div>
           <input
             type="password"
             className="ag-input font-mono"
             placeholder={form.keepExistingPassword ? '••••••••（留空保持原密码）' : '输入登录密码'}
             value={form.password}
-            onChange={(e) => patch({ password: e.target.value, keepExistingPassword: e.target.value === '' && !!editingServer?.hasPassword })}
+            onChange={(e) => patch({ password: e.target.value, keepExistingPassword: false })}
           />
         </div>
       )}

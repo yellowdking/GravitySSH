@@ -59,7 +59,7 @@ export const PasteGuardModal: React.FC<Props> = ({
                 <div
                   key={`${w.kind}-${idx}`}
                   className={`flex items-start gap-2 rounded-xl px-3 py-2 text-xs border ${
-                    w.kind === 'danger' || w.kind === 'hidden-chars' || w.kind === 'homoglyph'
+                    w.kind === 'danger' || w.kind === 'hidden-chars' || w.kind === 'control-chars' || w.kind === 'homoglyph'
                       ? 'bg-rose-500/10 border-rose-500/30 text-rose-200'
                       : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
                   }`}

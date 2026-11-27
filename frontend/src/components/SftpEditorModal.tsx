@@ -6,6 +6,7 @@ import { ModalShell } from './ModalShell'
 
 interface Props {
   open: boolean
+  editorToken?: number
   remotePath: string
   initialContent: string
   saving: boolean
@@ -13,15 +14,27 @@ interface Props {
   onClose: () => void
 }
 
-export const SftpEditorModal: React.FC<Props> = ({ open, remotePath, initialContent, saving, onSave, onClose }) => {
+export const SftpEditorModal: React.FC<Props> = ({ open, editorToken, remotePath, initialContent, saving, onSave, onClose }) => {
   const [content, setContent] = useState(initialContent)
   const openRef = useRef(open)
   openRef.current = open
+  const prevOpenRef = useRef(false)
+  const sessionKey = editorToken !== undefined ? editorToken : remotePath
+  const prevSessionKeyRef = useRef<string | number | null>(null)
   const { confirm, dialogNode } = useActionDialogs()
 
   useEffect(() => {
-    if (open) setContent(initialContent)
-  }, [open, initialContent, remotePath])
+    const wasOpen = prevOpenRef.current
+    prevOpenRef.current = open
+    if (!open) {
+      prevSessionKeyRef.current = null
+      return
+    }
+    if (!wasOpen || prevSessionKeyRef.current !== sessionKey) {
+      prevSessionKeyRef.current = sessionKey
+      setContent(initialContent)
+    }
+  }, [open, sessionKey, initialContent])
 
   const dirty = content !== initialContent
   const lineCount = content === '' ? 0 : content.replace(/\r\n/g, '\n').split('\n').length

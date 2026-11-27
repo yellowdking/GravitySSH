@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { AlertCircle, CheckCircle2, KeyRound, Loader2, Server, UploadCloud, X } from 'lucide-react'
 import type { KeyDeployResult, ServerView, SSHKeyMeta } from '../types'
 import { api } from '../wailsApi'
@@ -19,40 +19,78 @@ export const KeyDeployModal: React.FC<Props> = ({ open, sshKey, servers, onClose
   const [bindAsAuth, setBindAsAuth] = useState(true)
   const [deploying, setDeploying] = useState(false)
   const [results, setResults] = useState<KeyDeployResult[] | null>(null)
+  const mountedRef = useRef(true)
+  const deployingRef = useRef(false)
+  const reqGenRef = useRef(0)
 
   useEffect(() => {
-    if (open) { setSelectedIds([]); setBindAsAuth(true); setResults(null) }
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      reqGenRef.current++
+      deployingRef.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (open) {
+      reqGenRef.current++
+      deployingRef.current = false
+      setDeploying(false)
+      setSelectedIds([])
+      setBindAsAuth(true)
+      setResults(null)
+    }
   }, [open, sshKey?.id])
 
   if (!sshKey) return null
 
   const allSelected = servers.length > 0 && selectedIds.length === servers.length
-  const toggleOne = (id: string) => setSelectedIds((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]))
-  const toggleAll = () => setSelectedIds(allSelected ? [] : servers.map((s) => s.id))
+  const toggleOne = (id: string) => {
+    if (deployingRef.current) return
+    setSelectedIds((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]))
+  }
+  const toggleAll = () => {
+    if (deployingRef.current) return
+    setSelectedIds(allSelected ? [] : servers.map((s) => s.id))
+  }
+  const handleClose = () => {
+    if (deployingRef.current || deploying) return
+    onClose()
+  }
 
   const handleDeploy = async () => {
-    if (!selectedIds.length) return
+    if (!selectedIds.length || deployingRef.current) return
+    const gen = ++reqGenRef.current
+    const targetKeyId = sshKey.id
+    const targetKeyName = sshKey.name
+    deployingRef.current = true
     setDeploying(true)
     setResults(null)
     try {
-      const res = await api.deploySSHKeyToServers(sshKey.id, selectedIds, bindAsAuth)
+      const res = await api.deploySSHKeyToServers(targetKeyId, selectedIds, bindAsAuth)
+      if (!mountedRef.current || reqGenRef.current !== gen) return
       setResults(res)
       const ok = res.filter((r) => r.ok).length
       const fail = res.length - ok
       onDeployed()
       onToast(
-        fail === 0 ? `已将密钥 "${sshKey.name}" 部署到 ${ok} 台服务器` : `部署完成：${ok} 成功，${fail} 失败`,
+        fail === 0 ? `已将密钥 "${targetKeyName}" 部署到 ${ok} 台服务器` : `部署完成：${ok} 成功，${fail} 失败`,
         fail === 0 ? 'info' : 'error',
       )
     } catch (err) {
+      if (!mountedRef.current || reqGenRef.current !== gen) return
       onToast(errMsg(err), 'error')
     } finally {
-      setDeploying(false)
+      if (reqGenRef.current === gen) {
+        deployingRef.current = false
+        if (mountedRef.current) setDeploying(false)
+      }
     }
   }
 
   return (
-    <ModalShell open={open} onClose={onClose}>
+    <ModalShell open={open} onClose={handleClose}>
       <div className="w-full max-w-lg rounded-2xl bg-ag-panel border border-ag-borderStrong shadow-ag overflow-hidden flex flex-col max-h-[85vh]">
         <div className="px-5 py-4 border-b border-ag-border flex items-center justify-between bg-[#11151f]">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -66,7 +104,7 @@ export const KeyDeployModal: React.FC<Props> = ({ open, sshKey, servers, onClose
               </p>
             </div>
           </div>
-          <button type="button" onClick={onClose} aria-label="关闭密钥部署窗口" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text"><X className="w-4 h-4" /></button>
+          <button type="button" disabled={deploying} onClick={handleClose} aria-label="关闭密钥部署窗口" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text disabled:opacity-40 disabled:cursor-not-allowed"><X className="w-4 h-4" /></button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
@@ -79,7 +117,7 @@ export const KeyDeployModal: React.FC<Props> = ({ open, sshKey, servers, onClose
             <>
               <div className="flex items-center justify-between">
                 <span className="text-xs text-ag-muted">选择目标服务器 ({selectedIds.length}/{servers.length})</span>
-                <button type="button" onClick={toggleAll} className="text-xs text-indigo-400 hover:text-indigo-300">{allSelected ? '取消全选' : '全选'}</button>
+                <button type="button" disabled={deploying} onClick={toggleAll} className="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-40 disabled:cursor-not-allowed">{allSelected ? '取消全选' : '全选'}</button>
               </div>
               <div className="rounded-xl bg-[#0d1017] border border-ag-border divide-y divide-ag-border/70 max-h-60 overflow-y-auto">
                 {servers.map((s) => (
@@ -116,7 +154,7 @@ export const KeyDeployModal: React.FC<Props> = ({ open, sshKey, servers, onClose
         </div>
 
         <div className="px-5 py-3.5 border-t border-ag-border flex justify-end gap-2 bg-[#11151f]">
-          <button type="button" onClick={onClose} className="ag-btn-ghost">关闭</button>
+          <button type="button" disabled={deploying} onClick={handleClose} className="ag-btn-ghost disabled:opacity-40 disabled:cursor-not-allowed">关闭</button>
           <button type="button" disabled={deploying || !selectedIds.length} onClick={() => void handleDeploy()} className="ag-btn-primary">
             {deploying ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
             {deploying ? '正在部署...' : '一键加载部署到所选服务器'}

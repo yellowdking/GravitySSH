@@ -46,7 +46,7 @@ export const SyncRelayBar: React.FC<Props> = ({
     setTesting(true)
     setTestRes(null)
     try {
-      const ms = await api.testSyncRelay(trimmed)
+      const ms = await api.testSyncRelay(trimmed || defaultRelay)
       setTestRes({ ok: true, text: `✓ 已连通 (${ms}ms)` })
     } catch (err) {
       setTestRes({ ok: false, text: errMsg(err) })

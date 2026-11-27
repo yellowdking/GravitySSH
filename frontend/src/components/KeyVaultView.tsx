@@ -153,7 +153,17 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
         )}
       </div>
 
-      <KeyDeployModal open={!!deployKey} sshKey={deployKey} servers={servers} onClose={() => setDeployKey(null)} onDeployed={onRefresh} onToast={onToast} />
+      {deployKey && (
+        <KeyDeployModal
+          key={deployKey.id}
+          open
+          sshKey={deployKey}
+          servers={servers}
+          onClose={() => setDeployKey(null)}
+          onDeployed={onRefresh}
+          onToast={onToast}
+        />
+      )}
       {dialogNode}
     </div>
   )

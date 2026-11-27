@@ -75,7 +75,7 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
     }
     if (!onRunCommand) return
     try {
-      const res = await onRunCommand(tpl.command + '\r', false)
+      const res = await onRunCommand(tpl.command, true)
       if (res !== false) onToast(`已下发运维脚本：${tpl.name}`)
     } catch (err) {
       onToast(errMsg(err), 'error')
