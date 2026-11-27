@@ -44,7 +44,7 @@ export const KeyFormDrawer: React.FC<Props> = ({
         {mode === 'import' ? <FileKey2 className="w-4 h-4 text-indigo-400" /> : <Sparkles className="w-4 h-4 text-indigo-400" />}
         {mode === 'import' ? '导入 SSH 私钥' : '自定义生成 SSH 密钥对'}
       </h3>
-      <button type="button" onClick={onCancel} aria-label="关闭密钥表单" className="p-1 rounded-lg hover:bg-ag-hover text-ag-muted">
+      <button type="button" disabled={busy} onClick={onCancel} aria-label="关闭密钥表单" className="p-1 rounded-lg hover:bg-ag-hover text-ag-muted disabled:opacity-40 disabled:cursor-not-allowed">
         <X className="w-4 h-4" />
       </button>
     </div>
@@ -54,24 +54,25 @@ export const KeyFormDrawer: React.FC<Props> = ({
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-xs text-ag-muted mb-1">密钥名称 *</label>
-            <input required className="ag-input" placeholder="例如：生产集群主密钥" value={name} onChange={(e) => onNameChange(e.target.value)} />
+            <input required disabled={busy} className="ag-input disabled:opacity-60" placeholder="例如：生产集群主密钥" value={name} onChange={(e) => onNameChange(e.target.value)} />
           </div>
           <div>
             <label className="block text-xs text-ag-muted mb-1">私钥口令 Passphrase（可选）</label>
-            <input type="password" className="ag-input font-mono" placeholder="无口令请留空" value={passphrase} onChange={(e) => onPassphraseChange(e.target.value)} />
+            <input type="password" disabled={busy} className="ag-input font-mono disabled:opacity-60" placeholder="无口令请留空" value={passphrase} onChange={(e) => onPassphraseChange(e.target.value)} />
           </div>
         </div>
         <div>
           <div className="flex items-center justify-between mb-1">
             <label className="text-xs text-ag-muted">私钥内容 (OpenSSH / PEM / RSA / Ed25519) *</label>
-            <button type="button" onClick={onPickFile} className="text-[11px] text-sky-400 hover:underline">
+            <button type="button" disabled={busy} onClick={onPickFile} className="text-[11px] text-sky-400 hover:underline disabled:opacity-40 disabled:cursor-not-allowed">
               选择本地私钥文件...
             </button>
           </div>
           <textarea
             required
+            disabled={busy}
             rows={6}
-            className="ag-input font-mono text-xs leading-relaxed"
+            className="ag-input font-mono text-xs leading-relaxed disabled:opacity-60"
             placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"
             value={pemContent}
             onChange={(e) => onPemChange(e.target.value)}
@@ -79,10 +80,10 @@ export const KeyFormDrawer: React.FC<Props> = ({
         </div>
         <div>
           <label className="block text-xs text-ag-muted mb-1">备注（可选）</label>
-          <input className="ag-input" placeholder="用于哪些服务器或云厂商" value={comment} onChange={(e) => onCommentChange(e.target.value)} />
+          <input disabled={busy} className="ag-input disabled:opacity-60" placeholder="用于哪些服务器或云厂商" value={comment} onChange={(e) => onCommentChange(e.target.value)} />
         </div>
         <div className="flex justify-end gap-2 pt-2">
-          <button type="button" onClick={onCancel} className="ag-btn-ghost">取消</button>
+          <button type="button" disabled={busy} onClick={onCancel} className="ag-btn-ghost">取消</button>
           <button type="submit" disabled={busy} className="ag-btn-primary">
             <KeyRound className="w-3.5 h-3.5" />
             {busy ? '保存中...' : '保存私钥'}
@@ -94,26 +95,26 @@ export const KeyFormDrawer: React.FC<Props> = ({
         <div className="grid grid-cols-3 gap-3">
           <div>
             <label className="block text-xs text-ag-muted mb-1">密钥名称（留空自动命名）</label>
-            <input className="ag-input" placeholder="例如：my-ed25519" value={name} onChange={(e) => onNameChange(e.target.value)} />
+            <input disabled={busy} className="ag-input disabled:opacity-60" placeholder="例如：my-ed25519" value={name} onChange={(e) => onNameChange(e.target.value)} />
           </div>
           <div>
             <label className="block text-xs text-ag-muted mb-1">加密算法</label>
-            <select className="ag-input" value={algorithm} onChange={(e) => onAlgorithmChange(e.target.value as 'ed25519' | 'rsa4096')}>
+            <select disabled={busy} className="ag-input disabled:opacity-60" value={algorithm} onChange={(e) => onAlgorithmChange(e.target.value as 'ed25519' | 'rsa4096')}>
               <option value="ed25519">Ed25519（推荐 · 快速安全）</option>
               <option value="rsa4096">RSA 4096-bit（兼容旧机）</option>
             </select>
           </div>
           <div>
             <label className="block text-xs text-ag-muted mb-1">保护口令（可选）</label>
-            <input type="password" className="ag-input font-mono" placeholder="可留空" value={passphrase} onChange={(e) => onPassphraseChange(e.target.value)} />
+            <input type="password" disabled={busy} className="ag-input font-mono disabled:opacity-60" placeholder="可留空" value={passphrase} onChange={(e) => onPassphraseChange(e.target.value)} />
           </div>
         </div>
         <div>
           <label className="block text-xs text-ag-muted mb-1">备注（可选）</label>
-          <input className="ag-input font-mono" placeholder="user@gravityssh" value={comment} onChange={(e) => onCommentChange(e.target.value)} />
+          <input disabled={busy} className="ag-input font-mono disabled:opacity-60" placeholder="user@gravityssh" value={comment} onChange={(e) => onCommentChange(e.target.value)} />
         </div>
         <div className="flex justify-end gap-2 pt-2">
-          <button type="button" onClick={onCancel} className="ag-btn-ghost">取消</button>
+          <button type="button" disabled={busy} onClick={onCancel} className="ag-btn-ghost">取消</button>
           <button type="submit" disabled={busy} className="ag-btn-primary">
             <Sparkles className="w-3.5 h-3.5" />
             {busy ? '正在生成...' : '生成并保存'}

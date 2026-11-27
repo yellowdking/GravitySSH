@@ -69,15 +69,15 @@ export const AutocompletePopup: React.FC<Props> = ({
   if (visible.length === 0) return null
 
   return (
-    <div className="pointer-events-auto absolute top-2 right-3 z-30 w-[340px] max-w-[42%] rounded-xl bg-[#111622]/[0.92] backdrop-blur-md border border-indigo-500/35 shadow-ag overflow-hidden select-none">
-      <div className="px-2.5 py-1 bg-[#0c101a]/95 border-b border-ag-border/80 flex items-center justify-between text-[10px] text-ag-muted">
+    <div className="pointer-events-auto absolute top-2 right-3 z-30 w-[min(340px,calc(100%-1.5rem))] max-w-[calc(100%-1.5rem)] max-h-[calc(100%-1rem)] flex flex-col rounded-xl bg-[#111622]/[0.92] backdrop-blur-md border border-indigo-500/35 shadow-ag overflow-hidden select-none">
+      <div className="shrink-0 px-2.5 py-1 bg-[#0c101a]/95 border-b border-ag-border/80 flex items-center justify-between text-[10px] text-ag-muted">
         <span className="flex items-center gap-1 text-indigo-300 font-medium">
           <Sparkles className="w-3 h-3 shrink-0" />
           智能补齐
         </span>
         <span className="text-ag-subtle">↑↓ · Tab · Esc</span>
       </div>
-      <div className="overflow-hidden divide-y divide-ag-border/35">
+      <div className="overflow-y-auto min-h-0 divide-y divide-ag-border/35">
         {visible.map((item, idx) => {
           const isSelected = idx === selectedIdx
           const badge = getSourceBadge(item)

@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { FolderOpen, KeyRound, Loader2, Plus, SlidersHorizontal, Zap } from 'lucide-react'
 import type { ServerView, SSHKeyMeta } from '../types'
 import { api } from '../wailsApi'
@@ -27,13 +27,45 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
   const [deployKey, setDeployKey] = useState<SSHKeyMeta | null>(null)
   const { confirm, dialogNode } = useActionDialogs()
 
-  const resetForm = () => { setName(''); setPemContent(''); setPassphrase(''); setComment(''); setMode('none') }
+  const mountedRef = useRef(true)
+  const busyRef = useRef(false)
+  const quickBusyRef = useRef(false)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
+  const clearFormFields = () => {
+    setName('')
+    setPemContent('')
+    setPassphrase('')
+    setComment('')
+    setAlgorithm('ed25519')
+  }
+
+  const resetForm = (force = false) => {
+    if (!force && busyRef.current) return
+    clearFormFields()
+    setMode('none')
+  }
+
+  const switchMode = (nextMode: 'import' | 'generate') => {
+    if (busyRef.current) return
+    if (mode !== nextMode) {
+      clearFormFields()
+      setMode(nextMode)
+    }
+  }
 
   const handleQuickGenerate = async () => {
+    if (quickBusyRef.current) return
+    quickBusyRef.current = true
     setQuickBusy(true)
     try {
       const created = await api.generateSSHKey('', 'ed25519', '', '')
       onRefresh()
+      if (!mountedRef.current) return
       if (servers.length > 0) {
         onToast(`已生成密钥 "${created.name}"，请选择要部署的服务器`)
         setDeployKey(created)
@@ -41,51 +73,69 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
         onToast(`已一键生成密钥 "${created.name}"`)
       }
     } catch (err) {
-      onToast(errMsg(err), 'error')
+      if (mountedRef.current) onToast(errMsg(err), 'error')
     } finally {
-      setQuickBusy(false)
+      quickBusyRef.current = false
+      if (mountedRef.current) setQuickBusy(false)
     }
   }
 
   const handlePickKeyFile = async () => {
+    if (busyRef.current) return
     try {
       const res = await api.pickAndReadSSHKeyFile()
-      if (res.cancelled === 'true') return
+      if (!mountedRef.current || res.cancelled === 'true' || busyRef.current) return
+      const wasImport = mode === 'import'
+      setPassphrase('')
       setPemContent(res.content || '')
-      if (!name && res.fileName) setName(res.fileName.replace(/\.(pem|key)$/i, ''))
+      if (!wasImport) {
+        setComment('')
+        setAlgorithm('ed25519')
+        setName(res.fileName ? res.fileName.replace(/\.(pem|key)$/i, '') : '')
+      } else if (!name && res.fileName) {
+        setName(res.fileName.replace(/\.(pem|key)$/i, ''))
+      }
       setMode('import')
     } catch (err) {
-      onToast(errMsg(err), 'error')
+      if (mountedRef.current) onToast(errMsg(err), 'error')
     }
   }
 
   const handleImportSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (busyRef.current) return
+    busyRef.current = true
     setBusy(true)
     try {
       await api.importSSHKeyFromText(name, pemContent, passphrase, comment)
-      onToast('SSH 私钥已保存')
-      resetForm()
       onRefresh()
+      if (!mountedRef.current) return
+      onToast('SSH 私钥已保存')
+      resetForm(true)
     } catch (err) {
-      onToast(errMsg(err), 'error')
+      if (mountedRef.current) onToast(errMsg(err), 'error')
     } finally {
-      setBusy(false)
+      busyRef.current = false
+      if (mountedRef.current) setBusy(false)
     }
   }
 
   const handleGenerateSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (busyRef.current) return
+    busyRef.current = true
     setBusy(true)
     try {
       const created = await api.generateSSHKey(name, algorithm, passphrase, comment)
-      onToast(`已生成密钥 "${created.name}"`)
-      resetForm()
       onRefresh()
+      if (!mountedRef.current) return
+      onToast(`已生成密钥 "${created.name}"`)
+      resetForm(true)
     } catch (err) {
-      onToast(errMsg(err), 'error')
+      if (mountedRef.current) onToast(errMsg(err), 'error')
     } finally {
-      setBusy(false)
+      busyRef.current = false
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -124,14 +174,14 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
               {quickBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
               {quickBusy ? '生成中...' : '一键生成密钥'}
             </button>
-            <button onClick={handlePickKeyFile} className="ag-btn-secondary"><FolderOpen className="w-4 h-4 text-sky-400" />从文件加载私钥</button>
-            <button onClick={() => setMode('import')} className="ag-btn-secondary"><Plus className="w-4 h-4" />粘贴导入</button>
-            <button onClick={() => setMode('generate')} className="ag-btn-secondary"><SlidersHorizontal className="w-3.5 h-3.5 text-ag-muted" />自定义生成</button>
+            <button onClick={() => void handlePickKeyFile()} disabled={busy} className="ag-btn-secondary"><FolderOpen className="w-4 h-4 text-sky-400" />从文件加载私钥</button>
+            <button onClick={() => switchMode('import')} disabled={busy} className="ag-btn-secondary"><Plus className="w-4 h-4" />粘贴导入</button>
+            <button onClick={() => switchMode('generate')} disabled={busy} className="ag-btn-secondary"><SlidersHorizontal className="w-3.5 h-3.5 text-ag-muted" />自定义生成</button>
           </div>
         </div>
 
         {mode !== 'none' && (
-          <KeyFormDrawer mode={mode} name={name} pemContent={pemContent} passphrase={passphrase} comment={comment} algorithm={algorithm} busy={busy} onNameChange={setName} onPemChange={setPemContent} onPassphraseChange={setPassphrase} onCommentChange={setComment} onAlgorithmChange={setAlgorithm} onPickFile={handlePickKeyFile} onCancel={resetForm} onSubmitImport={handleImportSubmit} onSubmitGenerate={handleGenerateSubmit} />
+          <KeyFormDrawer mode={mode} name={name} pemContent={pemContent} passphrase={passphrase} comment={comment} algorithm={algorithm} busy={busy} onNameChange={setName} onPemChange={setPemContent} onPassphraseChange={setPassphrase} onCommentChange={setComment} onAlgorithmChange={setAlgorithm} onPickFile={() => void handlePickKeyFile()} onCancel={() => resetForm()} onSubmitImport={handleImportSubmit} onSubmitGenerate={handleGenerateSubmit} />
         )}
 
         {keys.length === 0 ? (
@@ -141,7 +191,7 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
             <p className="text-xs text-ag-subtle mb-4">点击一键生成 Ed25519 密钥，或从本地文件导入现有私钥</p>
             <div className="flex items-center justify-center gap-2">
               <button onClick={() => void handleQuickGenerate()} disabled={quickBusy} className="ag-btn-primary text-xs"><Zap className="w-3.5 h-3.5" />一键生成密钥</button>
-              <button onClick={handlePickKeyFile} className="ag-btn-secondary text-xs"><FolderOpen className="w-3.5 h-3.5 text-sky-400" />从文件加载私钥</button>
+              <button onClick={() => void handlePickKeyFile()} disabled={busy} className="ag-btn-secondary text-xs"><FolderOpen className="w-3.5 h-3.5 text-sky-400" />从文件加载私钥</button>
             </div>
           </div>
         ) : (

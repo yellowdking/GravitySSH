@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { BookmarkPlus, History, Search, X } from 'lucide-react'
 import type { CommandRecord, CommandShortcut } from '../types'
 import { api } from '../wailsApi'
@@ -42,6 +42,21 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
       return h.command.toLowerCase().includes(q) || h.serverName.toLowerCase().includes(q)
     })
   }, [history, search, onlyCurrentServer, activeServerId])
+
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.length === 0) return prev
+      const validIds = new Set(history.map((h) => h.id))
+      const next = prev.filter((id) => validIds.has(id))
+      return next.length === prev.length ? prev : next
+    })
+  }, [history])
+
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds])
+  const visibleSelected = useMemo(
+    () => filtered.filter((h) => selectedIdSet.has(h.id)),
+    [filtered, selectedIdSet]
+  )
 
   const openSaveModal = (commands: string[]) => {
     if (commands.length === 0) return
@@ -101,7 +116,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
   }
 
   return (
-    <div className={`flex flex-col h-full bg-ag-sidebar ${compact ? 'w-[360px] shrink-0 border-l border-ag-border' : 'flex-1 bg-ag-bg'}`}>
+    <div className={`flex flex-col h-full ${compact ? 'w-[360px] shrink-0 border-l border-ag-border bg-ag-sidebar' : 'flex-1 bg-ag-bg'}`}>
       <div className="px-4 py-3 border-b border-ag-border bg-[#0f1219] space-y-2.5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -124,11 +139,11 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
         </div>
       </div>
 
-      {selectedIds.length > 0 && (
+      {visibleSelected.length > 0 && (
         <div className="px-3 py-2 bg-indigo-500/15 border-b border-indigo-500/35 flex items-center justify-between gap-2 text-xs">
-          <span className="text-indigo-200 font-medium">已选 {selectedIds.length} 条命令</span>
+          <span className="text-indigo-200 font-medium">已选 {visibleSelected.length} 条命令</span>
           <div className="flex items-center gap-1.5">
-            <button onClick={() => openSaveModal(filtered.filter((h) => selectedIds.includes(h.id)).map((h) => h.command))} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-indigo-500 hover:bg-indigo-400 text-white font-medium transition">
+            <button type="button" onClick={() => openSaveModal(visibleSelected.map((h) => h.command))} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-indigo-500 hover:bg-indigo-400 text-white font-medium transition">
               <BookmarkPlus className="w-3.5 h-3.5" />存为快捷命令
             </button>
             <button type="button" onClick={() => setSelectedIds([])} aria-label="取消选择" className="p-1 rounded hover:bg-ag-hover text-ag-muted"><X className="w-3.5 h-3.5" /></button>
@@ -147,7 +162,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
             <HistoryRow
               key={rec.id}
               rec={rec}
-              checked={selectedIds.includes(rec.id)}
+              checked={selectedIdSet.has(rec.id)}
               hasActiveSession={!!activeSessionId}
               onToggle={() => setSelectedIds((p) => (p.includes(rec.id) ? p.filter((x) => x !== rec.id) : [...p, rec.id]))}
               onSaveAsShortcut={() => openSaveModal([rec.command])}
