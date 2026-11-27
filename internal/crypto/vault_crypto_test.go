@@ -218,3 +218,25 @@ func TestEnvelopeRejectsCopiedFileOnAnotherMachine(t *testing.T) {
 		t.Fatalf("expected ErrDecryptFailed on foreign machine, got %v", err)
 	}
 }
+
+func TestEnvelopeRejectsWrappedKeyLenOverflowWithoutPanic(t *testing.T) {
+	enc := NewEnvelopeCrypto(NewDefaultProtector())
+	for _, badLen := range []uint32{0, 0x7fffffff, 0x80000000, 0xffffffff} {
+		// Crafted GSV1 blob
+		v1 := make([]byte, 4+4+saltSize+nonceSize+16+4)
+		copy(v1[:4], vaultMagicV1)
+		binary.BigEndian.PutUint32(v1[4:8], badLen)
+		if _, err := enc.Open(v1); !errors.Is(err, ErrInvalidFormat) {
+			t.Fatalf("GSV1 wrappedKeyLen=%#x: got err=%v, want ErrInvalidFormat", badLen, err)
+		}
+
+		// Crafted GSV2 blob
+		v2 := make([]byte, 4+1+1+4+1+saltSize+nonceSize+16+4)
+		copy(v2[:4], vaultMagicV2)
+		v2[4] = ModeDPAPI
+		binary.BigEndian.PutUint32(v2[6:10], badLen)
+		if _, err := enc.Open(v2); !errors.Is(err, ErrInvalidFormat) {
+			t.Fatalf("GSV2 wrappedKeyLen=%#x: got err=%v, want ErrInvalidFormat", badLen, err)
+		}
+	}
+}

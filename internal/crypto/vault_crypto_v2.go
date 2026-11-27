@@ -135,10 +135,11 @@ func (e *EnvelopeCrypto) openV2WithKey(blob []byte, password string) (plaintext,
 		return nil, nil, nil, ErrInvalidFormat
 	}
 
-	wrappedKeyLen := int(binary.BigEndian.Uint32(blob[6:10]))
-	if wrappedKeyLen <= 0 || 10+wrappedKeyLen+1 > len(blob) {
+	wrappedKeyLenU32 := binary.BigEndian.Uint32(blob[6:10])
+	if wrappedKeyLenU32 == 0 || uint64(wrappedKeyLenU32) > uint64(len(blob)-minSize) {
 		return nil, nil, nil, ErrInvalidFormat
 	}
+	wrappedKeyLen := int(wrappedKeyLenU32)
 
 	offset := 10
 	wrappedKey := blob[offset : offset+wrappedKeyLen]

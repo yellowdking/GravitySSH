@@ -122,11 +122,12 @@ func (e *EnvelopeCrypto) openV1(blob []byte) ([]byte, error) {
 	if len(blob) < minHeader {
 		return nil, ErrInvalidFormat
 	}
-	wrappedKeyLen := int(binary.BigEndian.Uint32(blob[4:8]))
-	headerLen := 4 + 4 + wrappedKeyLen + saltSize + nonceSize
-	if wrappedKeyLen <= 0 || headerLen+16 > len(blob) {
+	wrappedKeyLenU32 := binary.BigEndian.Uint32(blob[4:8])
+	if wrappedKeyLenU32 == 0 || uint64(wrappedKeyLenU32) > uint64(len(blob)-minHeader) {
 		return nil, ErrInvalidFormat
 	}
+	wrappedKeyLen := int(wrappedKeyLenU32)
+	headerLen := 4 + 4 + wrappedKeyLen + saltSize + nonceSize
 
 	offset := 8
 	wrappedKey := blob[offset : offset+wrappedKeyLen]

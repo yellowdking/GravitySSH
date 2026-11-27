@@ -22,12 +22,22 @@ export async function readFromClipboard(): Promise<string | null> {
   }
 }
 
+export function isAllowedExternalUrl(uri: string): boolean {
+  try {
+    const parsed = new URL(uri)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 export function insertTabIndent(
   e: React.KeyboardEvent<HTMLTextAreaElement>,
   value: string,
   setValue: (next: string) => void
 ): boolean {
-  if (e.key !== 'Tab') return false
+  if (e.nativeEvent.isComposing || e.keyCode === 229) return false
+  if (e.key !== 'Tab' || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return false
   e.preventDefault()
   const target = e.currentTarget
   const start = target.selectionStart

@@ -66,7 +66,13 @@ func SuggestWithContext(req SuggestRequest) []models.CompletionItem {
 
 	byKey := make(map[string]models.CompletionItem, limit*4)
 	add := func(it models.CompletionItem) {
-		if k := strings.ToLower(normWS(it.InsertText)); k != "" {
+		var k string
+		if it.Source == "file" || it.Source == "dir" {
+			k = it.InsertText
+		} else {
+			k = strings.ToLower(normWS(it.InsertText))
+		}
+		if k != "" {
 			if prev, ok := byKey[k]; !ok || it.Score > prev.Score {
 				byKey[k] = it
 			}
