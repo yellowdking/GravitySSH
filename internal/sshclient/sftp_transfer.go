@@ -128,7 +128,7 @@ func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
 	// final <32KB packet, which pkg/sftp's sequential ReadFrom swallows on ErrUnexpectedEOF)
 	// is strictly verified before renaming the temp file into place.
 	conc := uploadConcurrency(st.Size())
-	_, cpErr := dst.ReadFromWithConcurrency(&progressReader{r: src, tracker: tracker}, conc)
+	_, cpErr := dst.ReadFromWithConcurrency(&progressReader{r: src, size: st.Size(), tracker: tracker}, conc)
 	closeErr := dst.Close()
 	if cpErr != nil || closeErr != nil {
 		if usingTemp && usedSC != nil {
@@ -150,7 +150,7 @@ func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
 			if _, seekErr := src.Seek(0, io.SeekStart); seekErr == nil {
 				if dst2, oErr2 := usedSC.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC); oErr2 == nil {
 					tracker.reset()
-					_, cpErr2 := dst2.ReadFromWithConcurrency(&progressReader{r: src, tracker: tracker}, conc)
+					_, cpErr2 := dst2.ReadFromWithConcurrency(&progressReader{r: src, size: st.Size(), tracker: tracker}, conc)
 					closeErr2 := dst2.Close()
 					return m.finishTransfer(sessionID, usedSC, tracker, cpErr2, closeErr2, cleanDir)
 				}
@@ -331,7 +331,14 @@ func (p *progressTracker) snapshot() models.TransferProgress {
 
 type progressReader struct {
 	r       io.Reader
+	size    int64
 	tracker *progressTracker
+}
+
+// Size reports the known total length so pkg/sftp (*File).ReadFrom can enable
+// pipelined concurrent writes even when invoked via io.Copy.
+func (pr *progressReader) Size() int64 {
+	return pr.size
 }
 
 func (pr *progressReader) Read(p []byte) (int, error) {
