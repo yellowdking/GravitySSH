@@ -12,6 +12,8 @@ import (
 const (
 	ratePerMin     = 10.0
 	rateBurst      = 5.0
+	pollRatePerMin = 120.0
+	pollBurst      = 20.0
 	strikeLimit    = 10
 	banDuration    = 15 * time.Minute
 	maxTrackedIPs  = 4096
@@ -21,18 +23,21 @@ const (
 )
 
 type ipState struct {
-	tokens    float64
-	lastRefil time.Time
-	lastSeen  time.Time
-	strikes   int
-	banUntil  time.Time
+	tokens        float64
+	lastRefil     time.Time
+	pollTokens    float64
+	lastPollRefil time.Time
+	lastSeen      time.Time
+	strikes       int
+	banUntil      time.Time
 }
 
 type ipGuard struct {
-	mu    sync.Mutex
-	ips   map[string]*ipState
-	now   func() time.Time
-	rateS float64
+	mu        sync.Mutex
+	ips       map[string]*ipState
+	now       func() time.Time
+	rateS     float64
+	pollRateS float64
 }
 
 func newIPGuard(nowFn func() time.Time) *ipGuard {
@@ -40,9 +45,10 @@ func newIPGuard(nowFn func() time.Time) *ipGuard {
 		nowFn = func() time.Time { return time.Now().UTC() }
 	}
 	return &ipGuard{
-		ips:   make(map[string]*ipState, 128),
-		now:   nowFn,
-		rateS: ratePerMin / 60.0,
+		ips:       make(map[string]*ipState, 128),
+		now:       nowFn,
+		rateS:     ratePerMin / 60.0,
+		pollRateS: pollRatePerMin / 60.0,
 	}
 }
 
@@ -55,9 +61,11 @@ func (g *ipGuard) getOrCreateLocked(ip string, now time.Time) *ipState {
 		g.evictLocked(now)
 	}
 	st := &ipState{
-		tokens:    rateBurst,
-		lastRefil: now,
-		lastSeen:  now,
+		tokens:        rateBurst,
+		lastRefil:     now,
+		pollTokens:    pollBurst,
+		lastPollRefil: now,
+		lastSeen:      now,
 	}
 	g.ips[ip] = st
 	return st
@@ -148,25 +156,38 @@ func (g *ipGuard) IsBanned(ip string) bool {
 	return false
 }
 
+func consumeToken(tokens *float64, lastRefil *time.Time, now time.Time, rateS, burst float64) bool {
+	elapsed := now.Sub(*lastRefil).Seconds()
+	if elapsed > 0 {
+		*tokens += elapsed * rateS
+		if *tokens > burst {
+			*tokens = burst
+		}
+		*lastRefil = now
+	}
+	if *tokens < 1.0 {
+		return false
+	}
+	*tokens -= 1.0
+	return true
+}
+
 func (g *ipGuard) AllowToken(ip string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	now := g.now().UTC()
 	st := g.getOrCreateLocked(ip, now)
-	elapsed := now.Sub(st.lastRefil).Seconds()
-	if elapsed > 0 {
-		st.tokens += elapsed * g.rateS
-		if st.tokens > rateBurst {
-			st.tokens = rateBurst
-		}
-		st.lastRefil = now
-	}
-	if st.tokens < 1.0 {
-		return false
-	}
-	st.tokens -= 1.0
-	return true
+	return consumeToken(&st.tokens, &st.lastRefil, now, g.rateS, rateBurst)
+}
+
+func (g *ipGuard) AllowPollToken(ip string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	now := g.now().UTC()
+	st := g.getOrCreateLocked(ip, now)
+	return consumeToken(&st.pollTokens, &st.lastPollRefil, now, g.pollRateS, pollBurst)
 }
 
 func (g *ipGuard) RecordStrike(ip string) bool {

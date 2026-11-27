@@ -179,6 +179,17 @@ func TestRateLimitBurstAndOversizedStealthStrike(t *testing.T) {
 		t.Fatalf("expected 200 after token refill, got %d", r7.Code)
 	}
 
+	// Poll endpoints use separate poll bucket so 1.5s dual-device NAT polling never starves or hits 429
+	pollIP := "198.51.100.78"
+	for i := 0; i < 12; i++ {
+		body := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s"}`, makeTestChannel("poll-burst"), tok))
+		rp := httptest.NewRecorder()
+		srv.ServeHTTP(rp, signReq(t, http.MethodPost, "/v1/pair/poll", body, testAppKey, now.Unix(), pollIP))
+		if rp.Code != http.StatusNotFound {
+			t.Fatalf("poll req %d expected 404 (passed rate limit), got %d", i+1, rp.Code)
+		}
+	}
+
 	// Oversized heavy approve body (> 2 MiB) -> silent 404 + strike (never leaks 413)
 	huge := bytes.Repeat([]byte("A"), maxBodyBytes+10)
 	badIP := "198.51.100.88"

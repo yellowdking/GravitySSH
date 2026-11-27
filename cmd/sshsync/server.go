@@ -118,7 +118,14 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.guard.AllowToken(ip) {
+	isPollEndpoint := r.URL.Path == "/v1/ping" || r.URL.Path == "/v1/pair/poll" || r.URL.Path == "/v1/pair/status"
+	allowed := false
+	if isPollEndpoint {
+		allowed = s.guard.AllowPollToken(ip)
+	} else {
+		allowed = s.guard.AllowToken(ip)
+	}
+	if !allowed {
 		writeJSON(w, http.StatusTooManyRequests, []byte(`{"error":"rate_limited"}`))
 		return
 	}
