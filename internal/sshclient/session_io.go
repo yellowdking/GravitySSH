@@ -17,6 +17,32 @@ type shellHandles struct {
 	stderr  io.Reader
 }
 
+// emitSessionStatus serializes session:status emissions per session and guarantees
+// that once a terminal status ("disconnected"/"error") is emitted, no late
+// non-terminal status ("connecting"/"connected") can overwrite it.
+func (m *Manager) emitSessionStatus(sess *sessionState, info models.SessionInfo, terminal bool, beforeEmit func()) bool {
+	sess.statusMu.Lock()
+	defer sess.statusMu.Unlock()
+	if sess.terminalStatusEmitted {
+		return false
+	}
+	if !terminal {
+		sess.mu.Lock()
+		closed := sess.closed || sess.userClosed
+		sess.mu.Unlock()
+		if closed {
+			return false
+		}
+	} else {
+		sess.terminalStatusEmitted = true
+	}
+	if beforeEmit != nil {
+		beforeEmit()
+	}
+	m.emit("session:status", info)
+	return true
+}
+
 func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv *models.ServerConfig, cols, rows int) {
 	defer func() {
 		sess.mu.Lock()
@@ -80,6 +106,24 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 	}
 
 	sess.mu.Lock()
+	if sess.userClosed || sess.closed {
+		if sess.pendingDial == dialRes {
+			sess.pendingDial = nil
+		}
+		sess.mu.Unlock()
+		_ = sh.sshSess.Close()
+		dialRes.Close()
+		return
+	}
+	latestCols, latestRows := sess.lastCols, sess.lastRows
+	sess.mu.Unlock()
+
+	if latestCols > 0 && latestRows > 0 && (latestCols != ptyCols || latestRows != ptyRows) {
+		_ = sh.sshSess.WindowChange(latestRows, latestCols)
+		ptyCols, ptyRows = latestCols, latestRows
+	}
+
+	sess.mu.Lock()
 	if sess.pendingDial == dialRes {
 		sess.pendingDial = nil
 	}
@@ -89,7 +133,7 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 		dialRes.Close()
 		return
 	}
-	latestCols, latestRows := sess.lastCols, sess.lastRows
+	finalCols, finalRows := sess.lastCols, sess.lastRows
 	sess.closed = false
 	sess.dialRes = dialRes
 	sess.sshSession = sh.sshSess
@@ -104,23 +148,40 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 	}
 	infoSnap := sess.info
 	stopCh := sess.stopCh
+	rec := sess.recorder
 	sess.mu.Unlock()
 
-	if latestCols > 0 && latestRows > 0 && (latestCols != ptyCols || latestRows != ptyRows) {
-		_ = sh.sshSess.WindowChange(latestRows, latestCols)
-	}
-
-	m.store.MarkServerConnected(srv.ID)
-
+	connectedBanner := "\x1b[38;5;78m✓ SSH 已连接\x1b[0m\r\n"
 	if dialRes.ViaSummary != "" {
-		m.sendTerminalText(sessionID, fmt.Sprintf("\x1b[38;5;78m✓ 已连接 · 链路: %s → %s\x1b[0m\r\n", dialRes.ViaSummary, srv.Host))
-	} else {
-		m.sendTerminalText(sessionID, "\x1b[38;5;78m✓ SSH 已连接\x1b[0m\r\n")
+		connectedBanner = fmt.Sprintf("\x1b[38;5;78m✓ 已连接 · 链路: %s → %s\x1b[0m\r\n", dialRes.ViaSummary, srv.Host)
 	}
-	m.emit("session:status", infoSnap)
+	if !m.emitSessionStatus(sess, infoSnap, false, func() {
+		m.sendTerminalText(sessionID, connectedBanner)
+	}) {
+		_ = sh.sshSess.Close()
+		dialRes.Close()
+		return
+	}
 
-	go m.pumpOutput(sessionID, sh.stdout)
-	go m.pumpOutput(sessionID, sh.stderr)
+	// Re-check before spawning background loops in case Disconnect raced right after status emission.
+	sess.mu.Lock()
+	if sess.closed || sess.userClosed {
+		sess.mu.Unlock()
+		_ = sh.sshSess.Close()
+		dialRes.Close()
+		return
+	}
+	sess.mu.Unlock()
+
+	if finalCols > 0 && finalRows > 0 && (finalCols != ptyCols || finalRows != ptyRows) {
+		go func() { _ = sh.sshSess.WindowChange(finalRows, finalCols) }()
+	}
+	if m.store != nil {
+		go m.store.MarkServerConnected(srv.ID)
+	}
+
+	go m.pumpOutput(sessionID, sh.stdout, rec)
+	go m.pumpOutput(sessionID, sh.stderr, rec)
 	go m.initSessionSFTP(sess, dialRes.Client, srv.DefaultRemotePath, stopCh)
 
 	if srv.StartupCommand != "" {
@@ -255,8 +316,7 @@ func (m *Manager) initSessionSFTP(sess *sessionState, client *ssh.Client, defaul
 	infoSnap := sess.info
 	sess.mu.Unlock()
 
-	m.emit("session:status", infoSnap)
-	if cwd != "" {
+	if m.emitSessionStatus(sess, infoSnap, false, nil) && cwd != "" {
 		m.emit("session:cwd", map[string]string{"sessionId": infoSnap.SessionID, "path": cwd})
 	}
 }
@@ -324,8 +384,9 @@ func (m *Manager) failSession(sess *sessionState, errMsg string) {
 		pendingDial.Close()
 	}
 	m.deleteSessionEntry(infoSnap.SessionID, sess)
-	m.sendTerminalText(infoSnap.SessionID, fmt.Sprintf("\r\n\x1b[38;5;203m✗ 连接失败: %s\x1b[0m\r\n", errMsg))
-	m.emit("session:status", infoSnap)
+	m.emitSessionStatus(sess, infoSnap, true, func() {
+		m.sendTerminalText(infoSnap.SessionID, fmt.Sprintf("\r\n\x1b[38;5;203m✗ 连接失败: %s\x1b[0m\r\n", errMsg))
+	})
 }
 
 func (m *Manager) markDisconnected(sess *sessionState, reason string) {
@@ -371,6 +432,7 @@ func (m *Manager) markDisconnected(sess *sessionState, reason string) {
 		pendingDial.Close()
 	}
 	m.deleteSessionEntry(infoSnap.SessionID, sess)
-	m.sendTerminalText(infoSnap.SessionID, fmt.Sprintf("\r\n\x1b[38;5;245m● %s\x1b[0m\r\n", reason))
-	m.emit("session:status", infoSnap)
+	m.emitSessionStatus(sess, infoSnap, true, func() {
+		m.sendTerminalText(infoSnap.SessionID, fmt.Sprintf("\r\n\x1b[38;5;245m● %s\x1b[0m\r\n", reason))
+	})
 }

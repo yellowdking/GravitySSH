@@ -10,7 +10,10 @@ import (
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
-var rttProbeTimeout = 5 * time.Second
+var (
+	rttProbeTimeout    = 5 * time.Second
+	metricsExecTimeout = 10 * time.Second
+)
 
 const (
 
@@ -18,7 +21,7 @@ const (
 [ -r /proc/stat ] || { echo "UNSUPPORTED"; exit 0; }
 echo "---CPU---"; head -n1 /proc/stat
 echo "---MEM---"; awk "/^(MemTotal|MemAvailable|MemFree|Buffers|Cached):/{print \$1,\$2}" /proc/meminfo
-echo "---DISK---"; df -Pkl 2>/dev/null | awk "NR>1 && \$1 ~ /^\// {pct=\$5; mp=\$6; for(i=7;i<=NF;i++) mp=mp \" \" \$i; print pct, mp}"
+echo "---DISK---"; (df -Pkl -x squashfs -x tmpfs -x devtmpfs -x overlay 2>/dev/null || df -Pk 2>/dev/null) | awk "NR>1 && \$1 ~ /^\// && \$1 !~ /^\/dev\/loop/ && \$6 !~ /^\/snap(\/|\$)/ {pct=\$5; mp=\$6; for(i=7;i<=NF;i++) mp=mp \" \" \$i; print pct, mp}"
 echo "---NET---"; awk "NR>2 && \$1 !~ /^lo:/ {gsub(/:/,\" \",\$0); rx+=\$2; tx+=\$10} END{printf \"%.0f %.0f\n\",rx,tx}" /proc/net/dev
 echo "---LOAD---"; cat /proc/loadavg`
 	linuxMetricsCoresSuffix = `; nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo`
@@ -89,7 +92,7 @@ func (m *Manager) GetSessionMetrics(sessionID string) (models.HostMetrics, error
 			}
 		}()
 	}
-	out, runErr := runSSHExec(execCtx, client.Client, cmd, 10*time.Second, false)
+	out, runErr := runSSHExec(execCtx, client.Client, cmd, metricsExecTimeout, false)
 	if runErr != nil {
 		return models.HostMetrics{SessionID: sessionID, LatencyMs: latencyMs}, runErr
 	}

@@ -94,8 +94,8 @@ func writeRemoteFileContent(sc *sftp.Client, target string, data []byte, mode os
 }
 
 // SFTPWriteTextFile writes edited text back to remotePath atomically via a temp file + rename
-// (falling back to in-place write when directory permissions or target semantics disallow rename),
-// preserving existing file permissions.
+// (resolving symlinks via RealPath so symlinks are preserved, and falling back to in-place write
+// when directory permissions or target semantics disallow rename), preserving existing file permissions.
 func (m *Manager) SFTPWriteTextFile(sessionID, remotePath, content string) error {
 	clean := path.Clean(strings.TrimSpace(remotePath))
 	if clean == "" || clean == "/" || clean == "." {
@@ -103,30 +103,64 @@ func (m *Manager) SFTPWriteTextFile(sessionID, remotePath, content string) error
 	}
 
 	data := []byte(content)
+	writeTarget := clean
 	err := m.withSFTP(sessionID, func(sc *sftp.Client) error {
-		var existingMode os.FileMode
-		if st, statErr := sc.Stat(clean); statErr == nil {
-			existingMode = st.Mode().Perm()
-		}
+		target := clean
+		allowAtomicRename := true
 
-		tmpPath := path.Join(path.Dir(clean), fmt.Sprintf(".%s.gssh-tmp-%s", path.Base(clean), uuid.NewString()[:8]))
-		if wErr := writeRemoteFileContent(sc, tmpPath, data, existingMode); wErr == nil {
-			if rErr := renameRemote(sc, tmpPath, clean, true); rErr == nil {
-				return nil
+		lst, lstatErr := sc.Lstat(clean)
+		if lstatErr != nil && isSFTPConnError(lstatErr) {
+			return lstatErr
+		}
+		if lstatErr == nil && lst.Mode()&os.ModeSymlink != 0 {
+			realTarget, rpErr := sc.RealPath(clean)
+			if rpErr != nil {
+				if isSFTPConnError(rpErr) {
+					return rpErr
+				}
+				// Do not rename over an unresolved symlink; write in-place to follow the link.
+				allowAtomicRename = false
 			} else {
-				_ = sc.Remove(tmpPath)
-				if isSFTPConnError(rErr) {
-					return rErr
+				realClean := path.Clean(strings.TrimSpace(realTarget))
+				if realClean != "" && realClean != "/" && realClean != "." && realClean != clean {
+					target = realClean
+				} else {
+					allowAtomicRename = false
 				}
 			}
-		} else {
-			_ = sc.Remove(tmpPath)
-			if isSFTPConnError(wErr) {
-				return wErr
+		}
+
+		var existingMode os.FileMode
+		if st, statErr := sc.Stat(target); statErr == nil {
+			if st.IsDir() {
+				return fmt.Errorf("无法编辑目录")
+			}
+			existingMode = st.Mode().Perm()
+		} else if isSFTPConnError(statErr) {
+			return statErr
+		}
+
+		writeTarget = target
+		if allowAtomicRename {
+			tmpPath := path.Join(path.Dir(target), fmt.Sprintf(".%s.gssh-tmp-%s", path.Base(target), uuid.NewString()[:8]))
+			if wErr := writeRemoteFileContent(sc, tmpPath, data, existingMode); wErr == nil {
+				if rErr := renameRemote(sc, tmpPath, target, true); rErr == nil {
+					return nil
+				} else {
+					_ = sc.Remove(tmpPath)
+					if isSFTPConnError(rErr) {
+						return rErr
+					}
+				}
+			} else {
+				_ = sc.Remove(tmpPath)
+				if isSFTPConnError(wErr) {
+					return wErr
+				}
 			}
 		}
 
-		if err := writeRemoteFileContent(sc, clean, data, existingMode); err != nil {
+		if err := writeRemoteFileContent(sc, target, data, existingMode); err != nil {
 			if isSFTPConnError(err) {
 				return err
 			}
@@ -136,6 +170,9 @@ func (m *Manager) SFTPWriteTextFile(sessionID, remotePath, content string) error
 	})
 	if err == nil {
 		m.invalidateDirCache(sessionID, path.Dir(clean))
+		if targetDir := path.Dir(writeTarget); targetDir != path.Dir(clean) {
+			m.invalidateDirCache(sessionID, targetDir)
+		}
 	}
 	return err
 }

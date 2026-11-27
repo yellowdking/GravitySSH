@@ -26,6 +26,7 @@ func buildSSHClientConfig(
 	sshKeyID string,
 	resolver CredentialResolver,
 	timeout time.Duration,
+	targetAddr string,
 ) (*ssh.ClientConfig, error) {
 	if strings.TrimSpace(username) == "" {
 		username = "root"
@@ -69,10 +70,11 @@ func buildSSHClientConfig(
 	}
 
 	return &ssh.ClientConfig{
-		User:            username,
-		Auth:            methods,
-		HostKeyCallback: defaultTOFUHostKeyCallback(),
-		Timeout:         timeout,
+		User:              username,
+		Auth:              methods,
+		HostKeyCallback:   defaultTOFUHostKeyCallback(),
+		HostKeyAlgorithms: defaultPreferredHostKeyAlgorithms(targetAddr),
+		Timeout:           timeout,
 	}, nil
 }
 
@@ -221,41 +223,83 @@ func (b *bufferedConn) Read(p []byte) (int, error) {
 }
 
 func upgradeSSHConn(ctx context.Context, conn net.Conn, addr string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	effCfg := cfg
+	if len(cfg.HostKeyAlgorithms) == 0 {
+		copied := *cfg
+		copied.HostKeyAlgorithms = defaultPreferredHostKeyAlgorithms(addr)
+		effCfg = &copied
+	}
+
 	var deadline time.Time
-	if cfg.Timeout > 0 {
-		deadline = time.Now().Add(cfg.Timeout)
+	if effCfg.Timeout > 0 {
+		deadline = time.Now().Add(effCfg.Timeout)
 	}
 	if ctxDeadline, ok := ctx.Deadline(); ok && (deadline.IsZero() || ctxDeadline.Before(deadline)) {
 		deadline = ctxDeadline
 	}
+
+	hsCtx := ctx
+	var cancel context.CancelFunc
 	if !deadline.IsZero() {
 		_ = conn.SetDeadline(deadline)
+		hsCtx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
 	}
 
-	stopCancel := context.AfterFunc(ctx, func() {
+	stopCancel := context.AfterFunc(hsCtx, func() {
 		_ = conn.Close()
 	})
 
-	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
-	stopped := stopCancel()
-	if err != nil {
-		if !stopped || ctx.Err() != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
+	type handshakeResult struct {
+		c     ssh.Conn
+		chans <-chan ssh.NewChannel
+		reqs  <-chan *ssh.Request
+		err   error
+	}
+	resCh := make(chan handshakeResult)
+	aborted := make(chan struct{})
+	go func() {
+		c, chans, reqs, err := ssh.NewClientConn(conn, addr, effCfg)
+		select {
+		case resCh <- handshakeResult{c: c, chans: chans, reqs: reqs, err: err}:
+		case <-aborted:
+			if c != nil {
+				_ = c.Close()
+			}
+		}
+	}()
+
+	select {
+	case res := <-resCh:
+		stopped := stopCancel()
+		if res.err != nil {
+			if !stopped || hsCtx.Err() != nil {
+				if hsCtx.Err() != nil {
+					return nil, hsCtx.Err()
+				}
+				return nil, context.Canceled
+			}
+			return nil, res.err
+		}
+		if !stopped || hsCtx.Err() != nil {
+			_ = res.c.Close()
+			if hsCtx.Err() != nil {
+				return nil, hsCtx.Err()
 			}
 			return nil, context.Canceled
 		}
-		return nil, err
+		_ = conn.SetDeadline(time.Time{})
+		return ssh.NewClient(res.c, res.chans, res.reqs), nil
+
+	case <-hsCtx.Done():
+		close(aborted)
+		_ = stopCancel()
+		go func() { _ = conn.Close() }()
+		return nil, hsCtx.Err()
 	}
-	if !stopped || ctx.Err() != nil {
-		_ = c.Close()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, context.Canceled
-	}
-	_ = conn.SetDeadline(time.Time{})
-	return ssh.NewClient(c, chans, reqs), nil
 }
 
 func defaultPort(p int) int {

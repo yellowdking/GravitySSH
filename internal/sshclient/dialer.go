@@ -74,7 +74,7 @@ func dialServerRecursive(
 	}
 
 	targetAddr := net.JoinHostPort(cfg.Host, strconv.Itoa(defaultPort(cfg.Port)))
-	sshCfg, err := buildSSHClientConfig(cfg.Username, cfg.AuthType, cfg.Password, cfg.SSHKeyID, resolver, timeout)
+	sshCfg, err := buildSSHClientConfig(cfg.Username, cfg.AuthType, cfg.Password, cfg.SSHKeyID, resolver, timeout, targetAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +173,7 @@ func dialViaCustomJump(
 			jumpAuthType = models.AuthPassword
 		}
 	}
-	jumpSSHCfg, err := buildSSHClientConfig(jumpUser, jumpAuthType, cfg.JumpHost.Password, cfg.JumpHost.SSHKeyID, resolver, timeout)
+	jumpSSHCfg, err := buildSSHClientConfig(jumpUser, jumpAuthType, cfg.JumpHost.Password, cfg.JumpHost.SSHKeyID, resolver, timeout, jumpAddr)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("自定义跳板机认证配置错误: %w", err)
 	}

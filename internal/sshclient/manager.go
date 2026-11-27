@@ -37,9 +37,11 @@ type netSample struct {
 }
 
 type sessionState struct {
-	mu                sync.Mutex
-	writeMu           sync.Mutex
-	info              models.SessionInfo
+	mu                    sync.Mutex
+	writeMu               sync.Mutex
+	statusMu              sync.Mutex
+	terminalStatusEmitted bool
+	info                  models.SessionInfo
 	cancelDial        context.CancelFunc
 	pendingDial       *DialResult
 	dialRes           *DialResult
@@ -206,7 +208,7 @@ func (m *Manager) Connect(ctx context.Context, serverID string, cols, rows int) 
 	m.mu.Lock()
 	m.sessions[sessionID] = sess
 	m.mu.Unlock()
-	m.emit("session:status", infoSnap)
+	m.emitSessionStatus(sess, infoSnap, false, nil)
 
 	go m.establishSession(dialCtx, sess, srv, cols, rows)
 	return infoSnap, nil

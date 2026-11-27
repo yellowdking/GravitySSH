@@ -165,3 +165,16 @@ MemAvailable: 2097152
 		t.Fatalf("expected second cmd to skip cached nproc and nvidia-smi, got:\n%s", cmds[1])
 	}
 }
+
+func TestBuildLinuxMetricsCmdExcludesSnapLoopAndSupportsAlpineFallback(t *testing.T) {
+	cmd := buildLinuxMetricsCmd(false, true, false)
+	for _, want := range []string{
+		"(df -Pkl -x squashfs -x tmpfs -x devtmpfs -x overlay 2>/dev/null || df -Pk 2>/dev/null)",
+		`\$1 !~ /^\/dev\/loop/`,
+		`\$6 !~ /^\/snap(\/|\$)/`,
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("expected metrics cmd to contain %q, got:\n%s", want, cmd)
+		}
+	}
+}

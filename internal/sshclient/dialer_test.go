@@ -2,14 +2,23 @@ package sshclient
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"errors"
+	"fmt"
 	"net"
+	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/yellowdking/GravitySSH/internal/models"
 	"github.com/yellowdking/GravitySSH/internal/sshkey"
+	"golang.org/x/crypto/ssh"
 )
 
 func useTempKnownHosts(t *testing.T) string {
@@ -162,5 +171,145 @@ func TestDialServerDetectsJumpCycle(t *testing.T) {
 	_, err := DialServer(context.Background(), resolver.servers["a"], resolver)
 	if err == nil || !strings.Contains(err.Error(), "循环跳板机") {
 		t.Fatalf("expected cycle error, got: %v", err)
+	}
+}
+
+func startMultiKeySSHServer(t *testing.T, signers []ssh.Signer, user, pass string) (string, int, func()) {
+	t.Helper()
+	scfg := &ssh.ServerConfig{
+		PasswordCallback: func(c ssh.ConnMetadata, p []byte) (*ssh.Permissions, error) {
+			if c.User() == user && string(p) == pass {
+				return nil, nil
+			}
+			return nil, errors.New("invalid password")
+		},
+	}
+	for _, s := range signers {
+		scfg.AddHostKey(s)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(nc net.Conn) {
+				defer nc.Close()
+				sc, chs, reqs, err := ssh.NewServerConn(nc, scfg)
+				if err != nil {
+					return
+				}
+				defer sc.Close()
+				go ssh.DiscardRequests(reqs)
+				for ch := range chs {
+					_ = ch.Reject(ssh.UnknownChannelType, "unsupported")
+				}
+			}(c)
+		}
+	}()
+	addr := ln.Addr().(*net.TCPAddr)
+	return addr.IP.String(), addr.Port, func() { _ = ln.Close() }
+}
+
+func TestTOFUHostKeyAlgorithmsOpenSSHCompat(t *testing.T) {
+	khPath := useTempKnownHosts(t)
+
+	// Generate Ed25519, ECDSA-P256, and RSA-2048 host keys for a multi-key server.
+	edPEM, _, err := sshkey.GenerateKeyPair("ed25519", "ed-host", "")
+	if err != nil {
+		t.Fatalf("gen ed25519: %v", err)
+	}
+	edSigner, err := ssh.ParsePrivateKey([]byte(edPEM))
+	if err != nil {
+		t.Fatalf("parse ed25519: %v", err)
+	}
+	ecPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("gen ecdsa: %v", err)
+	}
+	ecSigner, err := ssh.NewSignerFromKey(ecPriv)
+	if err != nil {
+		t.Fatalf("signer ecdsa: %v", err)
+	}
+	rsaPriv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("gen rsa: %v", err)
+	}
+	rsaSigner, err := ssh.NewSignerFromKey(rsaPriv)
+	if err != nil {
+		t.Fatalf("signer rsa: %v", err)
+	}
+
+	// Unknown host prefers ssh-ed25519 first (matching OpenSSH).
+	unknownAlgos := preferredHostKeyAlgorithms(khPath, "10.0.0.99:22")
+	if len(unknownAlgos) == 0 || unknownAlgos[0] != ssh.KeyAlgoED25519 {
+		t.Fatalf("expected unknown host to prefer %s first, got %v", ssh.KeyAlgoED25519, unknownAlgos)
+	}
+
+	host, port, stop := startMultiKeySSHServer(t, []ssh.Signer{ecSigner, rsaSigner, edSigner}, "u", "p")
+	defer stop()
+	hostToken := fmt.Sprintf("[%s]:%d", host, port)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	cfg := &models.ServerConfig{
+		ID: "mk", Name: "MultiKey", Host: host, Port: port,
+		Username: "u", AuthType: models.AuthPassword, Password: "p", TimeoutSeconds: 5,
+	}
+
+	// 1. Pre-populate known_hosts as OpenSSH would (ssh-ed25519 only).
+	// Without HostKeyAlgorithms fix, x/crypto/ssh would negotiate ECDSA first and falsely reject.
+	if err := os.MkdirAll(filepath.Dir(khPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	edLine := hostToken + " " + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(edSigner.PublicKey()))) + "\n"
+	if err := os.WriteFile(khPath, []byte(edLine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res1, err := DialServer(context.Background(), cfg, &memResolver{})
+	if err != nil {
+		t.Fatalf("expected dial to OpenSSH-recorded ed25519 host to succeed, got: %v", err)
+	}
+	res1.Close()
+
+	// 2. Pre-populate known_hosts with ECDSA only (existing GravitySSH users).
+	ecLine := hostToken + " " + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(ecSigner.PublicKey()))) + "\n"
+	if err := os.WriteFile(khPath, []byte(ecLine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if algos := preferredHostKeyAlgorithms(khPath, addr); len(algos) == 0 || algos[0] != ssh.KeyAlgoECDSA256 {
+		t.Fatalf("expected ECDSA prioritized first, got %v", algos)
+	}
+	res2, err := DialServer(context.Background(), cfg, &memResolver{})
+	if err != nil {
+		t.Fatalf("expected dial to ECDSA-recorded host to succeed, got: %v", err)
+	}
+	res2.Close()
+
+	// 3. Pre-populate known_hosts with ssh-rsa only -> must expand to rsa-sha2-512, rsa-sha2-256, ssh-rsa.
+	rsaLine := hostToken + " " + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(rsaSigner.PublicKey()))) + "\n"
+	if err := os.WriteFile(khPath, []byte(rsaLine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rsaAlgos := preferredHostKeyAlgorithms(khPath, addr)
+	wantPrefix := []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA}
+	if len(rsaAlgos) < 3 || !slices.Equal(rsaAlgos[:3], wantPrefix) {
+		t.Fatalf("expected ssh-rsa expansion %v at head, got %v", wantPrefix, rsaAlgos)
+	}
+	res3, err := DialServer(context.Background(), cfg, &memResolver{})
+	if err != nil {
+		t.Fatalf("expected dial to ssh-rsa-recorded host to succeed, got: %v", err)
+	}
+	res3.Close()
+
+	// 4. Revoked key line must NOT be prioritized over valid fallback.
+	revokedLine := "@revoked " + ecLine
+	if err := os.WriteFile(khPath, []byte(revokedLine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if algos := preferredHostKeyAlgorithms(khPath, addr); len(algos) == 0 || algos[0] != ssh.KeyAlgoED25519 {
+		t.Fatalf("expected revoked key not to override default Ed25519 priority, got %v", algos)
 	}
 }

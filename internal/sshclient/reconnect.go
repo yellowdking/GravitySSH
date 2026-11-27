@@ -18,14 +18,18 @@ var (
 	errProbeInFlight      = errors.New("keepalive probe already in flight")
 )
 
-func (m *Manager) pumpOutput(sessionID string, r io.Reader) {
+func (m *Manager) pumpOutput(sessionID string, r io.Reader, rec *CommandRecorder) {
 	buf := make([]byte, 16*1024)
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
+			chunk := buf[:n]
+			if rec != nil {
+				rec.FeedOutput(chunk)
+			}
 			m.emit("terminal:data", map[string]string{
 				"sessionId": sessionID,
-				"data":      base64.StdEncoding.EncodeToString(buf[:n]),
+				"data":      base64.StdEncoding.EncodeToString(chunk),
 			})
 		}
 		if err != nil {

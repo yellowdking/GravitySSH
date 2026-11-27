@@ -86,7 +86,13 @@ func (m *Manager) SFTPAlignPermissions(sessionID, remotePath string) (string, er
 			}
 			return fmt.Errorf("读取目标属性失败: %w", err)
 		}
+		if targetInfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("不支持对符号链接对齐权限")
+		}
 		isDir := targetInfo.IsDir()
+		if !isDir && !targetInfo.Mode().IsRegular() {
+			return fmt.Errorf("仅支持对普通文件或目录对齐权限")
+		}
 		parentDir := path.Dir(clean)
 		baseName := path.Base(clean)
 
@@ -100,7 +106,14 @@ func (m *Manager) SFTPAlignPermissions(sessionID, remotePath string) (string, er
 
 		counts := make(map[os.FileMode]int)
 		for _, s := range siblings {
-			if s.Name() == baseName || s.Mode()&os.ModeSymlink != 0 || s.IsDir() != isDir {
+			if s.Name() == baseName || s.Mode()&os.ModeSymlink != 0 {
+				continue
+			}
+			if isDir {
+				if !s.IsDir() {
+					continue
+				}
+			} else if !s.Mode().IsRegular() {
 				continue
 			}
 			if perm := s.Mode().Perm(); perm != 0 {

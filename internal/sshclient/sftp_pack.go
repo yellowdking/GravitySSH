@@ -10,13 +10,31 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
-const packedDownloadTimeout = 30 * time.Minute
+var packedDownloadTimeout = 30 * time.Minute
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
 
 // SFTPDownloadPacked streams a remote directory/file via `tar -cf -` over SSH
 // and unpacks directly into localDir without leaving any temporary archive on the server.
@@ -49,24 +67,35 @@ func (m *Manager) SFTPDownloadPacked(sessionID, remotePath, localDir string) (in
 	if err != nil {
 		return 0, fmt.Errorf("创建打包传输会话失败: %w", err)
 	}
-	defer sshSess.Close()
+	abortedSession := false
+	defer func() {
+		if !abortedSession {
+			_ = sshSess.Close()
+		}
+	}()
 
 	stdout, err := sshSess.StdoutPipe()
 	if err != nil {
 		return 0, err
 	}
-	var stderr bytes.Buffer
+	var stderr lockedBuffer
 	sshSess.Stderr = &stderr
 
 	cmd := buildPackedDownloadCommand(parentDir, baseName)
-	if err := sshSess.Start(cmd); err != nil {
-		return 0, fmt.Errorf("启动远程流式打包失败: %w", err)
+	startCh := make(chan error, 1)
+	go func() {
+		startCh <- sshSess.Start(cmd)
+	}()
+	select {
+	case startErr := <-startCh:
+		if startErr != nil {
+			return 0, fmt.Errorf("启动远程流式打包失败: %w", startErr)
+		}
+	case <-dlCtx.Done():
+		abortedSession = true
+		abortSSHSession(sshSess)
+		return 0, fmt.Errorf("启动远程流式打包失败: %w", dlCtx.Err())
 	}
-
-	stopCancel := context.AfterFunc(dlCtx, func() {
-		_ = sshSess.Close()
-	})
-	defer stopCancel()
 
 	transferID := uuid.NewString()
 	m.emitTransfer(models.TransferProgress{
@@ -79,14 +108,48 @@ func (m *Manager) SFTPDownloadPacked(sessionID, remotePath, localDir string) (in
 		Status:     "running",
 	})
 
-	fileCount, unpackErr := unpackTarStream(stdout, localDir)
-	if unpackErr != nil {
-		// Close the SSH session BEFORE Wait so a remote `tar` still writing to a full
-		// SSH window cannot deadlock Wait().
-		_ = sshSess.Close()
+	type unpackResult struct {
+		count int
+		err   error
 	}
-	waitErr := sshSess.Wait()
-	stopCancel()
+	unpackCh := make(chan unpackResult, 1)
+	go func() {
+		n, uErr := unpackTarStream(stdout, localDir)
+		unpackCh <- unpackResult{count: n, err: uErr}
+	}()
+
+	var (
+		fileCount int
+		unpackErr error
+		waitErr   error
+	)
+	select {
+	case res := <-unpackCh:
+		fileCount, unpackErr = res.count, res.err
+	case <-dlCtx.Done():
+		abortedSession = true
+		abortSSHSession(sshSess)
+		unpackErr = dlCtx.Err()
+	}
+
+	if unpackErr != nil {
+		if !abortedSession {
+			abortedSession = true
+			abortSSHSession(sshSess)
+		}
+	} else {
+		waitCh := make(chan error, 1)
+		go func() {
+			waitCh <- sshSess.Wait()
+		}()
+		select {
+		case waitErr = <-waitCh:
+		case <-dlCtx.Done():
+			abortedSession = true
+			abortSSHSession(sshSess)
+			waitErr = dlCtx.Err()
+		}
+	}
 
 	if unpackErr != nil || waitErr != nil {
 		errText := ""

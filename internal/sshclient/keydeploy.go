@@ -1,6 +1,7 @@
 package sshclient
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,7 +10,81 @@ import (
 	"time"
 
 	"github.com/yellowdking/GravitySSH/internal/models"
+	"golang.org/x/crypto/ssh"
 )
+
+var (
+	keyDeployDialTimeout = 20 * time.Second
+	keyDeployExecTimeout = 20 * time.Second
+)
+
+// sanitizeAuthorizedPublicKey strictly validates a single OpenSSH public key without
+// authorized_keys options or control characters, and rebuilds a clean "<type> <base64>" line.
+func sanitizeAuthorizedPublicKey(raw string) (string, error) {
+	if strings.ContainsAny(raw, "\x00\r\n") {
+		return "", errors.New("公钥格式无效：不支持包含空字符或换行符的公钥")
+	}
+	pubKey := strings.TrimSpace(raw)
+	if pubKey == "" {
+		return "", errors.New("所选密钥缺少有效公钥内容")
+	}
+	parsedKey, _, options, rest, err := ssh.ParseAuthorizedKey([]byte(pubKey))
+	if err != nil {
+		return "", fmt.Errorf("公钥格式无效：%w", err)
+	}
+	if len(options) > 0 {
+		return "", errors.New("公钥格式无效：不允许包含 authorized_keys 选项前缀")
+	}
+	if len(bytes.TrimSpace(rest)) > 0 {
+		return "", errors.New("公钥格式无效：仅支持单个标准公钥")
+	}
+	clean := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(parsedKey)))
+	if clean == "" || strings.ContainsAny(clean, "\x00\r\n") {
+		return "", errors.New("公钥格式无效")
+	}
+	return clean, nil
+}
+
+func buildKeyDeployCommand(cleanPubKey string) string {
+	script := `umask 077
+d=~/.ssh
+ak="$d/authorized_keys"
+pub="$1"
+mkdir -p -- "$d" && chmod 700 -- "$d" || exit 1
+lockdir=""
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$d/.authorized_keys.gssh.lock"
+  i=0
+  while ! flock -n 9 2>/dev/null; do
+    [ "$i" -ge 100 ] && { echo "无法获取 authorized_keys 写锁" >&2; exit 1; }
+    if sleep 0.1 2>/dev/null; then i=$((i + 1)); else i=$((i + 10)); fi
+  done
+else
+  lockdir="$d/.authorized_keys.gssh.lockdir"
+  i=0
+  while ! mkdir -- "$lockdir" 2>/dev/null; do
+    [ "$i" -ge 100 ] && { echo "无法获取 authorized_keys 写锁" >&2; exit 1; }
+    if sleep 0.1 2>/dev/null; then i=$((i + 1)); else i=$((i + 10)); fi
+  done
+fi
+tmp="$d/.authorized_keys.gssh.tmp.$$"
+trap 'rm -f -- "$tmp"; [ -n "$lockdir" ] && rmdir -- "$lockdir" 2>/dev/null || true' EXIT INT TERM HUP
+if [ -f "$ak" ] && grep -qxF -- "$pub" "$ak" 2>/dev/null; then
+  chmod 600 -- "$ak"
+  exit 0
+fi
+if [ -f "$ak" ]; then
+  cat -- "$ak" > "$tmp" || exit 1
+  if [ -s "$tmp" ] && [ -n "$(tail -c 1 "$tmp" 2>/dev/null)" ]; then
+    printf '\n' >> "$tmp" || exit 1
+  fi
+else
+  : > "$tmp" || exit 1
+fi
+printf '%s\n' "$pub" >> "$tmp" || exit 1
+chmod 600 -- "$tmp" && mv -f -- "$tmp" "$ak"`
+	return fmt.Sprintf("sh -c %s _ %s", shellQuote(script), shellQuote(cleanPubKey))
+}
 
 // DeploySSHKeyToServers installs the selected key's public key into ~/.ssh/authorized_keys
 // on each target server idempotently, and optionally switches those servers to key auth.
@@ -23,12 +98,9 @@ func (m *Manager) DeploySSHKeyToServers(
 	if err != nil {
 		return nil, err
 	}
-	pubKey := strings.TrimSpace(keyRec.PublicKey)
-	if pubKey == "" {
-		return nil, errors.New("所选密钥缺少有效公钥内容")
-	}
-	if strings.ContainsAny(pubKey, "\r\n") {
-		return nil, errors.New("公钥格式无效：不支持包含换行符的多行公钥")
+	pubKey, err := sanitizeAuthorizedPublicKey(keyRec.PublicKey)
+	if err != nil {
+		return nil, err
 	}
 
 	uniqueIDs := make([]string, 0, len(serverIDs))
@@ -91,23 +163,28 @@ func (m *Manager) deployKeyToOneServer(
 		ServerName: srv.Name,
 	}
 
-	dialCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
-	defer cancel()
-
+	dialTimeout := keyDeployDialTimeout
+	if srv.TimeoutSeconds > 0 {
+		if t := time.Duration(srv.TimeoutSeconds) * time.Second; t > 0 {
+			dialTimeout = t
+		}
+	}
+	dialCtx, cancelDial := context.WithTimeout(ctx, dialTimeout)
 	dialRes, err := DialServer(dialCtx, srv, m.store)
+	cancelDial()
 	if err != nil {
 		res.Message = fmt.Sprintf("连接失败: %v", err)
 		return res
 	}
 	defer dialRes.Close()
 
-	qPub := shellQuote(pubKey)
-	installCmd := fmt.Sprintf(
-		`mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qxF %s ~/.ssh/authorized_keys || { [ ! -s ~/.ssh/authorized_keys ] || [ -z "$(tail -c 1 ~/.ssh/authorized_keys)" ] || printf '\n' >> ~/.ssh/authorized_keys; printf '%%s\n' %s >> ~/.ssh/authorized_keys; })`,
-		qPub, qPub,
-	)
+	execCtx, cancelExec := context.WithTimeout(ctx, keyDeployExecTimeout)
+	defer cancelExec()
+	stopClose := context.AfterFunc(execCtx, dialRes.Close)
+	defer stopClose()
 
-	out, runErr := runSSHExec(dialCtx, dialRes.Client, installCmd, 0, true)
+	installCmd := buildKeyDeployCommand(pubKey)
+	out, runErr := runSSHExec(execCtx, dialRes.Client, installCmd, 0, true)
 	if runErr != nil {
 		res.Message = formatExecError("写入公钥失败", out, runErr, 180).Error()
 		return res

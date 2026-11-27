@@ -22,6 +22,25 @@ import (
 var (
 	knownHostsMu       sync.Mutex
 	knownHostsPathFunc = DefaultKnownHostsPath
+
+	// defaultPreferredHostKeyAlgos matches OpenSSH's preference for modern Ed25519
+	// host keys first while still supporting ECDSA, RSA-SHA2, legacy RSA, and certs.
+	defaultPreferredHostKeyAlgos = []string{
+		ssh.KeyAlgoED25519,
+		ssh.KeyAlgoECDSA256,
+		ssh.KeyAlgoECDSA384,
+		ssh.KeyAlgoECDSA521,
+		ssh.KeyAlgoRSASHA512,
+		ssh.KeyAlgoRSASHA256,
+		ssh.KeyAlgoRSA,
+		ssh.CertAlgoED25519v01,
+		ssh.CertAlgoECDSA256v01,
+		ssh.CertAlgoECDSA384v01,
+		ssh.CertAlgoECDSA521v01,
+		ssh.CertAlgoRSASHA512v01,
+		ssh.CertAlgoRSASHA256v01,
+		ssh.CertAlgoRSAv01,
+	}
 )
 
 func normalizeHostAndPort(host string, port int) (string, int) {
@@ -133,6 +152,142 @@ func hostFieldMatchesTargets(hostField string, targets []string) bool {
 	return matched
 }
 
+func knownHostTargets(hostname string) (targets []string, recordToken, displayHost string, ok bool) {
+	host, port := normalizeHostAndPort(hostname, 0)
+	if host == "" {
+		return nil, "", "", false
+	}
+	if port <= 0 {
+		port = 22
+	}
+	if port == 22 {
+		return []string{host, fmt.Sprintf("[%s]:22", host)}, host, host, true
+	}
+	bracket := fmt.Sprintf("[%s]:%d", host, port)
+	return []string{bracket}, bracket, bracket, true
+}
+
+func expandHostKeyAlgorithms(keyType string) []string {
+	switch keyType {
+	case ssh.KeyAlgoRSA:
+		return []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA}
+	case ssh.CertAlgoRSAv01:
+		return []string{ssh.CertAlgoRSASHA512v01, ssh.CertAlgoRSASHA256v01, ssh.CertAlgoRSAv01}
+	default:
+		if slices.Contains(defaultPreferredHostKeyAlgos, keyType) {
+			return []string{keyType}
+		}
+		return nil
+	}
+}
+
+func defaultPreferredHostKeyAlgorithms(hostname string) []string {
+	return preferredHostKeyAlgorithms(knownHostsPathFunc(), hostname)
+}
+
+// preferredHostKeyAlgorithms reads non-revoked known_hosts entries for hostname
+// and prioritizes their host key algorithms ahead of defaultPreferredHostKeyAlgos
+// so multi-key servers negotiate the key already recorded (e.g. by OpenSSH).
+// Unknown hosts prefer ssh-ed25519 first.
+func preferredHostKeyAlgorithms(khPath, hostname string) []string {
+	fallback := slices.Clone(defaultPreferredHostKeyAlgos)
+	if strings.TrimSpace(khPath) == "" {
+		return fallback
+	}
+	targets, _, _, ok := knownHostTargets(hostname)
+	if !ok {
+		return fallback
+	}
+
+	knownHostsMu.Lock()
+	raw, err := os.ReadFile(khPath)
+	knownHostsMu.Unlock()
+	if err != nil || len(raw) == 0 {
+		return fallback
+	}
+
+	type matchedKey struct {
+		keyType string
+		blob    []byte
+	}
+	var (
+		matched     []matchedKey
+		revokedBlob [][]byte
+	)
+	txt := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	for _, line := range strings.Split(txt, "\n") {
+		s, e, ok := findHostFieldSpan(line)
+		if !ok {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		marker := ""
+		if strings.HasPrefix(trimmed, "@") {
+			if sp := strings.IndexFunc(trimmed, unicode.IsSpace); sp > 0 {
+				marker = trimmed[:sp]
+			}
+		}
+		if marker == "@cert-authority" {
+			continue
+		}
+		if !hostFieldMatchesTargets(line[s:e], targets) {
+			continue
+		}
+		keyPart := strings.TrimSpace(line[e:])
+		if keyPart == "" {
+			continue
+		}
+		parsedKey, _, _, _, parseErr := ssh.ParseAuthorizedKey([]byte(keyPart))
+		if parseErr != nil {
+			continue
+		}
+		blob := parsedKey.Marshal()
+		if marker == "@revoked" {
+			revokedBlob = append(revokedBlob, blob)
+			continue
+		}
+		matched = append(matched, matchedKey{keyType: parsedKey.Type(), blob: blob})
+	}
+
+	if len(matched) == 0 {
+		return fallback
+	}
+
+	isRevoked := func(blob []byte) bool {
+		for _, r := range revokedBlob {
+			if bytes.Equal(r, blob) {
+				return true
+			}
+		}
+		return false
+	}
+
+	prioritized := make([]string, 0, len(defaultPreferredHostKeyAlgos))
+	seen := make(map[string]bool, len(defaultPreferredHostKeyAlgos))
+	addAlgo := func(algo string) {
+		if algo != "" && !seen[algo] {
+			seen[algo] = true
+			prioritized = append(prioritized, algo)
+		}
+	}
+
+	for _, mk := range matched {
+		if isRevoked(mk.blob) {
+			continue
+		}
+		for _, algo := range expandHostKeyAlgorithms(mk.keyType) {
+			addAlgo(algo)
+		}
+	}
+	if len(prioritized) == 0 {
+		return fallback
+	}
+	for _, algo := range defaultPreferredHostKeyAlgos {
+		addAlgo(algo)
+	}
+	return prioritized
+}
+
 func defaultTOFUHostKeyCallback() ssh.HostKeyCallback {
 	return tofuHostKeyCallback(knownHostsPathFunc())
 }
@@ -149,28 +304,9 @@ func tofuHostKeyCallback(khPath string) ssh.HostKeyCallback {
 			return errors.New("无法确定 known_hosts 路径，拒绝建立未校验的 SSH 连接")
 		}
 
-		host, port := normalizeHostAndPort(hostname, 0)
-		if host == "" {
+		targets, recordToken, displayHost, ok := knownHostTargets(hostname)
+		if !ok {
 			return fmt.Errorf("无效的目标主机地址: %s", hostname)
-		}
-		if port <= 0 {
-			port = 22
-		}
-
-		var (
-			targets     []string
-			recordToken string
-			displayHost string
-		)
-		if port == 22 {
-			targets = []string{host, fmt.Sprintf("[%s]:22", host)}
-			recordToken = host
-			displayHost = host
-		} else {
-			bracket := fmt.Sprintf("[%s]:%d", host, port)
-			targets = []string{bracket}
-			recordToken = bracket
-			displayHost = bracket
 		}
 
 		knownHostsMu.Lock()

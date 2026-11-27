@@ -17,9 +17,10 @@ import (
 )
 
 type memRWNode struct {
-	name string
-	mode os.FileMode
-	data []byte
+	name   string
+	mode   os.FileMode
+	data   []byte
+	target string // non-empty when symlink
 }
 
 func (n *memRWNode) Name() string       { return n.name }
@@ -30,11 +31,13 @@ func (n *memRWNode) IsDir() bool        { return n.mode.IsDir() }
 func (n *memRWNode) Sys() any           { return nil }
 
 type memRWFS struct {
-	mu           sync.Mutex
-	nodes        map[string]*memRWNode
-	reportZeroSz bool
-	failRename   bool
-	failMidRead  bool
+	mu               sync.Mutex
+	nodes            map[string]*memRWNode
+	reportZeroSz     bool
+	failRename       bool
+	failMidRead      bool
+	failMidWrite     bool
+	resolveRealPath  bool
 }
 
 type memWriterAt struct {
@@ -45,10 +48,17 @@ type memWriterAt struct {
 func (w *memWriterAt) WriteAt(p []byte, off int64) (int, error) {
 	w.fs.mu.Lock()
 	defer w.fs.mu.Unlock()
-	n, ok := w.fs.nodes[w.path]
+	if w.fs.failMidWrite && off+int64(len(p)) > 16 {
+		return 0, errors.New("simulated disk full write error")
+	}
+	targetPath := w.path
+	if n, ok := w.fs.nodes[targetPath]; ok && n.mode&os.ModeSymlink != 0 && n.target != "" {
+		targetPath = n.target
+	}
+	n, ok := w.fs.nodes[targetPath]
 	if !ok {
-		n = &memRWNode{name: path.Base(w.path), mode: 0o644}
-		w.fs.nodes[w.path] = n
+		n = &memRWNode{name: path.Base(targetPath), mode: 0o644}
+		w.fs.nodes[targetPath] = n
 	}
 	end := int(off) + len(p)
 	if end > len(n.data) {
@@ -67,6 +77,12 @@ func (f *memRWFS) Fileread(r *sftp.Request) (io.ReaderAt, error) {
 	if !ok {
 		return nil, os.ErrNotExist
 	}
+	if n.mode&os.ModeSymlink != 0 && n.target != "" {
+		n, ok = f.nodes[n.target]
+		if !ok {
+			return nil, os.ErrNotExist
+		}
+	}
 	cp := append([]byte(nil), n.data...)
 	if f.failMidRead {
 		return &failingReaderAt{data: cp}, nil
@@ -78,8 +94,30 @@ func (f *memRWFS) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p := path.Clean(r.Filepath)
+	if existing, ok := f.nodes[p]; ok && existing.mode&os.ModeSymlink != 0 && existing.target != "" {
+		// Opening a symlink for writing follows the symlink on POSIX.
+		tgt := existing.target
+		prevMode := os.FileMode(0o644)
+		if tn, tok := f.nodes[tgt]; tok {
+			prevMode = tn.mode
+		}
+		f.nodes[tgt] = &memRWNode{name: path.Base(tgt), mode: prevMode}
+		return &memWriterAt{fs: f, path: tgt}, nil
+	}
 	f.nodes[p] = &memRWNode{name: path.Base(p), mode: 0o644}
 	return &memWriterAt{fs: f, path: p}, nil
+}
+
+func (f *memRWFS) RealPath(p string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	clean := path.Clean(p)
+	if f.resolveRealPath {
+		if n, ok := f.nodes[clean]; ok && n.mode&os.ModeSymlink != 0 && n.target != "" {
+			return n.target, nil
+		}
+	}
+	return clean, nil
 }
 
 func (f *memRWFS) Filecmd(r *sftp.Request) error {
@@ -135,6 +173,12 @@ func (f *memRWFS) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 		return nil, os.ErrNotExist
 	}
 	if r.Method == "Stat" {
+		if n.mode&os.ModeSymlink != 0 && n.target != "" {
+			n, ok = f.nodes[n.target]
+			if !ok {
+				return nil, os.ErrNotExist
+			}
+		}
 		var fi os.FileInfo = n
 		if f.reportZeroSz && !n.IsDir() {
 			fi = zeroSizeFileInfo{n}
@@ -302,5 +346,137 @@ func TestSFTPDownloadCleanupOnErrorAndOpenFileEvent(t *testing.T) {
 	}
 	if _, statErr := os.Stat(partialPath); !os.IsNotExist(statErr) {
 		t.Fatalf("expected truncated file %q to be removed on failure, statErr=%v", partialPath, statErr)
+	}
+}
+
+func TestSFTPUploadAtomicPreservesExistingAndInvalidatesCacheOnError(t *testing.T) {
+	fs := &memRWFS{
+		nodes: map[string]*memRWNode{
+			"/":             {name: "/", mode: os.ModeDir | 0o755},
+			"/dir":          {name: "dir", mode: os.ModeDir | 0o755},
+			"/dir/app.conf": {name: "app.conf", mode: 0o600, data: []byte("original-good-data")},
+		},
+		failMidWrite: true,
+	}
+	cli := newPipeConcurrentSFTPClient(t, fs)
+	sink := &captureSink{}
+	m := NewManager(nil, sink)
+	sess := &sessionState{
+		sftpClient: cli,
+		stopCh:     make(chan struct{}),
+		dirCache:   map[string]dirCacheEntry{"/dir": {fetchedAt: time.Now()}},
+	}
+	m.sessions["s1"] = sess
+
+	localFile := filepath.Join(t.TempDir(), "app.conf")
+	if err := os.WriteFile(localFile, bytes.Repeat([]byte("NEW-DATA-"), 1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.SFTPUpload("s1", localFile, "/dir"); err == nil {
+		t.Fatal("expected mid-upload write error")
+	}
+
+	fs.mu.Lock()
+	orig := string(fs.nodes["/dir/app.conf"].data)
+	leftoverTmp := ""
+	for k := range fs.nodes {
+		if strings.Contains(k, ".gssh-tmp-") {
+			leftoverTmp = k
+		}
+	}
+	fs.mu.Unlock()
+
+	if orig != "original-good-data" {
+		t.Fatalf("expected existing target preserved on failed atomic upload, got %q", orig)
+	}
+	if leftoverTmp != "" {
+		t.Fatalf("expected failed upload temp file cleaned up, found %q", leftoverTmp)
+	}
+	sess.mu.Lock()
+	_, stillCached := sess.dirCache["/dir"]
+	sess.mu.Unlock()
+	if stillCached {
+		t.Fatal("expected dirCache for /dir to be invalidated even on upload error")
+	}
+
+	// Verify rename-failure fallback works cleanly without leaving temp files.
+	fs.failMidWrite = false
+	fs.failRename = true
+	if err := m.SFTPUpload("s1", localFile, "/dir"); err != nil {
+		t.Fatalf("expected in-place fallback upload to succeed when rename fails: %v", err)
+	}
+	fs.mu.Lock()
+	gotFallback := string(fs.nodes["/dir/app.conf"].data)
+	for k := range fs.nodes {
+		if strings.Contains(k, ".gssh-tmp-") {
+			t.Fatalf("leftover temp file after rename fallback: %q", k)
+		}
+	}
+	fs.mu.Unlock()
+	if !strings.HasPrefix(gotFallback, "NEW-DATA-") {
+		t.Fatalf("unexpected fallback upload data: %q", gotFallback[:min(len(gotFallback), 32)])
+	}
+}
+
+func TestSFTPWriteTextFilePreservesSymlink(t *testing.T) {
+	fs := &memRWFS{
+		nodes: map[string]*memRWNode{
+			"/":                       {name: "/", mode: os.ModeDir | 0o755},
+			"/sites-available":        {name: "sites-available", mode: os.ModeDir | 0o755},
+			"/sites-enabled":          {name: "sites-enabled", mode: os.ModeDir | 0o755},
+			"/sites-available/site":   {name: "site", mode: 0o640, data: []byte("old-v1\n")},
+			"/sites-enabled/site":     {name: "site", mode: os.ModeSymlink | 0o777, target: "/sites-available/site"},
+		},
+		resolveRealPath: true,
+	}
+	cli := newPipeConcurrentSFTPClient(t, fs)
+	m := NewManager(nil, nil)
+	sess := &sessionState{
+		sftpClient: cli,
+		stopCh:     make(chan struct{}),
+		dirCache: map[string]dirCacheEntry{
+			"/sites-enabled":   {fetchedAt: time.Now()},
+			"/sites-available": {fetchedAt: time.Now()},
+		},
+	}
+	m.sessions["s1"] = sess
+
+	// 1. Server resolves RealPath -> atomically updates target and keeps symlink intact.
+	if err := m.SFTPWriteTextFile("s1", "/sites-enabled/site", "new-v2\n"); err != nil {
+		t.Fatalf("SFTPWriteTextFile via symlink failed: %v", err)
+	}
+	fs.mu.Lock()
+	linkNode := fs.nodes["/sites-enabled/site"]
+	targetNode := fs.nodes["/sites-available/site"]
+	fs.mu.Unlock()
+	if linkNode == nil || linkNode.mode&os.ModeSymlink == 0 {
+		t.Fatalf("expected symlink to be preserved, got %+v", linkNode)
+	}
+	if targetNode == nil || string(targetNode.data) != "new-v2\n" || targetNode.mode.Perm() != 0o640 {
+		t.Fatalf("expected symlink target updated with mode 0640, got %+v", targetNode)
+	}
+	sess.mu.Lock()
+	_, cachedEnabled := sess.dirCache["/sites-enabled"]
+	_, cachedAvail := sess.dirCache["/sites-available"]
+	sess.mu.Unlock()
+	if cachedEnabled || cachedAvail {
+		t.Fatal("expected both symlink dir and target dir caches to be invalidated")
+	}
+
+	// 2. Server does NOT resolve RealPath -> must NOT rename over symlink; writes in-place through link.
+	fs.resolveRealPath = false
+	if err := m.SFTPWriteTextFile("s1", "/sites-enabled/site", "new-v3\n"); err != nil {
+		t.Fatalf("SFTPWriteTextFile via unresolved symlink failed: %v", err)
+	}
+	fs.mu.Lock()
+	linkNode2 := fs.nodes["/sites-enabled/site"]
+	targetNode2 := fs.nodes["/sites-available/site"]
+	fs.mu.Unlock()
+	if linkNode2 == nil || linkNode2.mode&os.ModeSymlink == 0 {
+		t.Fatalf("expected symlink to remain a symlink when RealPath returns unchanged path, got %+v", linkNode2)
+	}
+	if targetNode2 == nil || string(targetNode2.data) != "new-v3\n" {
+		t.Fatalf("expected in-place write to follow symlink to target, got %+v", targetNode2)
 	}
 }

@@ -80,3 +80,71 @@ func TestCommandRecorderCapsBufferAt8KB(t *testing.T) {
 		t.Fatalf("expected emitted command capped at %d, got %d", maxRecorderBufRunes, len(emitted))
 	}
 }
+
+func TestCommandRecorderSuppressesLeadingSpaceSecretsAndAltScreen(t *testing.T) {
+	var recorded []string
+	rec := NewCommandRecorder(func(cmd string) {
+		recorded = append(recorded, cmd)
+	})
+
+	// 1. HISTCONTROL=ignorespace: leading space or tab is ignored before TrimSpace.
+	rec.Feed([]byte(" export API_TOKEN=secret"))
+	if got := rec.CurrentLine(); got != "" {
+		t.Fatalf("expected CurrentLine empty for leading-space command, got %q", got)
+	}
+	rec.Feed([]byte("\r"))
+	rec.Feed([]byte("\tmysql -u root -pSecret\n"))
+	// Trailing spaces without leading space are still recorded normally.
+	rec.Feed([]byte("ls -la   \r"))
+
+	// 2. Interactive sudo password prompt (including pwfeedback stars).
+	rec.FeedOutput([]byte("alice@host:~$ sudo systemctl restart nginx\r\n[sudo] password for alice: "))
+	rec.Feed([]byte("MyS3cr3t"))
+	if got := rec.CurrentLine(); got != "" {
+		t.Fatalf("expected CurrentLine suppressed at password prompt, got %q", got)
+	}
+	rec.FeedOutput([]byte("********")) // sudo Defaults pwfeedback
+	rec.Feed([]byte("\r"))
+	rec.FeedOutput([]byte("\r\nalice@host:~$ "))
+	rec.Feed([]byte("whoami\r"))
+
+	// 3. ANSI-colored passphrase prompt, split chunks, Chinese password prompt, and OTP prompt.
+	rec.FeedOutput([]byte("\x1b[1;33mEnter passphrase for key '/root/.ssh/id_ed25519':\x1b[0m "))
+	rec.Feed([]byte("key-passphrase-123\r"))
+
+	rec.FeedOutput([]byte("\r\n[sudo] alice 的"))
+	rec.FeedOutput([]byte("密码："))
+	rec.Feed([]byte("chinese-pw\r"))
+
+	rec.FeedOutput([]byte("\r\nVerification code: "))
+	rec.Feed([]byte("123456\r"))
+
+	rec.FeedOutput([]byte("\r\nEnter OTP: "))
+	rec.Feed([]byte("654321\r"))
+
+	// 4. Normal command after prompts resumes recording cleanly.
+	rec.FeedOutput([]byte("\r\nalice@host:~$ "))
+	rec.Feed([]byte("uptime\r"))
+
+	// 5. Alternate screen (vim / less / htop) suppresses input & does not leak keys on exit.
+	rec.FeedOutput([]byte("\x1b[?104"))
+	rec.FeedOutput([]byte("9h"))
+	rec.Feed([]byte(":set paste\r"))
+	rec.Feed([]byte("q")) // e.g. quitting less/htop without Enter
+	if got := rec.CurrentLine(); got != "" {
+		t.Fatalf("expected CurrentLine empty in alt-screen, got %q", got)
+	}
+	rec.FeedOutput([]byte("\x1b[?1049;2004l"))
+	rec.Feed([]byte("df -h\r"))
+
+	// Legacy ?47h / ?47l alt-screen
+	rec.FeedOutput([]byte("\x1b[?47h"))
+	rec.Feed([]byte("hidden-in-47\r"))
+	rec.FeedOutput([]byte("\x1b[?47l"))
+	rec.Feed([]byte("pwd\r"))
+
+	want := []string{"ls -la", "whoami", "uptime", "df -h", "pwd"}
+	if !reflect.DeepEqual(recorded, want) {
+		t.Fatalf("recorded mismatch:\ngot:  %#v\nwant: %#v", recorded, want)
+	}
+}

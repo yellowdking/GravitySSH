@@ -39,6 +39,9 @@ func (m *Manager) finishTransfer(
 		if isSFTPConnError(finalErr) {
 			m.invalidateSFTP(sessionID, usedSC)
 		}
+		if invalidateDir != "" {
+			m.invalidateDirCache(sessionID, invalidateDir)
+		}
 		return m.emitTransferError(tracker.snapshot(), finalErr)
 	}
 
@@ -52,7 +55,8 @@ func (m *Manager) finishTransfer(
 	return nil
 }
 
-// SFTPUpload streams a local file directly to remoteDir (rebuilding a stale SFTP client on open error).
+// SFTPUpload streams a local file to remoteDir atomically via a hidden temp file + rename
+// (cleaning up the temp file on failure and falling back to in-place only if temp creation/rename fails).
 func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
 	src, err := os.Open(localPath)
 	if err != nil {
@@ -71,6 +75,7 @@ func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
 	fileName := filepath.Base(localPath)
 	cleanDir := path.Clean(remoteDir)
 	remotePath := path.Join(cleanDir, fileName)
+	tmpPath := path.Join(cleanDir, fmt.Sprintf(".%s.gssh-tmp-%s", fileName, uuid.NewString()[:8]))
 	prog := models.TransferProgress{
 		TransferID: uuid.NewString(),
 		SessionID:  sessionID,
@@ -83,29 +88,90 @@ func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
 	}
 
 	var (
-		dst    *sftp.File
-		usedSC *sftp.Client
+		dst          *sftp.File
+		usedSC       *sftp.Client
+		usingTemp    bool
+		existingMode os.FileMode
 	)
 	err = m.withSFTP(sessionID, func(sc *sftp.Client) error {
-		f, oErr := sc.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+		if existingSt, statErr := sc.Lstat(remotePath); statErr == nil && existingSt.Mode().IsRegular() {
+			existingMode = existingSt.Mode().Perm()
+		}
+		f, oErr := sc.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 		if oErr != nil {
-			return oErr
+			if isSFTPConnError(oErr) {
+				return oErr
+			}
+			// Fallback to in-place open when hidden temp file creation is disallowed.
+			f2, oErr2 := sc.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+			if oErr2 != nil {
+				return oErr2
+			}
+			dst = f2
+			usedSC = sc
+			usingTemp = false
+			return nil
 		}
 		dst = f
 		usedSC = sc
+		usingTemp = true
 		return nil
 	})
 	if err != nil {
+		m.invalidateDirCache(sessionID, cleanDir)
 		return m.emitTransferError(prog, fmt.Errorf("创建远程文件失败: %w", err))
 	}
 
 	tracker := newProgressTracker(m, &prog, m.SessionStopCh(sessionID))
 	tracker.emitInitial()
-	// Wrap src as plain io.Reader (not io.WriterTo) so io.Copy invokes dst.(*sftp.File).ReadFrom
-	// and engages pkg/sftp pipelined concurrent writes.
-	_, cpErr := io.Copy(dst, &progressReader{r: src, tracker: tracker})
+	// Use ReadFromWithConcurrency so every chunk's server write status (including the
+	// final <32KB packet, which pkg/sftp's sequential ReadFrom swallows on ErrUnexpectedEOF)
+	// is strictly verified before renaming the temp file into place.
+	conc := uploadConcurrency(st.Size())
+	_, cpErr := dst.ReadFromWithConcurrency(&progressReader{r: src, tracker: tracker}, conc)
 	closeErr := dst.Close()
-	return m.finishTransfer(sessionID, usedSC, tracker, cpErr, closeErr, cleanDir)
+	if cpErr != nil || closeErr != nil {
+		if usingTemp && usedSC != nil {
+			_ = usedSC.Remove(tmpPath)
+		}
+		return m.finishTransfer(sessionID, usedSC, tracker, cpErr, closeErr, cleanDir)
+	}
+
+	if usingTemp && usedSC != nil {
+		if existingMode != 0 {
+			_ = usedSC.Chmod(tmpPath, existingMode)
+		}
+		if rErr := renameRemote(usedSC, tmpPath, remotePath, true); rErr != nil {
+			_ = usedSC.Remove(tmpPath)
+			if isSFTPConnError(rErr) {
+				return m.finishTransfer(sessionID, usedSC, tracker, rErr, nil, cleanDir)
+			}
+			// Fallback to in-place upload if server disallows rename over existing target.
+			if _, seekErr := src.Seek(0, io.SeekStart); seekErr == nil {
+				if dst2, oErr2 := usedSC.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC); oErr2 == nil {
+					tracker.reset()
+					_, cpErr2 := dst2.ReadFromWithConcurrency(&progressReader{r: src, tracker: tracker}, conc)
+					closeErr2 := dst2.Close()
+					return m.finishTransfer(sessionID, usedSC, tracker, cpErr2, closeErr2, cleanDir)
+				}
+			}
+			return m.finishTransfer(sessionID, usedSC, tracker, rErr, nil, cleanDir)
+		}
+	}
+
+	return m.finishTransfer(sessionID, usedSC, tracker, nil, nil, cleanDir)
+}
+
+func uploadConcurrency(size int64) int {
+	const chunk = 32 * 1024
+	if size <= chunk {
+		return 1
+	}
+	n := int(size/chunk) + 1
+	if n > sftpMaxConcurrentRequestsPerFile {
+		return sftpMaxConcurrentRequestsPerFile
+	}
+	return n
 }
 
 // SFTPDownload streams a remote file directly to localPath (rebuilding a stale SFTP client on open error).
@@ -247,6 +313,14 @@ func (p *progressTracker) add(n int64) {
 	if shouldEmit {
 		p.m.emitTransfer(snap)
 	}
+}
+
+func (p *progressTracker) reset() {
+	p.mu.Lock()
+	p.prog.Transferred = 0
+	p.prog.Percent = 0
+	p.lastPercent = 0
+	p.mu.Unlock()
 }
 
 func (p *progressTracker) snapshot() models.TransferProgress {
