@@ -321,3 +321,160 @@ func TestVaultSyncMergeDoesNotLeakProxyOrJumpSecretsOnMismatchAndOverwriteSaniti
 		t.Fatalf("expected 5 missing presets added and 1 (tpl-bbr) skipped, got added=%d skipped=%d", res.Added, res.Skipped)
 	}
 }
+
+func TestSaveServerMultiHopJumpCycleAndPortNormalization(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "vault.gsv"), nil)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	a, err := store.SaveServer(models.ServerSaveRequest{
+		Name: "A", Host: "10.0.0.1", Username: "root",
+		Proxy:            models.ProxySaveReq{Type: "SOCKS5", Host: "127.0.0.1", Port: 0},
+		JumpHost:         models.JumpSaveReq{Mode: "CUSTOM", Host: "10.0.0.254", Port: 99999, Username: "jmp", AuthType: "PASSWORD"},
+		KeepAliveSeconds: 0,
+	})
+	if err != nil {
+		t.Fatalf("SaveServer A failed: %v", err)
+	}
+	if a.Proxy.Type != models.ProxySOCKS5 || a.Proxy.Port != 1080 {
+		t.Fatalf("expected normalized socks5 port 1080, got %+v", a.Proxy)
+	}
+	if a.JumpHost.Mode != models.JumpCustom || a.JumpHost.Port != 22 || a.JumpHost.AuthType != models.AuthPassword {
+		t.Fatalf("expected normalized custom jump port 22 and authType password, got %+v", a.JumpHost)
+	}
+	if a.KeepAliveSeconds != 0 {
+		t.Fatalf("expected KeepAliveSeconds=0 preserved, got %d", a.KeepAliveSeconds)
+	}
+
+	b, err := store.SaveServer(models.ServerSaveRequest{
+		Name: "B", Host: "10.0.0.2", Username: "root",
+		JumpHost: models.JumpSaveReq{Mode: models.JumpServer, ServerID: a.ID},
+	})
+	if err != nil {
+		t.Fatalf("SaveServer B->A failed: %v", err)
+	}
+	c, err := store.SaveServer(models.ServerSaveRequest{
+		Name: "C", Host: "10.0.0.3", Username: "root",
+		JumpHost: models.JumpSaveReq{Mode: models.JumpServer, ServerID: b.ID},
+	})
+	if err != nil {
+		t.Fatalf("SaveServer C->B failed: %v", err)
+	}
+
+	// Updating A to jump through C creates a 3-hop cycle A->C->B->A and MUST be rejected.
+	if _, err := store.SaveServer(models.ServerSaveRequest{
+		ID: a.ID, Name: "A", Host: "10.0.0.1", Username: "root",
+		JumpHost: models.JumpSaveReq{Mode: models.JumpServer, ServerID: c.ID},
+	}); err == nil {
+		t.Fatal("expected 3-hop jump cycle A->C->B->A to be rejected")
+	}
+}
+
+func TestVaultSyncSanitizesKeysJumpCyclesAndKeepAliveZero(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "vault.gsv"), nil)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	pem1, _, err := sshkey.GenerateKeyPair("ed25519", "local@pc", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localKey, err := store.ImportSSHKey("LocalKey", pem1, "", "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, evilInfo, err := sshkey.GenerateKeyPair("ed25519", "evil@pc", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Merge:
+	// 1) Metadata-only update with different PublicKey MUST NOT overwrite localKey.PublicKey while keeping local PrivateKeyPEM.
+	// 2) Invalid PEM key and blank key MUST be rejected.
+	// 3) Imported 2-hop jump cycle (R1->R2->R1) and self-loop (R3->R3) MUST be broken cleanly.
+	// 4) Android keepAliveSeconds=0 MUST be preserved (not overwritten to 30), negative clamped to default.
+	bundle := models.SyncBundle{
+		SchemaVersion: 1, SourcePlatform: "android", SourceDevice: "Pixel",
+		SSHKeys: []models.SSHKeyRecord{
+			{ID: localKey.ID, Name: "LocalKey-Renamed", PublicKey: evilInfo.PublicKey, Comment: "safe\x00\ncmt"},
+			{ID: "bad-pem", Name: "Corrupt", PrivateKeyPEM: "NOT-A-KEY", PublicKey: evilInfo.PublicKey},
+			{ID: "  ", Name: "Blank"},
+		},
+		Servers: []models.ServerConfig{
+			{
+				ID: " r1 ", Name: "R1", Host: "10.2.0.1", Port: 0, Username: "ops", AuthType: "PASSWORD",
+				KeepAliveSeconds: 0,
+				Proxy:            models.ProxyConfig{Type: "HTTP", Host: "proxy.local", Port: -1},
+				JumpHost:         models.JumpHostConfig{Mode: "SERVER", ServerID: "r2"},
+			},
+			{
+				ID: "r2", Name: "R2", Host: "10.2.0.2", Port: 22, Username: "ops",
+				KeepAliveSeconds: -5,
+				JumpHost:         models.JumpHostConfig{Mode: models.JumpServer, ServerID: "r1"},
+			},
+			{
+				ID: "r3", Name: "R3", Host: "10.2.0.3", Port: 22, Username: "ops",
+				JumpHost: models.JumpHostConfig{Mode: models.JumpServer, ServerID: "r3"},
+			},
+		},
+	}
+
+	sum, err := store.ImportSyncBundle(bundle, "merge")
+	if err != nil {
+		t.Fatalf("ImportSyncBundle merge failed: %v", err)
+	}
+	if sum.KeysAdded != 0 || sum.KeysUpdated != 1 {
+		t.Fatalf("expected only 1 key updated and invalid/blank keys dropped, got %+v", sum)
+	}
+	gotKey, err := store.GetSSHKeyInternal(localKey.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotKey.PublicKey != localKey.PublicKey || gotKey.Fingerprint != localKey.Fingerprint {
+		t.Fatalf("incoming metadata overwrote local public key/fingerprint: got=%+v want=%+v", gotKey, localKey)
+	}
+	if gotKey.Comment != "safecmt" {
+		t.Fatalf("expected sanitized comment 'safecmt', got %q", gotKey.Comment)
+	}
+
+	r1, err := store.GetServerInternal("r1")
+	if err != nil {
+		t.Fatalf("expected trimmed ID 'r1' to exist: %v", err)
+	}
+	if r1.Port != 22 || r1.AuthType != models.AuthPassword || r1.Proxy.Type != models.ProxyHTTP || r1.Proxy.Port != 8080 {
+		t.Fatalf("unexpected r1 normalization: %+v", r1)
+	}
+	if r1.KeepAliveSeconds != 0 {
+		t.Fatalf("expected Android keepAliveSeconds=0 preserved on import, got %d", r1.KeepAliveSeconds)
+	}
+	r2, _ := store.GetServerInternal("r2")
+	if r2.KeepAliveSeconds <= 0 {
+		t.Fatalf("expected negative keepAliveSeconds normalized to positive default, got %d", r2.KeepAliveSeconds)
+	}
+	if r1.JumpHost.Mode == models.JumpServer && r2.JumpHost.Mode == models.JumpServer &&
+		r1.JumpHost.ServerID == "r2" && r2.JumpHost.ServerID == "r1" {
+		t.Fatal("expected 2-hop jump cycle r1<->r2 to be broken on merge")
+	}
+	r3, _ := store.GetServerInternal("r3")
+	if r3.JumpHost.Mode != models.JumpNone || r3.JumpHost.ServerID != "" {
+		t.Fatalf("expected self-referencing jump r3->r3 cleared, got %+v", r3.JumpHost)
+	}
+
+	// Overwrite mode must also reject invalid keys and break jump cycles.
+	owSum, err := store.ImportSyncBundle(bundle, "overwrite")
+	if err != nil {
+		t.Fatalf("ImportSyncBundle overwrite failed: %v", err)
+	}
+	if owSum.KeysAdded != 0 || len(store.ListSSHKeys()) != 0 {
+		t.Fatalf("expected overwrite to reject private-key-less/invalid/blank keys, got %+v", owSum)
+	}
+	owR1, _ := store.GetServerInternal("r1")
+	owR2, _ := store.GetServerInternal("r2")
+	if owR1.JumpHost.Mode == models.JumpServer && owR2.JumpHost.Mode == models.JumpServer {
+		t.Fatal("expected 2-hop jump cycle broken in overwrite mode")
+	}
+}

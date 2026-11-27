@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Deterministically fetches and verifies Smiley Sans (v2.0.1, SIL OFL 1.1) WOFF2 font."""
+"""Optional helper to deterministically fetch and verify Smiley Sans (v2.0.1, SIL OFL 1.1) WOFF2.
+
+Note: GravitySSH's default Windows UI uses native system fonts (Segoe UI Variable / Microsoft YaHei)
+and does not require running this script during normal development or release builds.
+"""
 import hashlib
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -40,6 +45,9 @@ def is_valid(path: str, expected_sha256: str) -> bool:
 
 
 def download(url: str, dest: str) -> None:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"Refusing non-HTTPS URL: {url}")
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "GravitySSH-FontFetcher/1.0"})
         with urllib.request.urlopen(req, timeout=60) as resp, open(dest, "wb") as out:
@@ -49,7 +57,7 @@ def download(url: str, dest: str) -> None:
         curl = shutil.which("curl.exe") or shutil.which("curl")
         if not curl:
             raise RuntimeError(f"Failed to download {url}: {exc}") from exc
-        cmd = [curl, "-fsSL"]
+        cmd = [curl, "-fsSL", "--proto", "=https", "--max-time", "60"]
         if os.name == "nt":
             cmd.append("--ssl-no-revoke")
         cmd.extend(["-o", dest, url])
@@ -57,10 +65,22 @@ def download(url: str, dest: str) -> None:
 
 
 def atomic_write(dest: str, data: bytes) -> None:
-    tmp = dest + ".tmp"
-    with open(tmp, "wb") as f:
-        f.write(data)
-    os.replace(tmp, dest)
+    parent = os.path.dirname(os.path.abspath(dest))
+    os.makedirs(parent, exist_ok=True)
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=parent, prefix=".fetch-font-", suffix=".tmp", delete=False) as tf:
+            tmp_path = tf.name
+            tf.write(data)
+            tf.flush()
+        os.replace(tmp_path, dest)
+        tmp_path = None
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def fetch_font(fonts_dir: str) -> None:
