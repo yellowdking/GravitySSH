@@ -18,6 +18,7 @@ export function useAutocomplete({ enabled, serverId, sessionId, inputLineRef, on
   const applyingRef = useRef(false)
   const focusRef = useRef(onFocusTerminal); focusRef.current = onFocusTerminal
   const [suggestions, setSuggestions] = useState<CompletionItem[]>([])
+  const [queryLine, setQueryLine] = useState('')
   const [selectedIdx, setSelectedIdx] = useState(0)
 
   const suggestionsRef = useRef(suggestions); suggestionsRef.current = suggestions
@@ -37,6 +38,7 @@ export function useAutocomplete({ enabled, serverId, sessionId, inputLineRef, on
     }
     suggestionsRef.current = []
     setSuggestions([])
+    setQueryLine('')
   }, [cancelDebounce, inputLineRef])
 
   const requestSuggestions = useCallback((line: string, immediate = false) => {
@@ -46,6 +48,7 @@ export function useAutocomplete({ enabled, serverId, sessionId, inputLineRef, on
       dismissedLineRef.current = null
       suggestionsRef.current = []
       setSuggestions([])
+      setQueryLine('')
       return
     }
     if (!immediate && dismissedLineRef.current === line) return
@@ -59,12 +62,14 @@ export function useAutocomplete({ enabled, serverId, sessionId, inputLineRef, on
           const next = (list || []).slice(0, 5)
           suggestionsRef.current = next
           setSuggestions(next)
+          setQueryLine(next.length > 0 ? line : '')
           setSelectedIdx(0)
         }
       } catch {
         if (seq === reqSeqRef.current) {
           suggestionsRef.current = []
           setSuggestions([])
+          setQueryLine('')
         }
       }
     }
@@ -120,7 +125,7 @@ export function useAutocomplete({ enabled, serverId, sessionId, inputLineRef, on
   }, [applySuggestion])
 
   return {
-    suggestions, selectedIdx, setSelectedIdx, suggestionsRef, selectedIdxRef,
+    suggestions, queryLine, selectedIdx, setSelectedIdx, suggestionsRef, selectedIdxRef,
     requestSuggestions, clearSuggestions, moveSelection, applySuggestion, applySelected,
   }
 }

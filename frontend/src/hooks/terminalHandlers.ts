@@ -5,8 +5,13 @@ import { SearchAddon } from '@xterm/addon-search'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import type { AppSettings, CompletionItem } from '../types'
 import { api } from '../wailsApi'
-import { copyToClipboard, readFromClipboard } from '../utils/errors'
+import { copyToClipboard, isAllowedExternalUrl, readFromClipboard } from '../utils/errors'
 import { ANTIGRAVITY_TERM_THEME, DEFAULT_TERMINAL_FONT } from '../components/terminalTheme'
+
+function openTerminalExternalUrl(uri: string) {
+  if (!isAllowedExternalUrl(uri)) return
+  void api.openExternalURL(uri).catch(() => {})
+}
 
 export function createConfiguredTerminal(el: HTMLDivElement, settings: AppSettings) {
   const term = new Terminal({
@@ -25,12 +30,17 @@ export function createConfiguredTerminal(el: HTMLDivElement, settings: AppSettin
     scrollSensitivity: 0.34,
     scrollback: 8000,
     allowProposedApi: true,
+    linkHandler: {
+      activate: (_ev, uri) => {
+        openTerminalExternalUrl(uri)
+      },
+    },
     theme: ANTIGRAVITY_TERM_THEME,
   })
   const fit = new FitAddon()
   const searchAddon = new SearchAddon()
   term.loadAddon(fit)
-  term.loadAddon(new WebLinksAddon())
+  term.loadAddon(new WebLinksAddon((_ev, uri) => { openTerminalExternalUrl(uri) }))
   term.loadAddon(searchAddon)
   term.loadAddon(new Unicode11Addon())
   term.unicode.activeVersion = '11'
@@ -68,6 +78,7 @@ export function attachTerminalInputHandlers(d: HandlerDeps) {
 
   d.term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
     if (ev.type !== 'keydown') return true
+    if (ev.isComposing || ev.keyCode === 229) return true
     const k = ev.key.toLowerCase()
     if ((ev.ctrlKey || ev.metaKey) && k === 'f') { ev.preventDefault(); d.onOpenSearch(); return false }
     if (ev.ctrlKey && ev.shiftKey && k === 'c') {
@@ -129,7 +140,7 @@ export function attachTerminalImeGuard(
   }
 
   const trigger = (force = false) => {
-    if (!isActive() || !isEnabled()) return
+    if (!isActive() || !isEnabled() || isComposing) return
     const now = Date.now()
     if (!force && now - lastTrigger < 100) return
     lastTrigger = now
