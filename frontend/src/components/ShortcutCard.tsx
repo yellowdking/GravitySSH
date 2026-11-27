@@ -23,9 +23,9 @@ export const ShortcutCard: React.FC<Props> = ({ sc, hasActiveSession, onTogglePi
           <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
             {sc.pinned && <Pin className="w-3 h-3 text-amber-400 shrink-0" />}
             <span className="text-xs font-semibold text-ag-text truncate">{sc.name}</span>
-            <span className="text-[10px] px-1.5 py-0.2 rounded bg-ag-elevated text-ag-muted shrink-0">{sc.category}</span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-ag-elevated text-ag-muted shrink-0">{sc.category}</span>
             {lineCount > 1 && (
-              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-indigo-500/12 text-indigo-300 border border-indigo-500/20 shrink-0">
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/[0.12] text-indigo-300 border border-indigo-500/20 shrink-0">
                 {lineCount} 行
               </span>
             )}
