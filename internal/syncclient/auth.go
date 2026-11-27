@@ -49,16 +49,24 @@ func parseValidLeafCert(rawCerts [][]byte, now time.Time) (*x509.Certificate, er
 	return cert, nil
 }
 
-func verifyPinnedSPKI(rawCerts [][]byte, expectedHex string, now time.Time) error {
+func verifyPinnedSPKIs(rawCerts [][]byte, expectedHexes []string, now time.Time) error {
 	cert, err := parseValidLeafCert(rawCerts, now)
 	if err != nil {
 		return err
 	}
-	gotHex := spkiSHA256Hex(cert)
-	if subtle.ConstantTimeCompare([]byte(gotHex), []byte(expectedHex)) != 1 {
+	gotBytes := []byte(spkiSHA256Hex(cert))
+	matched := 0
+	for _, expected := range expectedHexes {
+		matched |= subtle.ConstantTimeCompare(gotBytes, []byte(expected))
+	}
+	if matched != 1 {
 		return errors.New("中继服务器证书指纹校验失败（SPKI Pin 不匹配）")
 	}
 	return nil
+}
+
+func verifyPinnedSPKI(rawCerts [][]byte, expectedHex string, now time.Time) error {
+	return verifyPinnedSPKIs(rawCerts, []string{expectedHex}, now)
 }
 
 func verifySelfSignedIPLeafCert(rawCerts [][]byte, expectedIP string, now time.Time) (*x509.Certificate, error) {
@@ -90,16 +98,13 @@ func buildTLSConfig(mode RelayTLSMode, spkiSHA256, relayURL string) (*tls.Config
 	targetHostPort, targetHostname := parseRelayTargetHost(relayURL)
 	switch mode {
 	case RelayTLSModePinned:
-		pin := strings.ToLower(strings.TrimSpace(spkiSHA256))
-		if len(pin) != 64 {
-			return nil, errors.New("内置中继 SPKI 指纹未配置")
-		}
-		if _, err := hex.DecodeString(pin); err != nil {
-			return nil, errors.New("中继 SPKI 指纹格式无效")
+		pins, err := ParseSPKIPinList(spkiSHA256)
+		if err != nil {
+			return nil, err
 		}
 		tlsCfg.InsecureSkipVerify = true
 		tlsCfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			return verifyPinnedSPKI(rawCerts, pin, time.Now())
+			return verifyPinnedSPKIs(rawCerts, pins, time.Now())
 		}
 	case RelayTLSModeSelfSignedIP:
 		ip := net.ParseIP(targetHostname)
