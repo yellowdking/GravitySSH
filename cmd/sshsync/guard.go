@@ -1,8 +1,10 @@
 package main
 
 import (
+	"cmp"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 )
@@ -15,6 +17,7 @@ const (
 	maxTrackedIPs  = 4096
 	staleIPTTL     = 30 * time.Minute
 	maxActiveConns = 64
+	maxConnsPerIP  = 8
 )
 
 type ipState struct {
@@ -61,20 +64,64 @@ func (g *ipGuard) getOrCreateLocked(ip string, now time.Time) *ipState {
 }
 
 func (g *ipGuard) evictLocked(now time.Time) {
-	var oldestKey string
-	var oldestTime time.Time
+	// Pass 1: drop expired/stale unbanned entries.
 	for k, st := range g.ips {
-		if now.After(st.banUntil) && now.Sub(st.lastSeen) > staleIPTTL {
+		unbanned := st.banUntil.IsZero() || !now.Before(st.banUntil)
+		if unbanned && now.Sub(st.lastSeen) > staleIPTTL {
 			delete(g.ips, k)
-			continue
-		}
-		if now.After(st.banUntil) && (oldestKey == "" || st.lastSeen.Before(oldestTime)) {
-			oldestKey = k
-			oldestTime = st.lastSeen
 		}
 	}
-	if len(g.ips) >= maxTrackedIPs && oldestKey != "" {
-		delete(g.ips, oldestKey)
+	if len(g.ips) < maxTrackedIPs {
+		return
+	}
+
+	// Pass 2: strictly enforce maxTrackedIPs in a ~10% batch to prevent OOM and O(N^2) churn.
+	batch := max(1, maxTrackedIPs/10)
+	target := maxTrackedIPs - batch
+
+	type candidate struct {
+		key      string
+		primary  time.Time
+		lastSeen time.Time
+	}
+	unbanned := make([]candidate, 0, len(g.ips))
+	banned := make([]candidate, 0)
+	for k, st := range g.ips {
+		if st.banUntil.IsZero() || !now.Before(st.banUntil) {
+			unbanned = append(unbanned, candidate{key: k, primary: st.lastSeen, lastSeen: st.lastSeen})
+		} else {
+			banned = append(banned, candidate{key: k, primary: st.banUntil, lastSeen: st.lastSeen})
+		}
+	}
+
+	cmpCand := func(a, b candidate) int {
+		if c := a.primary.Compare(b.primary); c != 0 {
+			return c
+		}
+		if c := a.lastSeen.Compare(b.lastSeen); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.key, b.key)
+	}
+
+	if len(unbanned) > 0 {
+		slices.SortFunc(unbanned, cmpCand)
+		for _, c := range unbanned {
+			if len(g.ips) <= target {
+				return
+			}
+			delete(g.ips, c.key)
+		}
+	}
+
+	if len(g.ips) > target && len(banned) > 0 {
+		slices.SortFunc(banned, cmpCand)
+		for _, c := range banned {
+			if len(g.ips) <= target {
+				return
+			}
+			delete(g.ips, c.key)
+		}
 	}
 }
 
@@ -142,7 +189,8 @@ func (g *ipGuard) Sweep() {
 	defer g.mu.Unlock()
 	now := g.now().UTC()
 	for k, st := range g.ips {
-		if now.After(st.banUntil) && now.Sub(st.lastSeen) > staleIPTTL {
+		unbanned := st.banUntil.IsZero() || !now.Before(st.banUntil)
+		if unbanned && now.Sub(st.lastSeen) > staleIPTTL {
 			delete(g.ips, k)
 		}
 	}
@@ -156,36 +204,116 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-type limitListener struct {
-	net.Listener
-	sem chan struct{}
+func remoteIP(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	return host
 }
 
-func newLimitListener(l net.Listener, max int) net.Listener {
+type limitListener struct {
+	net.Listener
+	sem       chan struct{}
+	closeCh   chan struct{}
+	closeOnce sync.Once
+
+	mu       sync.Mutex
+	perIP    map[string]int
+	maxPerIP int
+}
+
+func newLimitListener(l net.Listener, maxConns, maxPerIP int) net.Listener {
+	if maxPerIP <= 0 {
+		maxPerIP = maxConnsPerIP
+	}
 	return &limitListener{
 		Listener: l,
-		sem:      make(chan struct{}, max),
+		sem:      make(chan struct{}, maxConns),
+		closeCh:  make(chan struct{}),
+		perIP:    make(map[string]int, maxConns),
+		maxPerIP: maxPerIP,
+	}
+}
+
+func (l *limitListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closeCh) })
+	return l.Listener.Close()
+}
+
+func (l *limitListener) acquireIP(ip string) bool {
+	if l.maxPerIP <= 0 || ip == "" {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.perIP[ip] >= l.maxPerIP {
+		return false
+	}
+	l.perIP[ip]++
+	return true
+}
+
+func (l *limitListener) releaseIP(ip string) {
+	if l.maxPerIP <= 0 || ip == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if n := l.perIP[ip]; n <= 1 {
+		delete(l.perIP, ip)
+	} else {
+		l.perIP[ip] = n - 1
 	}
 }
 
 func (l *limitListener) Accept() (net.Conn, error) {
-	l.sem <- struct{}{}
-	c, err := l.Listener.Accept()
-	if err != nil {
-		<-l.sem
-		return nil, err
+	for {
+		select {
+		case <-l.closeCh:
+			return nil, net.ErrClosed
+		default:
+		}
+		select {
+		case <-l.closeCh:
+			return nil, net.ErrClosed
+		case l.sem <- struct{}{}:
+		}
+
+		c, err := l.Listener.Accept()
+		if err != nil {
+			<-l.sem
+			return nil, err
+		}
+
+		ip := remoteIP(c.RemoteAddr())
+		if !l.acquireIP(ip) {
+			_ = c.Close()
+			<-l.sem
+			continue
+		}
+
+		return &limitConn{
+			Conn: c,
+			onClose: func() {
+				l.releaseIP(ip)
+				<-l.sem
+			},
+		}, nil
 	}
-	return &limitConn{Conn: c, sem: l.sem}, nil
 }
 
 type limitConn struct {
 	net.Conn
-	sem  chan struct{}
-	once sync.Once
+	onClose func()
+	once    sync.Once
 }
 
 func (c *limitConn) Close() error {
 	err := c.Conn.Close()
-	c.once.Do(func() { <-c.sem })
+	c.once.Do(c.onClose)
 	return err
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,20 +13,22 @@ import (
 )
 
 const (
-	clientHeaderName  = "X-GSSH-Client"
-	clientHeaderValue = "GravitySSH/1"
-	tsHeaderName      = "X-GSSH-TS"
-	sigHeaderName     = "X-GSSH-Sig"
-	maxClockSkewSec   = 120
-	maxBodyBytes      = 2 << 20
-	maxSmallBodyBytes = 4096
+	clientHeaderName   = "X-GSSH-Client"
+	clientHeaderValue  = "GravitySSH/1"
+	tsHeaderName       = "X-GSSH-TS"
+	sigHeaderName      = "X-GSSH-Sig"
+	maxClockSkewSec    = 120
+	maxBodyBytes       = 2 << 20
+	maxSmallBodyBytes  = 4096
+	maxConcurrentDrops = 4
 )
 
 type relayServer struct {
-	store      *memStore
-	guard      *ipGuard
-	appGateKey []byte
-	now        func() time.Time
+	store        *memStore
+	guard        *ipGuard
+	appGateKey   []byte
+	now          func() time.Time
+	heavyBodySem chan struct{}
 }
 
 func newRelayServer(store *memStore, guard *ipGuard, appGateKey string, nowFn func() time.Time) *relayServer {
@@ -33,10 +36,11 @@ func newRelayServer(store *memStore, guard *ipGuard, appGateKey string, nowFn fu
 		nowFn = func() time.Time { return time.Now().UTC() }
 	}
 	return &relayServer{
-		store:      store,
-		guard:      guard,
-		appGateKey: []byte(appGateKey),
-		now:        nowFn,
+		store:        store,
+		guard:        guard,
+		appGateKey:   []byte(appGateKey),
+		now:          nowFn,
+		heavyBodySem: make(chan struct{}, maxConcurrentDrops),
 	}
 }
 
@@ -80,16 +84,29 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	limit := int64(maxSmallBodyBytes)
-	if r.URL.Path == "/v1/drop" {
+	isHeavy := r.URL.Path == "/v1/drop"
+	if isHeavy {
 		limit = maxBodyBytes
 	}
-	rawBody, err := readBoundedBody(r.Body, limit)
-	defer clear(rawBody)
-	if err != nil {
-		if errors.Is(err, errBodyTooLarge) {
-			writeJSON(w, http.StatusRequestEntityTooLarge, []byte(`{"error":"body_too_large"}`))
+	if r.ContentLength > limit {
+		s.guard.RecordStrike(ip)
+		silentNotFound(w)
+		return
+	}
+
+	if isHeavy {
+		select {
+		case s.heavyBodySem <- struct{}{}:
+			defer func() { <-s.heavyBodySem }()
+		case <-r.Context().Done():
+			silentNotFound(w)
 			return
 		}
+	}
+
+	rawBody, err := readBoundedBody(r.Body, r.ContentLength, limit)
+	defer clear(rawBody)
+	if err != nil {
 		s.guard.RecordStrike(ip)
 		silentNotFound(w)
 		return
@@ -115,9 +132,6 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleCancel(w, rawBody)
 	case "/v1/ping":
 		s.handlePing(w)
-	default:
-		s.guard.RecordStrike(ip)
-		silentNotFound(w)
 	}
 }
 
@@ -165,13 +179,70 @@ func (s *relayServer) verifySignature(method, path, tsStr string, rawBody, gotSi
 
 var errBodyTooLarge = errors.New("body too large")
 
-func readBoundedBody(rc io.ReadCloser, limit int64) ([]byte, error) {
+func readBoundedBody(rc io.ReadCloser, contentLength, limit int64) ([]byte, error) {
 	defer rc.Close()
-	b, err := io.ReadAll(io.LimitReader(rc, limit+1))
-	if err != nil {
-		clear(b)
+	if contentLength > limit {
+		return nil, errBodyTooLarge
+	}
+
+	if contentLength > 0 {
+		buf := make([]byte, contentLength)
+		n, err := io.ReadFull(rc, buf)
+		if err != nil {
+			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+				return buf[:n], nil
+			}
+			clear(buf)
+			return nil, err
+		}
+		var extra [1]byte
+		en, eerr := rc.Read(extra[:])
+		if en > 0 {
+			if contentLength+int64(en) > limit {
+				clear(buf)
+				return nil, errBodyTooLarge
+			}
+			var rest bytes.Buffer
+			rest.Write(buf)
+			clear(buf)
+			rest.Write(extra[:en])
+			if _, rerr := io.Copy(&rest, io.LimitReader(rc, limit-int64(rest.Len())+1)); rerr != nil {
+				clear(rest.Bytes())
+				return nil, rerr
+			}
+			b := rest.Bytes()
+			if int64(len(b)) > limit {
+				clear(b)
+				return nil, errBodyTooLarge
+			}
+			return b, nil
+		}
+		if eerr != nil && !errors.Is(eerr, io.EOF) {
+			clear(buf)
+			return nil, eerr
+		}
+		return buf, nil
+	}
+
+	var r io.Reader = rc
+	if contentLength == 0 {
+		var probe [1]byte
+		n, err := rc.Read(probe[:])
+		if n == 0 {
+			if err == nil || errors.Is(err, io.EOF) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		r = io.MultiReader(bytes.NewReader(probe[:n]), rc)
+	}
+
+	var out bytes.Buffer
+	if _, err := io.Copy(&out, io.LimitReader(r, limit+1)); err != nil {
+		clear(out.Bytes())
 		return nil, err
 	}
+	b := out.Bytes()
 	if int64(len(b)) > limit {
 		clear(b)
 		return nil, errBodyTooLarge
