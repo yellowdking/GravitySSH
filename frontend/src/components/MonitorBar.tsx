@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Activity, Cpu, HardDrive, MemoryStick, Network, Wifi } from 'lucide-react'
 import type { HostMetrics } from '../types'
 import { api } from '../wailsApi'
@@ -34,31 +34,72 @@ function fmtMem(mb: number): string {
 
 export const MonitorBar: React.FC<Props> = ({ sessionId, status, active, enabled }) => {
   const [m, setM] = useState<HostMetrics | null>(null)
+  const unsupportedSessionRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    setM(null)
+    if (unsupportedSessionRef.current && unsupportedSessionRef.current !== sessionId) {
+      unsupportedSessionRef.current = null
+    }
+  }, [sessionId])
 
   useEffect(() => {
     if (!enabled || !active || status !== 'connected') return
+    if (unsupportedSessionRef.current === sessionId) return
+
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
+
+    const clearTimer = () => {
+      if (timer !== null) {
+        clearTimeout(timer)
+        timer = null
+      }
+    }
+
+    const schedule = (delayMs: number) => {
+      clearTimer()
+      if (cancelled || document.hidden || unsupportedSessionRef.current === sessionId) return
+      timer = setTimeout(() => {
+        timer = null
+        void poll()
+      }, delayMs)
+    }
+
     const poll = async () => {
+      if (cancelled || document.hidden || unsupportedSessionRef.current === sessionId) return
       let nextDelay = 3000
       try {
         const res = await api.getSessionMetrics(sessionId)
-        if (!cancelled) {
-          setM(res)
-          if (res.latencyMs >= 500) nextDelay = 6000
-          else if (res.latencyMs >= 250) nextDelay = 4500
+        if (cancelled) return
+        setM(res)
+        if (!res.supported) {
+          unsupportedSessionRef.current = sessionId
+          return
         }
+        if (res.latencyMs >= 500) nextDelay = 6000
+        else if (res.latencyMs >= 250) nextDelay = 4500
       } catch {
         nextDelay = 5000
       }
-      if (!cancelled) {
-        timer = setTimeout(() => { void poll() }, nextDelay)
+      schedule(nextDelay)
+    }
+
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        clearTimer()
+      } else if (!cancelled && unsupportedSessionRef.current !== sessionId) {
+        schedule(400)
       }
     }
-    timer = setTimeout(() => { void poll() }, 600)
+
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    if (!document.hidden) schedule(600)
+
     return () => {
       cancelled = true
-      if (timer !== null) clearTimeout(timer)
+      clearTimer()
+      document.removeEventListener('visibilitychange', onVisibilityChange)
     }
   }, [sessionId, status, active, enabled])
 

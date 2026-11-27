@@ -49,8 +49,11 @@ func (m *Manager) SFTPRename(sessionID, oldPath, newPath string) error {
 		_, preErr = sc.Lstat(cleanOld)
 	}
 	hadOld := preErr == nil
+	if errors.Is(preErr, os.ErrNotExist) {
+		return preErr
+	}
 
-	if err := renameRemote(sc, cleanOld, cleanNew); err != nil {
+	if err := renameRemote(sc, cleanOld, cleanNew, hadOld); err != nil {
 		if isSFTPConnError(err) {
 			m.invalidateSFTP(sessionID, sc)
 			sc2, err2 := m.getSFTP(sessionID)
@@ -66,7 +69,7 @@ func (m *Manager) SFTPRename(sessionID, oldPath, newPath string) error {
 					return nil
 				}
 			}
-			if rErr := renameRemote(sc2, cleanOld, cleanNew); rErr != nil {
+			if rErr := renameRemote(sc2, cleanOld, cleanNew, hadOld); rErr != nil {
 				return rErr
 			}
 		} else {

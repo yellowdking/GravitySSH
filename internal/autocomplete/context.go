@@ -2,6 +2,7 @@ package autocomplete
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
@@ -16,7 +17,6 @@ const (
 	HasMake
 	HasGo
 	HasNginx
-	HasSh
 )
 
 var (
@@ -24,11 +24,16 @@ var (
 		"docker-compose.yml": HasCompose, "docker-compose.yaml": HasCompose, "compose.yml": HasCompose, "compose.yaml": HasCompose,
 		"dockerfile": HasDockerfile, "package.json": HasNode, "makefile": HasMake, "gnumakefile": HasMake, "go.mod": HasGo, "nginx.conf": HasNginx,
 	}
-	arcE  = ".tar.gz .tar.xz .tar.bz2 .tgz .tar .zip .gz .bz2 .xz .7z"
-	txtE  = ".yml .yaml .conf .cfg .ini .json .toml .env .log .txt .md .sh .py .go .js .ts .service .xml .sql"
-	binE  = ".png .jpg .jpeg .gif .webp .zip .gz .tar .tgz .7z .bin .so .exe .pdf"
-	edCmd = wordSet("nano vim vi nvim cat less more head tail grep sed awk")
-	ctxRt = []struct {
+	archiveCommands = wordSet("tar unzip gunzip 7z gzip zcat")
+	shCommands      = wordSet("sh bash zsh source .")
+	arcExts         = []string{".tar.gz", ".tar.xz", ".tar.bz2", ".tgz", ".tar", ".zip", ".gz", ".bz2", ".xz", ".7z"}
+	txtExts         = []string{".yml", ".yaml", ".conf", ".cfg", ".ini", ".json", ".toml", ".env", ".log", ".txt", ".md", ".sh", ".py", ".go", ".js", ".ts", ".service", ".xml", ".sql"}
+	binExts         = []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".zip", ".gz", ".tar", ".tgz", ".7z", ".bin", ".so", ".exe", ".pdf"}
+	yamlExts        = []string{".yml", ".yaml"}
+	shExts          = []string{".sh", ".bash", ".zsh"}
+	jsExts          = []string{".js", ".mjs", ".ts"}
+	edCmd           = wordSet("nano vim vi nvim cat less more head tail grep sed awk")
+	ctxRt           = []struct {
 		f FolderSignals
 		s []SubcmdSpec
 	}{
@@ -53,8 +58,6 @@ func ScanFolderSignals(entries []models.SFTPFileEntry, cwd string) FolderSignals
 		} else if !e.IsDir {
 			if f := sigFiles[lo]; f != 0 {
 				sig |= f
-			} else if strings.HasSuffix(lo, ".sh") {
-				sig |= HasSh
 			}
 		}
 	}
@@ -64,8 +67,8 @@ func ScanFolderSignals(entries []models.SFTPFileEntry, cwd string) FolderSignals
 	return sig
 }
 
-func hasExt(lo, list string) bool {
-	for _, x := range strings.Fields(list) {
+func hasExt(lo string, exts []string) bool {
+	for _, x := range exts {
 		if strings.HasSuffix(lo, x) {
 			return true
 		}
@@ -84,7 +87,7 @@ func FileExtDelta(cmd, prevTok string, entry models.SFTPFileEntry, isFirstToken 
 		if hs(name, ".sh") {
 			return 120
 		}
-		if hasExt(name, binE) {
+		if hasExt(name, binExts) {
 			return -120
 		}
 		if ct(entry.Mode, "x") {
@@ -95,19 +98,19 @@ func FileExtDelta(cmd, prevTok string, entry models.SFTPFileEntry, isFirstToken 
 			return 140
 		}
 	case (p == "-f" || p == "--file") && (c == "docker" || c == "kubectl"):
-		if hasExt(name, ".yml .yaml") {
+		if hasExt(name, yamlExts) {
 			return 120
 		}
-	case (ct(" tar unzip gunzip 7z gzip zcat ", " "+c+" ") && hasExt(name, arcE)) ||
-		(ct(" sh bash zsh source . ", " "+c+" ") && hasExt(name, ".sh .bash .zsh")) ||
-		(hp(c, "python") && hs(name, ".py")) || (c == "node" && hasExt(name, ".js .mjs .ts")) ||
+	case (archiveCommands[c] && hasExt(name, arcExts)) ||
+		(shCommands[c] && hasExt(name, shExts)) ||
+		(hp(c, "python") && hs(name, ".py")) || (c == "node" && hasExt(name, jsExts)) ||
 		(c == "go" && hs(name, ".go")) || (c == "nginx" && hs(name, ".conf")):
 		return 120
 	case edCmd[c]:
-		if hp(name, ".env") || hasExt(name, txtE) {
+		if hp(name, ".env") || hasExt(name, txtExts) {
 			return 80
 		}
-		if hasExt(name, binE) {
+		if hasExt(name, binExts) {
 			return -120
 		}
 	case c == "chmod":
@@ -146,7 +149,7 @@ func FolderSubcmdBoost(cmdPath, token string, sig FolderSignals) int {
 
 func FolderRootSuggestions(prefix string, sig FolderSignals) []SubcmdSpec {
 	lo := strings.ToLower(strings.TrimSpace(prefix))
-	if len(lo) < 2 || sig == 0 {
+	if utf8.RuneCountInString(lo) < 2 || sig == 0 {
 		return nil
 	}
 	var out []SubcmdSpec

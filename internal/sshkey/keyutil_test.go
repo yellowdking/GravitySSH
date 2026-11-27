@@ -65,3 +65,13 @@ func TestGenerateRSA2048(t *testing.T) {
 		t.Fatalf("ParsePrivateKey rsa failed: %v", err)
 	}
 }
+
+func TestGenerateSanitizesMultilineComment(t *testing.T) {
+	_, info, err := GenerateKeyPair("ed25519", "user@host\r\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA evil", "")
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	if strings.ContainsAny(info.PublicKey, "\r\n") {
+		t.Fatalf("expected sanitized single-line public key, got %q", info.PublicKey)
+	}
+}

@@ -19,6 +19,9 @@ func (s *Store) ListTemplates() []models.BuiltinTemplate {
 func (s *Store) SaveTemplate(tpl models.BuiltinTemplate) (models.BuiltinTemplate, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.locked {
+		return models.BuiltinTemplate{}, errVaultLocked
+	}
 
 	tpl.Name = strings.TrimSpace(tpl.Name)
 	tpl.Command = strings.TrimSpace(tpl.Command)
@@ -32,6 +35,7 @@ func (s *Store) SaveTemplate(tpl models.BuiltinTemplate) (models.BuiltinTemplate
 		tpl.Category = "自定义"
 	}
 
+	snapshot := cloneVaultData(s.data)
 	if tpl.ID == "" {
 		tpl.ID = uuid.NewString()
 		tpl.PresetID = ""
@@ -48,11 +52,17 @@ func (s *Store) SaveTemplate(tpl models.BuiltinTemplate) (models.BuiltinTemplate
 			}
 		}
 		if !updated {
+			// Prevent a newly created custom template from hijacking a built-in preset ID.
+			tpl.PresetID = ""
+			if builtinPresetIDSet()[tpl.ID] {
+				tpl.ID = uuid.NewString()
+			}
 			s.data.Templates = append(s.data.Templates, tpl)
 		}
 	}
 
 	if err := s.saveLocked(); err != nil {
+		s.data = snapshot
 		return models.BuiltinTemplate{}, err
 	}
 	return tpl, nil
@@ -61,14 +71,28 @@ func (s *Store) SaveTemplate(tpl models.BuiltinTemplate) (models.BuiltinTemplate
 func (s *Store) DeleteTemplate(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.locked {
+		return errVaultLocked
+	}
+	found := false
 	next := make([]models.BuiltinTemplate, 0, len(s.data.Templates))
 	for _, tpl := range s.data.Templates {
 		if tpl.ID != id {
 			next = append(next, tpl)
+		} else {
+			found = true
 		}
 	}
+	if !found {
+		return nil
+	}
+	snapshot := cloneVaultData(s.data)
 	s.data.Templates = next
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.data = snapshot
+		return err
+	}
+	return nil
 }
 
 // LoadPresetTemplates appends any missing built-in preset templates without overwriting
@@ -76,6 +100,9 @@ func (s *Store) DeleteTemplate(id string) error {
 func (s *Store) LoadPresetTemplates() (models.PresetLoadResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.locked {
+		return models.PresetLoadResult{}, errVaultLocked
+	}
 
 	existingPresets := make(map[string]bool, len(s.data.Templates)*2)
 	for _, tpl := range s.data.Templates {
@@ -87,6 +114,7 @@ func (s *Store) LoadPresetTemplates() (models.PresetLoadResult, error) {
 		}
 	}
 
+	snapshot := cloneVaultData(s.data)
 	presets := BuiltinOpsTemplates()
 	added, skipped := 0, 0
 	for _, preset := range presets {
@@ -101,6 +129,7 @@ func (s *Store) LoadPresetTemplates() (models.PresetLoadResult, error) {
 
 	if added > 0 {
 		if err := s.saveLocked(); err != nil {
+			s.data = snapshot
 			return models.PresetLoadResult{}, err
 		}
 	}

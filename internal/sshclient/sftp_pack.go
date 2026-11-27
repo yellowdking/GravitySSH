@@ -3,6 +3,7 @@ package sshclient
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
+
+const packedDownloadTimeout = 30 * time.Minute
 
 // SFTPDownloadPacked streams a remote directory/file via `tar -cf -` over SSH
 // and unpacks directly into localDir without leaving any temporary archive on the server.
@@ -47,6 +50,20 @@ func (m *Manager) SFTPDownloadPacked(sessionID, remotePath, localDir string) (in
 		return 0, fmt.Errorf("启动远程流式打包失败: %w", err)
 	}
 
+	dlCtx, cancel := context.WithTimeout(context.Background(), packedDownloadTimeout)
+	defer cancel()
+	stopCh := m.sessionStopCh(sessionID)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-done:
+		case <-stopCh:
+			_ = sshSess.Close()
+		case <-dlCtx.Done():
+			_ = sshSess.Close()
+		}
+	}()
+
 	transferID := uuid.NewString()
 	m.emitTransfer(models.TransferProgress{
 		TransferID: transferID,
@@ -59,12 +76,20 @@ func (m *Manager) SFTPDownloadPacked(sessionID, remotePath, localDir string) (in
 	})
 
 	fileCount, unpackErr := unpackTarStream(stdout, localDir)
+	if unpackErr != nil {
+		// Close the SSH session BEFORE Wait so a remote `tar` still writing to a full
+		// SSH window cannot deadlock Wait().
+		_ = sshSess.Close()
+	}
 	waitErr := sshSess.Wait()
+	close(done)
 
 	if unpackErr != nil || waitErr != nil {
 		errText := ""
 		if unpackErr != nil {
 			errText = unpackErr.Error()
+		} else if dlCtx.Err() != nil {
+			errText = dlCtx.Err().Error()
 		} else if s := strings.TrimSpace(stderr.String()); s != "" {
 			errText = s
 		} else {
@@ -146,17 +171,24 @@ func unpackTarStream(r io.Reader, destRoot string) (int, error) {
 }
 
 func safeJoinLocal(absRoot, tarEntryName string) (string, error) {
-	cleaned := filepath.Clean(filepath.FromSlash(strings.TrimLeft(tarEntryName, "/")))
+	if strings.ContainsRune(tarEntryName, 0) {
+		return "", fmt.Errorf("检测到不安全的归档路径: %s", tarEntryName)
+	}
+	norm := strings.ReplaceAll(tarEntryName, "\\", "/")
+	cleaned := filepath.Clean(filepath.FromSlash(strings.TrimLeft(norm, "/")))
 	if cleaned == "." || cleaned == "" {
 		return absRoot, nil
+	}
+	if filepath.IsAbs(cleaned) || filepath.VolumeName(cleaned) != "" {
+		return "", fmt.Errorf("检测到不安全的归档路径: %s", tarEntryName)
 	}
 	joined := filepath.Join(absRoot, cleaned)
 	absTarget, err := filepath.Abs(joined)
 	if err != nil {
 		return "", err
 	}
-	prefix := absRoot + string(os.PathSeparator)
-	if absTarget != absRoot && !strings.HasPrefix(absTarget, prefix) {
+	rel, err := filepath.Rel(absRoot, absTarget)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
 		return "", fmt.Errorf("检测到不安全的归档路径: %s", tarEntryName)
 	}
 	return absTarget, nil
@@ -188,23 +220,7 @@ func (m *Manager) SFTPCompress(sessionID, remoteDir string, names []string, form
 		return "", err
 	}
 
-	sshSess, err := client.NewSession()
-	if err != nil {
-		return "", err
-	}
-	defer sshSess.Close()
-
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-done:
-		case <-time.After(180 * time.Second):
-			_ = sshSess.Close()
-		}
-	}()
-
-	out, runErr := sshSess.CombinedOutput(cmd)
-	close(done)
+	out, runErr := runSSHExec(context.Background(), client, cmd, 180*time.Second, true)
 	m.invalidateDirCache(sessionID, dir)
 
 	if runErr != nil {

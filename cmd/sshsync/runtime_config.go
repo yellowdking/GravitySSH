@@ -1,10 +1,7 @@
 package main
 
 import (
-	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -44,6 +41,7 @@ func resolveGateKey(explicit string, candidateFiles ...string) (string, error) {
 		}
 		return k, nil
 	}
+	log.Printf("WARNING: sshsync is using the built-in default app-gate key; set SSHSYNC_APP_GATE_KEY or provide app-gate.key for private deployments")
 	return defaultAppGateKey, nil
 }
 
@@ -103,10 +101,5 @@ func spkiFromTLSCert(cert tls.Certificate) (string, error) {
 	if len(cert.Certificate) == 0 {
 		return "", errors.New("empty tls certificate chain")
 	}
-	leaf, err := x509.ParseCertificate(cert.Certificate[0])
-	if err != nil {
-		return "", fmt.Errorf("parse leaf cert: %w", err)
-	}
-	sum := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
-	return hex.EncodeToString(sum[:]), nil
+	return spkiHexFromDER(cert.Certificate[0])
 }

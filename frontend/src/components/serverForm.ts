@@ -2,7 +2,8 @@ import type { ServerSaveRequest, ServerView } from '../types'
 
 export const COLOR_PRESETS = ['#6366f1', '#38bdf8', '#22c55e', '#f59e0b', '#f43f5e', '#a855f7']
 
-export function makeInitialServerForm(editing: ServerView | null): ServerSaveRequest {
+export function makeInitialServerForm(editing: ServerView | null, defaultKeepAliveSeconds = 30): ServerSaveRequest {
+  const keepAliveDefault = defaultKeepAliveSeconds > 0 ? defaultKeepAliveSeconds : 30
   if (!editing) {
     return {
       id: '',
@@ -37,7 +38,7 @@ export function makeInitialServerForm(editing: ServerView | null): ServerSaveReq
         useMainProxy: true,
       },
       timeoutSeconds: 15,
-      keepAliveSeconds: 30,
+      keepAliveSeconds: keepAliveDefault,
       defaultRemotePath: '',
       startupCommand: '',
       notes: '',
@@ -76,7 +77,7 @@ export function makeInitialServerForm(editing: ServerView | null): ServerSaveReq
       useMainProxy: editing.jumpHost?.useMainProxy ?? true,
     },
     timeoutSeconds: editing.timeoutSeconds || 15,
-    keepAliveSeconds: editing.keepAliveSeconds || 30,
+    keepAliveSeconds: editing.keepAliveSeconds || keepAliveDefault,
     defaultRemotePath: editing.defaultRemotePath || '',
     startupCommand: editing.startupCommand || '',
     notes: editing.notes || '',

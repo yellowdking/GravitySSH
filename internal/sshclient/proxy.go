@@ -71,7 +71,7 @@ func buildSSHClientConfig(
 	return &ssh.ClientConfig{
 		User:            username,
 		Auth:            methods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: defaultTOFUHostKeyCallback(),
 		Timeout:         timeout,
 	}, nil
 }
@@ -82,27 +82,13 @@ func dialDirect(ctx context.Context, addr string, timeout time.Duration) (net.Co
 }
 
 func dialContextOverSSH(ctx context.Context, client *ssh.Client, addr string, timeout time.Duration) (net.Conn, error) {
-	type res struct {
-		c   net.Conn
-		err error
+	dialCtx := ctx
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		dialCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
-	ch := make(chan res, 1)
-	go func() {
-		c, err := client.Dial("tcp", addr)
-		ch <- res{c: c, err: err}
-	}()
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-timer.C:
-		return nil, fmt.Errorf("dial %s via jump host timed out after %s", addr, timeout)
-	case r := <-ch:
-		return r.c, r.err
-	}
+	return client.DialContext(dialCtx, "tcp", addr)
 }
 
 func dialViaProxy(ctx context.Context, p models.ProxyConfig, targetAddr string, timeout time.Duration) (net.Conn, error) {
@@ -140,7 +126,20 @@ func dialHTTPConnect(ctx context.Context, proxyAddr, username, password, targetA
 	if err != nil {
 		return nil, fmt.Errorf("无法连接 HTTP 代理 %s: %w", proxyAddr, err)
 	}
-	_ = conn.SetDeadline(time.Now().Add(timeout))
+	deadline := time.Now().Add(timeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	_ = conn.SetDeadline(deadline)
+
+	stopWatch := make(chan struct{})
+	go func() {
+		select {
+		case <-stopWatch:
+		case <-ctx.Done():
+			_ = conn.Close()
+		}
+	}()
 
 	var reqBuilder strings.Builder
 	reqBuilder.WriteString(fmt.Sprintf("CONNECT %s HTTP/1.1\r\n", targetAddr))
@@ -153,18 +152,30 @@ func dialHTTPConnect(ctx context.Context, proxyAddr, username, password, targetA
 	reqBuilder.WriteString("\r\n")
 
 	if _, err := io.WriteString(conn, reqBuilder.String()); err != nil {
+		close(stopWatch)
 		_ = conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("发送 HTTP CONNECT 请求失败: %w", err)
 	}
 
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	close(stopWatch)
 	if err != nil {
 		_ = conn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("读取 HTTP 代理响应失败: %w", err)
 	}
 	_ = resp.Body.Close()
 
+	if ctx.Err() != nil {
+		_ = conn.Close()
+		return nil, ctx.Err()
+	}
 	if resp.StatusCode != http.StatusOK {
 		_ = conn.Close()
 		return nil, fmt.Errorf("HTTP 代理拒绝连接: %s", resp.Status)
@@ -186,13 +197,38 @@ func (b *bufferedConn) Read(p []byte) (int, error) {
 	return b.r.Read(p)
 }
 
-func upgradeSSHConn(conn net.Conn, addr string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
+func upgradeSSHConn(ctx context.Context, conn net.Conn, addr string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
+	var deadline time.Time
 	if cfg.Timeout > 0 {
-		_ = conn.SetDeadline(time.Now().Add(cfg.Timeout))
+		deadline = time.Now().Add(cfg.Timeout)
 	}
+	if ctxDeadline, ok := ctx.Deadline(); ok && (deadline.IsZero() || ctxDeadline.Before(deadline)) {
+		deadline = ctxDeadline
+	}
+	if !deadline.IsZero() {
+		_ = conn.SetDeadline(deadline)
+	}
+
+	stopWatch := make(chan struct{})
+	go func() {
+		select {
+		case <-stopWatch:
+		case <-ctx.Done():
+			_ = conn.Close()
+		}
+	}()
+
 	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
+	close(stopWatch)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, err
+	}
+	if ctx.Err() != nil {
+		_ = c.Close()
+		return nil, ctx.Err()
 	}
 	_ = conn.SetDeadline(time.Time{})
 	return ssh.NewClient(c, chans, reqs), nil

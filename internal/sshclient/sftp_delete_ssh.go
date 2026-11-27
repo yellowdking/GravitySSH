@@ -1,6 +1,7 @@
 package sshclient
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path"
@@ -14,10 +15,8 @@ import (
 var errSSHDeleteNotFound = errors.New("ssh delete target not found")
 
 func (m *Manager) cachedSSHSameFS(sessionID string) bool {
-	m.mu.RLock()
-	sess, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if !ok {
+	sess := m.getSession(sessionID)
+	if sess == nil {
 		return false
 	}
 	sess.mu.Lock()
@@ -28,10 +27,8 @@ func (m *Manager) cachedSSHSameFS(sessionID string) bool {
 // sshMatchesSFTPRoot checks once per session whether SSH exec shares the same
 // filesystem root as SFTP (prevents running SSH rm against a chrooted SFTP).
 func (m *Manager) sshMatchesSFTPRoot(sessionID string, sc *sftp.Client) bool {
-	m.mu.RLock()
-	sess, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if !ok {
+	sess := m.getSession(sessionID)
+	if sess == nil {
 		return false
 	}
 	sess.mu.Lock()
@@ -49,41 +46,36 @@ func (m *Manager) sshMatchesSFTPRoot(sessionID string, sc *sftp.Client) bool {
 		return false
 	}
 
+	setResult := func(same bool) bool {
+		sess.mu.Lock()
+		sess.sshSameFSChecked = true
+		sess.sshSameFS = same
+		sess.mu.Unlock()
+		return same
+	}
+
 	sftpWD, err := sc.Getwd()
 	if err != nil {
+		if !isSFTPConnError(err) {
+			return setResult(false)
+		}
 		return false
 	}
 	sftpWD = path.Clean(strings.TrimSpace(sftpWD))
 	if sftpWD == "" || sftpWD == "/" {
-		return false
+		return setResult(false)
 	}
 
-	sshSess, err := client.NewSession()
-	if err != nil {
-		return false
-	}
-	defer sshSess.Close()
-
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-done:
-		case <-time.After(8 * time.Second):
-			_ = sshSess.Close()
-		}
-	}()
-	out, runErr := sshSess.Output("sh -c 'pwd -P'")
-	close(done)
+	out, runErr := runSSHExec(context.Background(), client, "sh -c 'pwd -P'", 8*time.Second, false)
 	if runErr != nil {
+		if !errors.Is(runErr, context.DeadlineExceeded) && !errors.Is(runErr, context.Canceled) {
+			return setResult(false)
+		}
 		return false
 	}
 
 	same := path.Clean(strings.TrimSpace(string(out))) == sftpWD
-	sess.mu.Lock()
-	sess.sshSameFSChecked = true
-	sess.sshSameFS = same
-	sess.mu.Unlock()
-	return same
+	return setResult(same)
 }
 
 func (m *Manager) deleteViaSSH(sessionID, clean string) error {
@@ -94,27 +86,12 @@ func (m *Manager) deleteViaSSH(sessionID, clean string) error {
 	if err != nil {
 		return err
 	}
-	sshSess, err := client.NewSession()
-	if err != nil {
-		return err
-	}
-	defer sshSess.Close()
-
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-done:
-		case <-time.After(90 * time.Second):
-			_ = sshSess.Close()
-		}
-	}()
 
 	cmd := fmt.Sprintf(
 		"sh -c 'p=$1; if [ ! -e \"$p\" ] && [ ! -L \"$p\" ]; then exit 44; fi; if [ -d \"$p\" ] && [ ! -L \"$p\" ]; then chmod -R u+rwX -- \"$p\" 2>/dev/null || true; fi; rm -rf -- \"$p\" && [ ! -e \"$p\" ] && [ ! -L \"$p\" ]' _ %s",
 		shellQuote(clean),
 	)
-	out, runErr := sshSess.CombinedOutput(cmd)
-	close(done)
+	out, runErr := runSSHExec(context.Background(), client, cmd, 90*time.Second, true)
 	if runErr != nil {
 		var exitErr *ssh.ExitError
 		if errors.As(runErr, &exitErr) && exitErr.ExitStatus() == 44 {

@@ -2,6 +2,19 @@ import React from 'react'
 import { BookmarkPlus, CheckSquare, Copy, Play, Square, Terminal, Trash2 } from 'lucide-react'
 import type { CommandRecord } from '../types'
 
+const HISTORY_TIME_FMT = new Intl.DateTimeFormat('zh-CN', {
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+})
+
+function formatHistoryTime(iso: string): string {
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? iso : HISTORY_TIME_FMT.format(d)
+}
+
 interface Props {
   rec: CommandRecord
   checked: boolean
@@ -23,18 +36,12 @@ export const HistoryRow: React.FC<Props> = ({
   onCopy,
   onDelete,
 }) => {
-  const timeStr = new Date(rec.executedAt).toLocaleString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  })
+  const timeStr = formatHistoryTime(rec.executedAt)
 
   return (
     <div
       className={`group rounded-xl border p-2.5 transition ${
-        checked ? 'bg-indigo-500/12 border-indigo-500/45' : 'bg-ag-panel/80 border-ag-border hover:border-ag-borderStrong'
+        checked ? 'bg-indigo-500/[0.12] border-indigo-500/45' : 'bg-ag-panel/80 border-ag-border hover:border-ag-borderStrong'
       }`}
     >
       <div className="flex items-start gap-2">

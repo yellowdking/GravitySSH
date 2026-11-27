@@ -63,3 +63,20 @@ func TestCommandRecorderCurrentLineAndUpArrow(t *testing.T) {
 		t.Fatalf("expected ['free -h'], got %#v", recorded)
 	}
 }
+
+func TestCommandRecorderCapsBufferAt8KB(t *testing.T) {
+	var emitted string
+	rec := NewCommandRecorder(func(cmd string) { emitted = cmd })
+	huge := make([]byte, maxRecorderBufRunes+2048)
+	for i := range huge {
+		huge[i] = 'a'
+	}
+	rec.Feed(huge)
+	if got := len(rec.CurrentLine()); got != maxRecorderBufRunes {
+		t.Fatalf("expected CurrentLine capped at %d, got %d", maxRecorderBufRunes, got)
+	}
+	rec.Feed([]byte("\r"))
+	if len(emitted) != maxRecorderBufRunes {
+		t.Fatalf("expected emitted command capped at %d, got %d", maxRecorderBufRunes, len(emitted))
+	}
+}

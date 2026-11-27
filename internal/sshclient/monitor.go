@@ -1,6 +1,7 @@
 package sshclient
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -13,7 +14,7 @@ const linuxMetricsCmd = `LC_ALL=C sh -c '
 [ -r /proc/stat ] || { echo "UNSUPPORTED"; exit 0; }
 echo "---CPU---"; head -n1 /proc/stat
 echo "---MEM---"; awk "/^(MemTotal|MemAvailable|MemFree|Buffers|Cached):/{print \$1,\$2}" /proc/meminfo
-echo "---DISK---"; df -Pk 2>/dev/null | awk "NR>1 && \$1 ~ /^\// {print \$5,\$6}"
+echo "---DISK---"; df -Pk 2>/dev/null | awk "NR>1 && \$1 ~ /^\// {pct=\$5; mp=\$6; for(i=7;i<=NF;i++) mp=mp \" \" \$i; print pct, mp}"
 echo "---NET---"; awk "NR>2 && \$1 !~ /^lo:/ {gsub(/:/,\" \",\$0); rx+=\$2; tx+=\$10} END{printf \"%.0f %.0f\n\",rx,tx}" /proc/net/dev
 echo "---LOAD---"; cat /proc/loadavg; nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo
 echo "---GPU---"; command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=utilization.gpu,name --format=csv,noheader,nounits 2>/dev/null | head -n1 || true
@@ -21,10 +22,8 @@ echo "---GPU---"; command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gp
 
 // GetSessionMetrics samples RTT latency and Linux host resources over the active SSH connection.
 func (m *Manager) GetSessionMetrics(sessionID string) (models.HostMetrics, error) {
-	m.mu.RLock()
-	sess, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if !ok {
+	sess := m.getSession(sessionID)
+	if sess == nil {
 		return models.HostMetrics{SessionID: sessionID}, fmt.Errorf("会话不存在")
 	}
 
@@ -34,7 +33,7 @@ func (m *Manager) GetSessionMetrics(sessionID string) (models.HostMetrics, error
 	defer sess.metricsInFlight.Store(false)
 
 	sess.mu.Lock()
-	var client = (*DialResult)(nil)
+	var client *DialResult
 	if sess.dialRes != nil && sess.dialRes.Client != nil {
 		client = sess.dialRes
 	}
@@ -43,25 +42,9 @@ func (m *Manager) GetSessionMetrics(sessionID string) (models.HostMetrics, error
 		return models.HostMetrics{SessionID: sessionID}, nil
 	}
 
-	sshSess, err := client.Client.NewSession()
-	if err != nil {
-		return models.HostMetrics{SessionID: sessionID}, err
-	}
-	defer sshSess.Close()
-
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			_ = sshSess.Close()
-		}
-	}()
-
 	start := time.Now()
-	out, runErr := sshSess.Output(linuxMetricsCmd)
+	out, runErr := runSSHExec(context.Background(), client.Client, linuxMetricsCmd, 10*time.Second, false)
 	latencyMs := time.Since(start).Milliseconds()
-	close(done)
 	if runErr != nil {
 		return models.HostMetrics{SessionID: sessionID, LatencyMs: latencyMs}, runErr
 	}
@@ -142,12 +125,15 @@ func parseMetricsOutput(
 				memMap[k] = v
 			}
 		case "DISK":
-			if f := strings.Fields(t); len(f) >= 2 {
-				pctStr := strings.TrimSuffix(f[0], "%")
-				if pct, err := strconv.ParseFloat(pctStr, 64); err == nil && pct >= maxPct {
-					maxPct = pct
-					res.DiskPercent = pct
-					res.DiskMount = f[1]
+			if idx := strings.IndexAny(t, " \t"); idx > 0 {
+				pctStr := strings.TrimSuffix(t[:idx], "%")
+				mount := strings.TrimSpace(t[idx+1:])
+				if mount != "" {
+					if pct, err := strconv.ParseFloat(pctStr, 64); err == nil && pct >= maxPct {
+						maxPct = pct
+						res.DiskPercent = pct
+						res.DiskMount = mount
+					}
 				}
 			}
 		case "NET":
@@ -176,7 +162,10 @@ func parseMetricsOutput(
 
 	if curCPU != nil && prevCPU != nil && curCPU.total > prevCPU.total {
 		dTotal := float64(curCPU.total - prevCPU.total)
-		dIdle := float64(curCPU.idle - prevCPU.idle)
+		var dIdle float64
+		if curCPU.idle >= prevCPU.idle {
+			dIdle = float64(curCPU.idle - prevCPU.idle)
+		}
 		pct := (1.0 - dIdle/dTotal) * 100.0
 		if pct < 0 {
 			pct = 0

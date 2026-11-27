@@ -4,20 +4,31 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+    paths-ignore:
+      - 'README.md'
+      - '*.md'
+      - 'cmd/sshsync/**'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - '*.md'
+      - 'cmd/sshsync/**'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ci-release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   test-and-build:
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -25,15 +36,18 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Go
+        id: go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: false
+          cache: true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Read Version
         id: ver
@@ -45,7 +59,7 @@ jobs:
 
       - name: Install Frontend Dependencies
         working-directory: frontend
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Run Frontend Unit Tests
         working-directory: frontend
@@ -62,16 +76,23 @@ jobs:
       - name: Go Vet & Unit Tests (Windows DPAPI, Vault, SSH Proxy/Jump, Autocomplete)
         shell: pwsh
         run: |
-          go mod tidy
           go vet ./...
           go test -v ./...
+
+      - name: Cache Wails CLI
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin
+          key: ${{ runner.os }}-wails-v2.17.1-${{ steps.go.outputs.go-version }}
 
       - name: Install Wails v2 CLI
         shell: pwsh
         run: |
-          go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.1
           $goBin = (go env GOPATH) + "\bin"
           echo "$goBin" >> $env:GITHUB_PATH
+          if (-not (Test-Path "$goBin\wails.exe")) {
+            go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.1
+          }
 
       - name: Generate Windows Application Icons
         shell: pwsh
@@ -81,7 +102,7 @@ jobs:
         shell: pwsh
         run: |
           $v = "${{ steps.ver.outputs.version }}"
-          wails build -clean -s -skipbindings -ldflags "-X main.AppVersion=$v"
+          wails build -clean -s -skipbindings -trimpath -ldflags "-s -w -X main.AppVersion=$v"
 
       - name: Package Portable Artifacts & SHA256 Checksums
         shell: pwsh
@@ -107,31 +128,47 @@ jobs:
           name: GravitySSH-windows-amd64-v${{ steps.ver.outputs.version }}
           path: dist-release/*
 
-      - name: Ensure Release Tag
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-        shell: pwsh
+  release:
+    needs: test-and-build
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check Existing Release Tag
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.test-and-build.outputs.tag }}
         run: |
-          $tag = "${{ steps.ver.outputs.tag }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          $existing = git tag -l $tag
-          if (-not $existing) {
-            git tag -a $tag -m "Release $tag"
-            git push origin $tag
-          }
-          git push origin --delete "${tag}-release" 2>$null; exit 0
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            if gh api "repos/${{ github.repository }}/releases/tags/${TAG}" >/dev/null 2>&1; then
+              echo "Release ${TAG} already exists; skipping automatic release on main."
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+      - name: Download Build Artifacts
+        if: steps.check.outputs.publish == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: GravitySSH-windows-amd64-v${{ needs.test-and-build.outputs.version }}
+          path: dist-release
 
       - name: Create GitHub Release
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        if: steps.check.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: GravitySSH ${{ steps.ver.outputs.tag }}
+          tag_name: ${{ needs.test-and-build.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: GravitySSH ${{ needs.test-and-build.outputs.tag }}
           draft: false
           prerelease: false
           generate_release_notes: true
           body: |
-            ## GravitySSH ${{ steps.ver.outputs.tag }} (Windows x64)
+            ## GravitySSH ${{ needs.test-and-build.outputs.tag }} (Windows x64)
 
             Antigravity 风格的 Windows 现代化 SSH 客户端：
             - **左侧服务器管理 + 独立 SSH 密钥库**（支持文件加载、粘贴导入、生成 Ed25519/RSA-4096）
@@ -142,8 +179,8 @@ jobs:
             - **Windows DPAPI (MachineGuid + User + App Entropy) + AES-256-GCM** 防拷贝本地加密保险库
 
             ### 下载说明
-            - 直接下载 **`GravitySSH-${{ steps.ver.outputs.tag }}-windows-amd64.exe`** 双击即可运行（单文件绿色版，无需安装；无论版本号为何，AppData 运行目录统一为 `%APPDATA%\GravitySSH`，配置文件统一保存在程序同目录 `gsshconfig\vault.gsv`）。
+            - 直接下载 **`GravitySSH-${{ needs.test-and-build.outputs.tag }}-windows-amd64.exe`** 双击即可运行（单文件绿色版，无需安装；无论版本号为何，AppData 运行目录统一为 `%APPDATA%\GravitySSH`，配置文件统一保存在程序同目录 `gsshconfig\vault.gsv`）。
           files: |
-            dist-release/GravitySSH-v${{ steps.ver.outputs.version }}-windows-amd64.exe
-            dist-release/GravitySSH-v${{ steps.ver.outputs.version }}-windows-amd64-portable.zip
+            dist-release/GravitySSH-v${{ needs.test-and-build.outputs.version }}-windows-amd64.exe
+            dist-release/GravitySSH-v${{ needs.test-and-build.outputs.version }}-windows-amd64-portable.zip
             dist-release/SHA256SUMS.txt

@@ -41,7 +41,7 @@ func splitActiveSegment(s string) (string, string) {
 			q = c
 		} else if (c == '&' || c == '|') && i+1 < len(s) && (s[i+1] == c || (c == '|' && s[i+1] == '&')) {
 			last, i = i+2, i+1
-		} else if c == ';' || c == '|' {
+		} else if c == ';' || c == '|' || (c == '&' && (i == 0 || s[i-1] != '>') && (i+1 >= len(s) || s[i+1] != '>')) {
 			last = i + 1
 		}
 	}
@@ -169,7 +169,7 @@ func ParseLine(input, cwd, homeDir string) ParsedLine {
 		cmd = lo(eff[0])
 	}
 	if len(eff) == 0 || (len(eff) == 1 && !endSp) {
-		if !hp(cur, "./") && !hp(cur, "../") && !hp(cur, "/") && !hp(cur, "~/") {
+		if !hp(cur, "./") && !hp(cur, "../") && !hp(cur, "/") && !hp(p.CurTok.Raw, "~/") {
 			return p
 		}
 	} else {
@@ -182,22 +182,76 @@ func ParseLine(input, cwd, homeDir string) ParsedLine {
 	if cwd == "" {
 		cwd = "/"
 	}
-	if homeDir == "" {
-		homeDir = "/"
-	}
 	p.PathActive, p.NamePrefix, p.TargetDir = true, cur, cwd
 	if sl := strings.LastIndexByte(cur, '/'); sl >= 0 {
 		d := cur[:sl+1]
 		p.TokenDir, p.NamePrefix = d, cur[sl+1:]
-		if hp(d, "~/") {
+		raw := p.CurTok.Raw
+		unescapedHomeVar := p.CurTok.Quote != '\'' && !hp(raw, `\$`) && !hp(raw, `"\$`) && !hp(raw, `'`)
+		switch {
+		case hp(d, "~/") && hp(raw, "~/"):
+			if homeDir == "" {
+				p.PathActive, p.TargetDir = false, ""
+				return p
+			}
 			p.TargetDir = path.Clean(path.Join(homeDir, d[2:]))
-		} else if hp(d, "/") {
+		case unescapedHomeVar && (hp(d, "$HOME/") || hp(d, "${HOME}/")):
+			if homeDir == "" {
+				p.PathActive, p.TargetDir = false, ""
+				return p
+			}
+			rest := d[len("$HOME/"):]
+			if hp(d, "${HOME}/") {
+				rest = d[len("${HOME}/"):]
+			}
+			p.TargetDir = path.Clean(path.Join(homeDir, rest))
+		case hp(d, "/"):
 			p.TargetDir = path.Clean(d)
-		} else {
+		default:
 			p.TargetDir = path.Clean(path.Join(cwd, d))
 		}
 	}
 	return p
+}
+
+func isVarStart(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_'
+}
+
+func isVarCont(c byte) bool {
+	return isVarStart(c) || (c >= '0' && c <= '9')
+}
+
+// leadingEnvVarLen returns the byte length of a leading $VAR or ${VAR} segment
+// when followed by '/' or end of string, so shell variable expansion is preserved.
+func leadingEnvVarLen(s string) int {
+	if len(s) < 2 || s[0] != '$' {
+		return 0
+	}
+	if s[1] == '{' {
+		if len(s) < 4 || !isVarStart(s[2]) {
+			return 0
+		}
+		i := 3
+		for i < len(s) && isVarCont(s[i]) {
+			i++
+		}
+		if i < len(s) && s[i] == '}' && (i+1 == len(s) || s[i+1] == '/') {
+			return i + 1
+		}
+		return 0
+	}
+	if !isVarStart(s[1]) {
+		return 0
+	}
+	i := 2
+	for i < len(s) && isVarCont(s[i]) {
+		i++
+	}
+	if i == len(s) || s[i] == '/' {
+		return i
+	}
+	return 0
 }
 
 func EscapePathToken(tokenDir, name string, isDir bool, quote byte) string {
@@ -205,7 +259,6 @@ func EscapePathToken(tokenDir, name string, isDir bool, quote byte) string {
 	if isDir {
 		full += "/"
 	}
-	set := " \t'\"\\$`()[]{}*?!#&|;<>="
 	if quote == '\'' {
 		s := "'" + strings.ReplaceAll(full, "'", `'\''`)
 		if !isDir {
@@ -213,12 +266,17 @@ func EscapePathToken(tokenDir, name string, isDir bool, quote byte) string {
 		}
 		return s
 	}
+	set := " \t'\"\\$`()[]{}*?!#&|;<>="
 	var b strings.Builder
 	if quote == '"' {
 		b.WriteByte('"')
 		set = `\"$` + "`!"
 	}
-	for i := 0; i < len(full); i++ {
+	skip := leadingEnvVarLen(tokenDir)
+	if skip > 0 {
+		b.WriteString(full[:skip])
+	}
+	for i := skip; i < len(full); i++ {
 		if strings.IndexByte(set, full[i]) >= 0 {
 			b.WriteByte('\\')
 		}
@@ -228,12 +286,4 @@ func EscapePathToken(tokenDir, name string, isDir bool, quote byte) string {
 		b.WriteByte('"')
 	}
 	return b.String()
-}
-
-func ComputeCompletionEdit(curLine, tgtLine string) (int, string) {
-	a, b, c := []rune(curLine), []rune(tgtLine), 0
-	for c < len(a) && c < len(b) && a[c] == b[c] {
-		c++
-	}
-	return len(a) - c, string(b[c:])
 }

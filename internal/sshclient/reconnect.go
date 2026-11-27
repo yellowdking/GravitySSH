@@ -1,7 +1,9 @@
 package sshclient
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"time"
 
@@ -9,6 +11,8 @@ import (
 )
 
 const maxKeepAliveFailures = 3
+
+var keepAliveProbeTimeout = 10 * time.Second
 
 func (m *Manager) pumpOutput(sessionID string, r io.Reader) {
 	buf := make([]byte, 16*1024)
@@ -33,7 +37,26 @@ func (m *Manager) sendTerminalText(sessionID, text string) {
 	})
 }
 
-// keepAliveLoop sends periodic SSH keepalive probes without prematurely killing
+func sendKeepAliveProbe(client *ssh.Client, stopCh <-chan struct{}, timeout time.Duration) error {
+	errCh := make(chan error, 1)
+	go func() {
+		_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+		errCh <- err
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-stopCh:
+		return context.Canceled
+	case err := <-errCh:
+		return err
+	case <-timer.C:
+		return errors.New("keepalive probe timed out")
+	}
+}
+
+// keepAliveLoop sends periodic SSH keepalive probes bounded by keepAliveProbeTimeout
+// so blackholed links reliably trip maxKeepAliveFailures without prematurely killing
 // high-latency links on a single transient failure.
 func (m *Manager) keepAliveLoop(sess *sessionState, stopCh chan struct{}, interval time.Duration) {
 	ticker := time.NewTicker(interval)
@@ -55,7 +78,11 @@ func (m *Manager) keepAliveLoop(sess *sessionState, stopCh chan struct{}, interv
 			if closed || client == nil {
 				return
 			}
-			if _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+			err := sendKeepAliveProbe(client, stopCh, keepAliveProbeTimeout)
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			if err != nil {
 				failures++
 				if failures >= maxKeepAliveFailures {
 					m.markDisconnected(sess, "连接心跳超时，会话已断开")

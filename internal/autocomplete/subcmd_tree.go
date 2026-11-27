@@ -83,7 +83,11 @@ func NormalizedCmdPath(eff []string, endsWithSpace bool) string {
 }
 
 func MatchSubcommands(eff []string, endsWithSpace bool) []SubcmdSpec {
-	if len(eff) == 0 || (len(eff) == 1 && !endsWithSpace) {
+	return matchSubcommandsForPath(NormalizedCmdPath(eff, endsWithSpace), eff, endsWithSpace)
+}
+
+func matchSubcommandsForPath(cmdPath string, eff []string, endsWithSpace bool) []SubcmdSpec {
+	if cmdPath == "" || len(eff) == 0 || (len(eff) == 1 && !endsWithSpace) {
 		return nil
 	}
 	pre, cur := eff, ""
@@ -93,7 +97,7 @@ func MatchSubcommands(eff []string, endsWithSpace bool) []SubcmdSpec {
 	if len(pre) > 1 && FileFlags[strings.ToLower(pre[len(pre)-1])] {
 		return nil
 	}
-	specs := subcmdTree[NormalizedCmdPath(eff, endsWithSpace)]
+	specs := subcmdTree[cmdPath]
 	if len(specs) == 0 {
 		return nil
 	}

@@ -140,7 +140,7 @@ func dialServerRecursive(
 			return nil, fmt.Errorf("连接自定义跳板机 %s 失败: %w", jumpAddr, err)
 		}
 
-		jumpClient, err := upgradeSSHConn(jumpRawConn, jumpAddr, jumpSSHCfg)
+		jumpClient, err := upgradeSSHConn(ctx, jumpRawConn, jumpAddr, jumpSSHCfg)
 		if err != nil {
 			_ = jumpRawConn.Close()
 			return nil, fmt.Errorf("自定义跳板机 %s SSH 握手失败: %w", jumpAddr, err)
@@ -169,7 +169,7 @@ func dialServerRecursive(
 		}
 	}
 
-	client, err := upgradeSSHConn(conn, targetAddr, sshCfg)
+	client, err := upgradeSSHConn(ctx, conn, targetAddr, sshCfg)
 	if err != nil {
 		_ = conn.Close()
 		closeAll(jumpClients)

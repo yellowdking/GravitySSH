@@ -121,15 +121,12 @@ export interface CommandShortcut {
 export interface AppSettings {
   autocompleteEnabled: boolean
   autocompleteFromHistory: boolean
-  autocompleteFromShortcut: boolean
   autoOpenSftp: boolean
-  sftpPanelPosition: 'right' | 'bottom'
   terminalFontFamily: string
   terminalFontSize: number
   defaultKeepAliveSeconds: number
   maxHistoryEntries: number
   recordCommands: boolean
-  language: 'zh' | 'en'
   monitorBarEnabled: boolean
   sftpFollowTerminal: boolean
   pasteGuardEnabled: boolean

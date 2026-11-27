@@ -3,6 +3,7 @@ import { AlertCircle, CheckCircle2, Loader2, UploadCloud } from 'lucide-react'
 import type { AuthType, ServerSaveRequest, ServerView, SSHKeyMeta } from '../types'
 import { api } from '../wailsApi'
 import { COLOR_PRESETS } from './serverForm'
+import { NumericInput } from './NumericInput'
 
 interface Props {
   form: ServerSaveRequest
@@ -59,7 +60,7 @@ export const ServerBasicTab: React.FC<Props> = ({ form, editingServer, sshKeys, 
         </div>
         <div className="col-span-2">
           <label className="block text-xs text-ag-muted mb-1.5">端口</label>
-          <input type="number" min={1} max={65535} className="ag-input font-mono" value={form.port} onChange={(e) => patch({ port: Number(e.target.value) || 22 })} />
+          <NumericInput min={1} max={65535} fallback={22} className="ag-input font-mono" value={form.port} onChange={(port) => patch({ port })} />
         </div>
         <div className="col-span-4">
           <label className="block text-xs text-ag-muted mb-1.5">用户名</label>

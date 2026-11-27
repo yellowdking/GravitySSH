@@ -1,6 +1,7 @@
 package sshclient
 
 import (
+	"context"
 	"fmt"
 	"path"
 	"strings"
@@ -28,23 +29,7 @@ func (m *Manager) SFTPExtractArchive(sessionID, remotePath string) (string, erro
 		return "", err
 	}
 
-	sshSess, err := client.NewSession()
-	if err != nil {
-		return "", fmt.Errorf("创建远程执行会话失败: %w", err)
-	}
-	defer sshSess.Close()
-
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-done:
-		case <-time.After(180 * time.Second):
-			_ = sshSess.Close()
-		}
-	}()
-
-	out, runErr := sshSess.CombinedOutput(cmd)
-	close(done)
+	out, runErr := runSSHExec(context.Background(), client, cmd, 180*time.Second, true)
 	m.invalidateDirCache(sessionID, dir)
 
 	if runErr != nil {
@@ -61,10 +46,8 @@ func (m *Manager) SFTPExtractArchive(sessionID, remotePath string) (string, erro
 }
 
 func (m *Manager) getSSHClient(sessionID string) (*ssh.Client, error) {
-	m.mu.RLock()
-	sess, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if !ok {
+	sess := m.getSession(sessionID)
+	if sess == nil {
 		return nil, fmt.Errorf("会话不存在或已关闭: %s", sessionID)
 	}
 	sess.mu.Lock()
@@ -104,8 +87,8 @@ func buildExtractCommand(dir, base string) (string, error) {
 
 func autoInstallSnippet(aptPkg, apkPkg, dnfPkg, yumPkg, pacmanPkg, zypperPkg string) string {
 	return fmt.Sprintf(
-		`SUDO=""; [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && SUDO="sudo"; `+
-			`if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update -qq && $SUDO apt-get install -y -qq %s; `+
+		`SUDO=""; [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && SUDO="sudo -n"; `+
+			`if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq %s; `+
 			`elif command -v apk >/dev/null 2>&1; then $SUDO apk add --no-cache %s; `+
 			`elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y %s; `+
 			`elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y %s; `+

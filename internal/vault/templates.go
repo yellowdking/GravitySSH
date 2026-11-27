@@ -3,7 +3,7 @@ package vault
 import "github.com/yellowdking/GravitySSH/internal/models"
 
 // BuiltinOpsTemplates returns curated, safety-hardened VPS initialization & ops shortcuts
-// (BBR, SWAP, mirror switch, Docker install, safe SSH port change with rollback).
+// (BBR, SWAP, mirror switch, Docker install, safe SSH port change with rollback, and read-only system inspect).
 func BuiltinOpsTemplates() []models.BuiltinTemplate {
 	list := []models.BuiltinTemplate{
 		{
@@ -26,7 +26,8 @@ lsmod | grep -i bbr || true`,
 			Category:    "系统优化",
 			Description: "检查现有 SWAP，创建 /swapfile (600 权限) 并备份后写入 /etc/fstab 持久化",
 			SafetyNote:  "已存在 /swapfile 时自动跳过，修改 /etc/fstab 前自动生成 .bak 备份",
-			Command: `SWAP_SIZE="2G"
+			Command: `(
+SWAP_SIZE="2G"
 if [ -f /swapfile ]; then echo "/swapfile 已存在，跳过创建"; swapon --show; exit 0; fi
 sudo fallocate -l "$SWAP_SIZE" /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress
 sudo chmod 600 /swapfile
@@ -34,7 +35,8 @@ sudo mkswap /swapfile
 sudo swapon /swapfile
 sudo cp -a /etc/fstab /etc/fstab.bak.$(date +%s)
 grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
-free -h && swapon --show`,
+free -h && swapon --show
+)`,
 		},
 		{
 			ID:          "tpl-mirror",
@@ -89,7 +91,8 @@ docker --version && docker compose version`,
 			Category:    "安全加固",
 			Description: "新增新端口并保留旧端口、放行防火墙、语法校验后重载；10 分钟未确认自动回滚",
 			SafetyNote:  "防失联机制：请先用新端口测试连接成功后再执行回显的取消回滚命令",
-			Command: `printf "请输入新的 SSH 端口 (1024-65535): "; read NEW_PORT
+			Command: `(
+printf "请输入新的 SSH 端口 (1024-65535): "; read NEW_PORT
 case "$NEW_PORT" in ''|*[!0-9]*) echo "端口必须是数字"; exit 1 ;; esac
 [ "$NEW_PORT" -lt 1024 ] || [ "$NEW_PORT" -gt 65535 ] && { echo "建议使用 1024-65535 之间的端口"; exit 1; }
 BAK="/etc/ssh/sshd_config.bak.$(date +%s)"
@@ -109,11 +112,33 @@ echo "✓ 已同时监听旧端口 ${OLD_PORT} 与新端口 ${NEW_PORT}（备份
 (sleep 600 && [ -f /tmp/.gssh_port_pending ] && sudo rm -f /etc/ssh/sshd_config.d/99-gravityssh-port.conf /tmp/.gssh_port_pending && (sudo systemctl reload sshd 2>/dev/null || sudo systemctl reload ssh 2>/dev/null || true)) >/dev/null 2>&1 &
 touch /tmp/.gssh_port_pending
 echo ">>> 请立即新建会话测试新端口 ${NEW_PORT}！确认可连上后执行: rm -f /tmp/.gssh_port_pending"
-echo ">>> 10 分钟内未确认将自动回滚至旧端口 ${OLD_PORT}。"`,
+echo ">>> 10 分钟内未确认将自动回滚至旧端口 ${OLD_PORT}。"
+)`,
+		},
+		{
+			ID:          "tpl-inspect",
+			Name:        "系统全面体检与状态巡检",
+			Category:    "系统维护",
+			Description: "只读巡检系统内核、负载、内存、磁盘、监听端口与异常服务状态",
+			SafetyNote:  "纯只读巡检命令，不会修改任何系统配置",
+			Command: `echo "=== 主机与内核 ==="; uname -a; uptime
+echo "=== 内存与 SWAP ==="; free -h
+echo "=== 磁盘占用 ==="; df -hT | grep -v tmpfs
+echo "=== 监听端口 ==="; ss -tulpn 2>/dev/null | head -n 25 || netstat -tulpn 2>/dev/null | head -n 25
+echo "=== 异常服务 ==="; systemctl --failed --no-pager 2>/dev/null || true`,
 		},
 	}
 	for i := range list {
 		list[i].PresetID = list[i].ID
 	}
 	return list
+}
+
+func builtinPresetIDSet() map[string]bool {
+	presets := BuiltinOpsTemplates()
+	set := make(map[string]bool, len(presets))
+	for _, p := range presets {
+		set[p.PresetID] = true
+	}
+	return set
 }

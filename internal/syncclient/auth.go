@@ -62,6 +62,10 @@ func buildTLSConfig(mode RelayTLSMode, spkiSHA256 string) (*tls.Config, error) {
 		tlsCfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			return verifySelfSignedLeafCert(rawCerts, time.Now())
 		}
+	case RelayTLSModeSystemCA:
+		// Standard TLS 1.3 verification using system root CAs.
+	default:
+		return nil, fmt.Errorf("不支持的中继 TLS 校验模式: %d", mode)
 	}
 	return tlsCfg, nil
 }

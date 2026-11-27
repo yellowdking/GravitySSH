@@ -7,6 +7,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/pkg/sftp"
 )
@@ -109,14 +110,6 @@ func (m *Manager) SFTPDelete(sessionID, remotePath string) error {
 	return nil
 }
 
-func removeRemoteRecursive(sc *sftp.Client, target string) error {
-	info, err := sc.Lstat(target)
-	if err != nil {
-		return err
-	}
-	return removeRemoteNodeWithInfo(sc, target, info, false)
-}
-
 func removeRemoteNodeWithInfo(sc *sftp.Client, target string, info os.FileInfo, ignoreNotExist bool) error {
 	if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 		if info.Mode().Perm()&0o200 == 0 {
@@ -186,20 +179,38 @@ func removeFilesParallel(sc *sftp.Client, parent string, files []os.FileInfo) er
 		wg       sync.WaitGroup
 		errMu    sync.Mutex
 		firstErr error
+		aborted  atomic.Bool
 	)
+	recordErr := func(err error) {
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		errMu.Unlock()
+	}
 	for _, f := range files {
+		if aborted.Load() {
+			break
+		}
 		p := path.Join(parent, f.Name())
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(target string) {
 			defer func() { <-sem; wg.Done() }()
+			if aborted.Load() {
+				return
+			}
 			if err := sc.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+				if isSFTPConnError(err) {
+					aborted.Store(true)
+					recordErr(err)
+					return
+				}
 				if _, lerr := sc.Lstat(target); !errors.Is(lerr, os.ErrNotExist) {
-					errMu.Lock()
-					if firstErr == nil {
-						firstErr = err
+					if isSFTPConnError(lerr) {
+						aborted.Store(true)
 					}
-					errMu.Unlock()
+					recordErr(err)
 				}
 			}
 		}(p)

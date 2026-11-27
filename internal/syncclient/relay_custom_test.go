@@ -30,6 +30,9 @@ func TestNormalizeRelayURL(t *testing.T) {
 		{"reject_http_upper", "HTTP://relay.example.com:54843", "", 0, true},
 		{"reject_ftp", "ftp://1.2.3.4:54843", "", 0, true},
 		{"reject_spaces", "1.2.3.4:54843 extra", "", 0, true},
+		{"reject_port_zero", "1.2.3.4:0", "", 0, true},
+		{"reject_port_overflow", "1.2.3.4:65536", "", 0, true},
+		{"reject_port_empty_colon", "https://1.2.3.4:", "", 0, true},
 	}
 
 	for _, tc := range cases {
@@ -119,5 +122,42 @@ func TestCustomSelfSignedIPTLS13AndPing(t *testing.T) {
 	}
 	if _, err := tls12Client.Ping(context.Background()); err == nil {
 		t.Fatal("expected TLS 1.2-only server to be rejected by TLS 1.3 enforcement")
+	}
+}
+
+func TestSyncClientSafetyGuards(t *testing.T) {
+	const gateKey = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
+	// Unknown TLS mode must error.
+	if _, err := NewClientWithMode("https://127.0.0.1:443", gateKey, "", RelayTLSMode(99)); err == nil {
+		t.Fatal("expected error for unknown RelayTLSMode")
+	}
+
+	// Oversized response (>4 MiB) must be rejected instead of silently truncated.
+	bigSrv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(strings.Repeat("x", maxResponseBodyBytes+16)))
+	}))
+	bigSrv.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
+	bigSrv.StartTLS()
+	defer bigSrv.Close()
+
+	cli, err := NewClientWithMode(bigSrv.URL, gateKey, "", RelayTLSModeSelfSignedIP)
+	if err != nil {
+		t.Fatalf("NewClientWithMode failed: %v", err)
+	}
+	if _, err := cli.Ping(context.Background()); err == nil || !strings.Contains(err.Error(), "4 MiB") {
+		t.Fatalf("expected 4 MiB overflow error, got %v", err)
+	}
+
+	// Pre-check 2 MiB payload limit before sending over network.
+	hugePayload := EncryptedPayload{
+		ChannelID:  strings.Repeat("a", 64),
+		Salt:       "abcd",
+		Nonce:      "efgh",
+		Ciphertext: strings.Repeat("A", maxDropPayloadBytes+10),
+	}
+	if _, err := cli.Drop(context.Background(), hugePayload, 300); err == nil || !strings.Contains(err.Error(), "2 MiB") {
+		t.Fatalf("expected 2 MiB payload pre-check error, got %v", err)
 	}
 }

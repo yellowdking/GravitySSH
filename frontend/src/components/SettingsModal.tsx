@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { RefreshCw, Settings, X } from 'lucide-react'
 import type { AppSettings, UpdateCheckResult, VaultLockState, VaultSecurityInfo } from '../types'
 import { api } from '../wailsApi'
+import { ModalShell } from './ModalShell'
 import { SettingsToggles } from './SettingsToggles'
 import { SshCacheSection } from './SshCacheSection'
 import { VaultPasswordSection } from './VaultPasswordSection'
@@ -47,14 +48,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+    <ModalShell open={open} onClose={onClose}>
       <div className="w-full max-w-xl bg-ag-panel border border-ag-borderStrong rounded-2xl shadow-ag overflow-hidden flex flex-col max-h-[88vh]">
         <div className="px-5 py-4 border-b border-ag-border flex items-center justify-between bg-[#11151f]">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-300"><Settings className="w-4 h-4" /></div>
             <div>
               <h2 className="text-sm font-semibold text-ag-text">设置 · GravitySSH v{appVersion}</h2>
-              <p className="text-[11px] text-ag-muted">自定义命令补齐、监控、SFTP、多设备同步与更新</p>
+              <p className="text-[11px] text-ag-muted">自定义命令补齐、监控、SFTP、多端同步与更新</p>
             </div>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text"><X className="w-4 h-4" /></button>
@@ -63,7 +64,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
           <div className="rounded-xl bg-[#0d111a] border border-cyan-500/25 p-3.5 flex items-center justify-between gap-3">
             <div>
-              <div className="text-xs font-semibold text-ag-text">多设备零知识同步（Windows ↔ Android）</div>
+              <div className="text-xs font-semibold text-ag-text">多端零知识同步（Windows / macOS / Linux / Android）</div>
               <p className="text-[11px] text-ag-muted mt-0.5">
                 通过一次性同步码或二维码端到端加密互传 · 当前中继：{settings.syncRelayUrl || '内置默认中继'}
               </p>
@@ -88,6 +89,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <button onClick={() => void handleSave()} disabled={saving} className="ag-btn-primary">{saving ? '保存中...' : '保存设置'}</button>
         </div>
       </div>
-    </div>
+    </ModalShell>
   )
 }

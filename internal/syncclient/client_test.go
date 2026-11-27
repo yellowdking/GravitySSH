@@ -68,17 +68,17 @@ func TestRelayClientTLS13SPKIPinningAndRoundTrip(t *testing.T) {
 	spkiSum := sha256.Sum256(srv.Certificate().RawSubjectPublicKeyInfo)
 	spkiHex := hex.EncodeToString(spkiSum[:])
 
-	badClient, err := NewCustomClient(srv.URL, gateKey, strings.Repeat("0", 64), true)
+	badClient, err := NewClientWithMode(srv.URL, gateKey, strings.Repeat("0", 64), RelayTLSModePinned)
 	if err != nil {
-		t.Fatalf("NewCustomClient failed: %v", err)
+		t.Fatalf("NewClientWithMode failed: %v", err)
 	}
 	if _, err := badClient.Pickup(context.Background(), strings.Repeat("a", 64)); err == nil {
 		t.Fatal("expected SPKI pin mismatch error")
 	}
 
-	client, err := NewCustomClient(srv.URL, gateKey, spkiHex, true)
+	client, err := NewClientWithMode(srv.URL, gateKey, spkiHex, RelayTLSModePinned)
 	if err != nil {
-		t.Fatalf("NewCustomClient failed: %v", err)
+		t.Fatalf("NewClientWithMode failed: %v", err)
 	}
 	code, _ := GenerateCode()
 	payload, err := EncryptBundle(code, models.SyncBundle{SchemaVersion: 1, SourcePlatform: "windows", SourceDevice: "TEST"})

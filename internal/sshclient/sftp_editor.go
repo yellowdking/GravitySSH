@@ -8,6 +8,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/pkg/sftp"
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
@@ -53,6 +54,9 @@ func (m *Manager) SFTPReadTextFile(sessionID, remotePath string) (models.RemoteF
 			}
 			return fmt.Errorf("读取文件内容失败: %w", err)
 		}
+		if len(raw) > maxEditableFileSize {
+			return fmt.Errorf("文件过大（超过 1 MB），内置编辑器仅支持 1 MB 以内的文本文件")
+		}
 		probeLen := len(raw)
 		if probeLen > 4096 {
 			probeLen = 4096
@@ -71,41 +75,62 @@ func (m *Manager) SFTPReadTextFile(sessionID, remotePath string) (models.RemoteF
 	return res, err
 }
 
-// SFTPWriteTextFile writes edited text back to remotePath, preserving existing file permissions.
+func writeRemoteFileContent(sc *sftp.Client, target string, data []byte, mode os.FileMode) error {
+	f, err := sc.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if mode != 0 {
+		_ = sc.Chmod(target, mode)
+	}
+	return nil
+}
+
+// SFTPWriteTextFile writes edited text back to remotePath atomically via a temp file + rename
+// (falling back to in-place write when directory permissions or target semantics disallow rename),
+// preserving existing file permissions.
 func (m *Manager) SFTPWriteTextFile(sessionID, remotePath, content string) error {
 	clean := path.Clean(strings.TrimSpace(remotePath))
 	if clean == "" || clean == "/" || clean == "." {
 		return fmt.Errorf("无效的文件路径")
 	}
 
+	data := []byte(content)
 	err := m.withSFTP(sessionID, func(sc *sftp.Client) error {
 		var existingMode os.FileMode
 		if st, statErr := sc.Stat(clean); statErr == nil {
 			existingMode = st.Mode().Perm()
 		}
 
-		f, err := sc.OpenFile(clean, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
-		if err != nil {
-			if isSFTPConnError(err) {
-				return err
+		tmpPath := path.Join(path.Dir(clean), fmt.Sprintf(".%s.gssh-tmp-%s", path.Base(clean), uuid.NewString()[:8]))
+		if wErr := writeRemoteFileContent(sc, tmpPath, data, existingMode); wErr == nil {
+			if rErr := renameRemote(sc, tmpPath, clean, true); rErr == nil {
+				return nil
+			} else {
+				_ = sc.Remove(tmpPath)
+				if isSFTPConnError(rErr) {
+					return rErr
+				}
 			}
-			return fmt.Errorf("写入远程文件失败: %w", err)
+		} else {
+			_ = sc.Remove(tmpPath)
+			if isSFTPConnError(wErr) {
+				return wErr
+			}
 		}
-		if _, err := f.Write([]byte(content)); err != nil {
-			_ = f.Close()
+
+		if err := writeRemoteFileContent(sc, clean, data, existingMode); err != nil {
 			if isSFTPConnError(err) {
 				return err
 			}
 			return fmt.Errorf("保存远程文件失败: %w", err)
-		}
-		if err := f.Close(); err != nil {
-			if isSFTPConnError(err) {
-				return err
-			}
-			return fmt.Errorf("关闭远程文件失败: %w", err)
-		}
-		if existingMode != 0 {
-			_ = sc.Chmod(clean, existingMode)
 		}
 		return nil
 	})

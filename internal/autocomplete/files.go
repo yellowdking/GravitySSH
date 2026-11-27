@@ -3,15 +3,10 @@ package autocomplete
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
-
-// ExtractPathContext checks whether input is completing a file/directory path
-// and returns the remote directory to list.
-func ExtractPathContext(input, cwd string) (targetDir string, active bool) {
-	return ExtractPathContextWithHome(input, cwd, "")
-}
 
 // ExtractPathContextWithHome resolves active path completion including ~/ home expansion.
 func ExtractPathContextWithHome(input, cwd, homeDir string) (targetDir string, active bool) {
@@ -22,7 +17,7 @@ func ExtractPathContextWithHome(input, cwd, homeDir string) (targetDir string, a
 	return p.TargetDir, true
 }
 
-func suggestFileCandidates(p ParsedLine, input string, entries []models.SFTPFileEntry, _ FolderSignals) []models.CompletionItem {
+func suggestFileCandidates(p ParsedLine, input string, entries []models.SFTPFileEntry) []models.CompletionItem {
 	if !p.PathActive || len(entries) == 0 {
 		return nil
 	}
@@ -33,10 +28,10 @@ func suggestFileCandidates(p ParsedLine, input string, entries []models.SFTPFile
 	}
 	isFirstTok := len(p.Effective) == 0 || (len(p.Effective) == 1 && !p.EndsWithSpace)
 	lowerPref := strings.ToLower(p.NamePrefix)
+	prefRunes := utf8.RuneCountInString(p.NamePrefix)
 	prevLo := strings.ToLower(p.PrevTok)
 	showHidden := strings.HasPrefix(p.NamePrefix, ".") || prevLo == "--env-file"
-	arcOrFileFlag := prevLo == "-f" || prevLo == "--file" ||
-		strings.Contains(" tar unzip gunzip 7z gzip zcat ", " "+cmd+" ")
+	arcOrFileFlag := prevLo == "-f" || prevLo == "--file" || archiveCommands[cmd]
 
 	out := make([]models.CompletionItem, 0, len(entries))
 	for _, entry := range entries {
@@ -58,7 +53,7 @@ func suggestFileCandidates(p ParsedLine, input string, entries []models.SFTPFile
 
 		matchBonus := 80
 		if lowerPref != "" {
-			excess := max(0, len(name)-len(p.NamePrefix))
+			excess := max(0, utf8.RuneCountInString(name)-prefRunes)
 			matchBonus = 100 - min(excess, 40)
 		}
 

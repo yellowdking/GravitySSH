@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Check, Clock, Copy, Loader2, QrCode, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import type { SyncSendSession } from '../syncTypes'
 import { api } from '../wailsApi'
@@ -17,13 +17,36 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
   const [revoking, setRevoking] = useState(false)
   const [copied, setCopied] = useState(false)
   const [left, setLeft] = useState(0)
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) {
+        clearTimeout(copyTimerRef.current)
+        copyTimerRef.current = null
+      }
+    }
+  }, [])
 
   useEffect(() => {
     if (!sess) { setLeft(0); return }
-    const tick = () => setLeft(Math.max(0, Math.floor((new Date(sess.expiresAt).getTime() - Date.now()) / 1000)))
-    tick()
-    const id = setInterval(tick, 1000)
-    return () => clearInterval(id)
+    const expiresMs = new Date(sess.expiresAt).getTime()
+    let id: ReturnType<typeof setInterval> | null = null
+    const tick = () => {
+      const rem = Math.max(0, Math.floor((expiresMs - Date.now()) / 1000))
+      setLeft(rem)
+      if (rem <= 0 && id !== null) {
+        clearInterval(id)
+        id = null
+      }
+      return rem
+    }
+    if (tick() > 0) {
+      id = setInterval(tick, 1000)
+    }
+    return () => {
+      if (id !== null) clearInterval(id)
+    }
   }, [sess])
 
   const gen = async () => {
@@ -48,7 +71,11 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
     try {
       await navigator.clipboard.writeText(sess.code)
       setCopied(true); onToast('同步码已复制')
-      setTimeout(() => setCopied(false), 1800)
+      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current)
+      copyTimerRef.current = setTimeout(() => {
+        copyTimerRef.current = null
+        setCopied(false)
+      }, 1800)
     } catch { onToast('复制失败，请手动记录', 'error') }
   }
 
@@ -57,7 +84,7 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
       <div className="space-y-4">
         <div className="rounded-xl bg-[#0d111a] border border-ag-border p-4 space-y-2">
           <div className="flex items-center gap-2 text-xs font-medium text-indigo-300">
-            <ShieldCheck className="w-4 h-4 shrink-0" /><span>端到端零知识加密同步</span>
+            <ShieldCheck className="w-4 h-4 shrink-0" /><span>端到端零知识加密多端同步</span>
           </div>
           <p className="text-xs text-ag-muted leading-relaxed">
             本机用 8 位同步码派生 AES-256-GCM 密钥加密服务器、SSH 密钥、快捷命令与模板，中继仅内存暂存 5 分钟，领取即焚。
@@ -79,7 +106,7 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
       <div className="rounded-xl bg-[#0d111a] border border-ag-border p-4 flex flex-col sm:flex-row items-center gap-4">
         <QrCodeSvg value={sess.qrText} size={156} />
         <div className="flex-1 w-full space-y-2.5 text-center sm:text-left">
-          <div className="text-[11px] text-ag-muted">在 Android 或另一台 GravitySSH 输入或扫描</div>
+          <div className="text-[11px] text-ag-muted">在其他设备的 GravitySSH 输入或扫码接收</div>
           <div className="flex items-center justify-center sm:justify-start gap-2">
             <span className="font-mono text-2xl font-bold tracking-[0.18em] text-indigo-200 bg-ag-elevated px-3.5 py-2 rounded-xl border border-indigo-500/35 select-all">{sess.code}</span>
             <button onClick={() => void copy()} title="复制" className="p-2.5 rounded-xl bg-ag-elevated hover:bg-ag-hover border border-ag-border text-ag-text">
@@ -101,7 +128,7 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
       </div>
 
       <div className="flex justify-between gap-2">
-        <button onClick={() => void revoke()} disabled={revoking} className="px-3 py-2 rounded-lg text-xs font-medium bg-rose-500/12 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center gap-1.5">
+        <button onClick={() => void revoke()} disabled={revoking} className="px-3 py-2 rounded-lg text-xs font-medium bg-rose-500/[0.12] hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center gap-1.5">
           {revoking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}撤销同步码
         </button>
         <button onClick={() => void gen()} disabled={busy} className="px-3 py-2 rounded-lg text-xs font-medium bg-ag-elevated hover:bg-ag-hover text-ag-text border border-ag-border flex items-center gap-1.5">

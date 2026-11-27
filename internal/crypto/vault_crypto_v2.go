@@ -4,12 +4,36 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/hkdf"
 )
+
+// DerivePasswordKey derives the 32-byte Argon2id password key for GSV2 Mode 0x02.
+// If pwSalt is nil/empty, a fresh 16-byte random salt is generated and returned.
+func DerivePasswordKey(password string, pwSalt []byte) (pwKey, saltOut []byte, err error) {
+	if password == "" {
+		return nil, nil, errors.New("password must not be empty")
+	}
+	if len(pwSalt) == 0 {
+		saltOut = make([]byte, pwSaltSize)
+		if _, err := io.ReadFull(rand.Reader, saltOut); err != nil {
+			return nil, nil, fmt.Errorf("generate password salt: %w", err)
+		}
+	} else {
+		if len(pwSalt) != pwSaltSize {
+			return nil, nil, ErrInvalidFormat
+		}
+		saltOut = append([]byte(nil), pwSalt...)
+	}
+	pwBytes := []byte(password)
+	defer ZeroBytes(pwBytes)
+	pwKey = argon2.IDKey(pwBytes, saltOut, 2, 64*1024, 2, masterKeySize)
+	return pwKey, saltOut, nil
+}
 
 // SealWithPassword encrypts plaintext into GSV2 format:
 //   - Empty password -> Mode 0x01 (DPAPI-only, zero-prompt on same PC/user)
@@ -20,11 +44,34 @@ import (
 //	Magic(4:"GSV2") | Mode(1) | Flags(1) | WrappedKeyLen(4) | WrappedKey |
 //	PwSaltLen(1) | PwSalt | Salt(32) | Nonce(12) | Ciphertext+GCMTag
 func (e *EnvelopeCrypto) SealWithPassword(plaintext []byte, password string) ([]byte, error) {
+	if password == "" {
+		return e.SealV2WithCachedKey(plaintext, nil, nil)
+	}
+	pwKey, pwSalt, err := DerivePasswordKey(password, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer ZeroBytes(pwKey)
+	return e.SealV2WithCachedKey(plaintext, pwSalt, pwKey)
+}
+
+// SealV2WithCachedKey encrypts plaintext into GSV2 format using a pre-derived
+// (pwSalt, pwKey) pair for Mode 0x02, or Mode 0x01 when both are empty.
+// Every call still generates a fresh random masterKey, HKDF salt, and AES-GCM nonce.
+func (e *EnvelopeCrypto) SealV2WithCachedKey(plaintext, pwSalt, pwKey []byte) ([]byte, error) {
+	mode := ModeDPAPI
+	if len(pwSalt) > 0 || len(pwKey) > 0 {
+		if len(pwSalt) != pwSaltSize || len(pwKey) != masterKeySize {
+			return nil, ErrInvalidFormat
+		}
+		mode = ModePasswordDPAPI
+	}
+
 	masterKey := make([]byte, masterKeySize)
 	if _, err := io.ReadFull(rand.Reader, masterKey); err != nil {
 		return nil, fmt.Errorf("generate master key: %w", err)
 	}
-	defer zeroBytes(masterKey)
+	defer ZeroBytes(masterKey)
 
 	wrappedKey, err := e.protector.Protect(masterKey)
 	if err != nil {
@@ -36,18 +83,10 @@ func (e *EnvelopeCrypto) SealWithPassword(plaintext []byte, password string) ([]
 		return nil, fmt.Errorf("generate salt: %w", err)
 	}
 
-	mode := ModeDPAPI
-	var pwSalt []byte
 	keyMaterial := masterKey
-
-	if password != "" {
-		mode = ModePasswordDPAPI
-		pwSalt = make([]byte, pwSaltSize)
-		if _, err := io.ReadFull(rand.Reader, pwSalt); err != nil {
-			return nil, fmt.Errorf("generate password salt: %w", err)
-		}
-		combined := combineMasterAndPassword(masterKey, password, pwSalt)
-		defer zeroBytes(combined)
+	if mode == ModePasswordDPAPI {
+		combined := xorKeyMaterial(masterKey, pwKey)
+		defer ZeroBytes(combined)
 		keyMaterial = combined
 	}
 
@@ -55,7 +94,7 @@ func (e *EnvelopeCrypto) SealWithPassword(plaintext []byte, password string) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer zeroBytes(dataKey)
+	defer ZeroBytes(dataKey)
 
 	gcm, err := newAESGCM(dataKey)
 	if err != nil {
@@ -84,21 +123,21 @@ func (e *EnvelopeCrypto) SealWithPassword(plaintext []byte, password string) ([]
 	return append(out, ciphertext...), nil
 }
 
-func (e *EnvelopeCrypto) openV2(blob []byte, password string) ([]byte, error) {
+func (e *EnvelopeCrypto) openV2WithKey(blob []byte, password string) (plaintext, pwSaltOut, pwKeyOut []byte, err error) {
 	// Minimum size: Magic(4)+Mode(1)+Flags(1)+WKeyLen(4)+PwSaltLen(1)+Salt(32)+Nonce(12)+Tag(16)
 	minSize := 4 + 1 + 1 + 4 + 1 + saltSize + nonceSize + 16
 	if len(blob) < minSize {
-		return nil, ErrInvalidFormat
+		return nil, nil, nil, ErrInvalidFormat
 	}
 
 	mode := blob[4]
 	if mode != ModeDPAPI && mode != ModePasswordDPAPI {
-		return nil, ErrInvalidFormat
+		return nil, nil, nil, ErrInvalidFormat
 	}
 
 	wrappedKeyLen := int(binary.BigEndian.Uint32(blob[6:10]))
 	if wrappedKeyLen <= 0 || 10+wrappedKeyLen+1 > len(blob) {
-		return nil, ErrInvalidFormat
+		return nil, nil, nil, ErrInvalidFormat
 	}
 
 	offset := 10
@@ -109,7 +148,7 @@ func (e *EnvelopeCrypto) openV2(blob []byte, password string) ([]byte, error) {
 	offset++
 	headerLen := offset + pwSaltLen + saltSize + nonceSize
 	if headerLen+16 > len(blob) {
-		return nil, ErrInvalidFormat
+		return nil, nil, nil, ErrInvalidFormat
 	}
 
 	pwSalt := blob[offset : offset+pwSaltLen]
@@ -122,53 +161,67 @@ func (e *EnvelopeCrypto) openV2(blob []byte, password string) ([]byte, error) {
 
 	if mode == ModePasswordDPAPI {
 		if pwSaltLen != pwSaltSize {
-			return nil, ErrInvalidFormat
+			return nil, nil, nil, ErrInvalidFormat
 		}
 		if password == "" {
-			return nil, ErrPasswordRequired
+			return nil, nil, nil, ErrPasswordRequired
 		}
 	}
 
 	masterKey, err := e.protector.Unprotect(wrappedKey)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrDecryptFailed, err)
+		return nil, nil, nil, fmt.Errorf("%w: %v", ErrDecryptFailed, err)
 	}
-	defer zeroBytes(masterKey)
+	defer ZeroBytes(masterKey)
 	if len(masterKey) != masterKeySize {
-		return nil, ErrDecryptFailed
+		return nil, nil, nil, ErrDecryptFailed
 	}
 
 	keyMaterial := masterKey
+	var pwKey []byte
+	keepPWKey := false
+	defer func() {
+		if !keepPWKey {
+			ZeroBytes(pwKey)
+		}
+	}()
+
 	if mode == ModePasswordDPAPI {
-		combined := combineMasterAndPassword(masterKey, password, pwSalt)
-		defer zeroBytes(combined)
+		pwBytes := []byte(password)
+		pwKey = argon2.IDKey(pwBytes, pwSalt, 2, 64*1024, 2, masterKeySize)
+		ZeroBytes(pwBytes)
+		combined := xorKeyMaterial(masterKey, pwKey)
+		defer ZeroBytes(combined)
 		keyMaterial = combined
 	}
 
 	dataKey, err := deriveDataKeyV2(keyMaterial, salt, mode)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
-	defer zeroBytes(dataKey)
+	defer ZeroBytes(dataKey)
 
 	gcm, err := newAESGCM(dataKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, blob[:headerLen])
+	plaintext, err = gcm.Open(nil, nonce, ciphertext, blob[:headerLen])
 	if err != nil {
 		if mode == ModePasswordDPAPI {
-			return nil, fmt.Errorf("%w: %v", ErrWrongPassword, err)
+			return nil, nil, nil, fmt.Errorf("%w: %v", ErrWrongPassword, err)
 		}
-		return nil, fmt.Errorf("%w: %v", ErrDecryptFailed, err)
+		return nil, nil, nil, fmt.Errorf("%w: %v", ErrDecryptFailed, err)
 	}
-	return plaintext, nil
+	if mode == ModePasswordDPAPI {
+		keepPWKey = true
+		pwSaltOut = append([]byte(nil), pwSalt...)
+		pwKeyOut = pwKey
+	}
+	return plaintext, pwSaltOut, pwKeyOut, nil
 }
 
-func combineMasterAndPassword(masterKey []byte, password string, pwSalt []byte) []byte {
-	pwKey := argon2.IDKey([]byte(password), pwSalt, 2, 64*1024, 2, masterKeySize)
-	defer zeroBytes(pwKey)
+func xorKeyMaterial(masterKey, pwKey []byte) []byte {
 	combined := make([]byte, masterKeySize)
 	for i := range combined {
 		combined[i] = masterKey[i] ^ pwKey[i]

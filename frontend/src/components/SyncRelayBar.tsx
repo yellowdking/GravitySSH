@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Check, ChevronDown, ChevronRight, Copy, Loader2, RotateCcw, Save, Server, Wifi } from 'lucide-react'
 import type { AppSettings } from '../types'
 import { api } from '../wailsApi'
@@ -22,6 +22,16 @@ export const SyncRelayBar: React.FC<Props> = ({
   const [testRes, setTestRes] = useState<{ ok: boolean; text: string } | null>(null)
   const [showDocker, setShowDocker] = useState(false)
   const [copiedCmd, setCopiedCmd] = useState(false)
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) {
+        clearTimeout(copyTimerRef.current)
+        copyTimerRef.current = null
+      }
+    }
+  }, [])
 
   const trimmed = relayInput.trim()
   const isCustom = trimmed !== '' && trimmed !== defaultRelay
@@ -64,7 +74,11 @@ export const SyncRelayBar: React.FC<Props> = ({
       await navigator.clipboard.writeText(DOCKER_CMD)
       setCopiedCmd(true)
       onToast('Docker 部署命令已复制')
-      setTimeout(() => setCopiedCmd(false), 1800)
+      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current)
+      copyTimerRef.current = setTimeout(() => {
+        copyTimerRef.current = null
+        setCopiedCmd(false)
+      }, 1800)
     } catch {
       onToast('复制失败，请手动复制', 'error')
     }

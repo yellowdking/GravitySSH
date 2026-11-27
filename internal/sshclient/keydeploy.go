@@ -27,6 +27,9 @@ func (m *Manager) DeploySSHKeyToServers(
 	if pubKey == "" {
 		return nil, errors.New("所选密钥缺少有效公钥内容")
 	}
+	if strings.ContainsAny(pubKey, "\r\n") {
+		return nil, errors.New("公钥格式无效：不支持包含换行符的多行公钥")
+	}
 
 	uniqueIDs := make([]string, 0, len(serverIDs))
 	seen := make(map[string]bool)
@@ -49,8 +52,18 @@ func (m *Manager) DeploySSHKeyToServers(
 		wg.Add(1)
 		go func(idx int, serverID string) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				results[idx] = models.KeyDeployResult{
+					ServerID:   serverID,
+					ServerName: serverID,
+					OK:         false,
+					Message:    "部署已取消",
+				}
+				return
+			}
 			results[idx] = m.deployKeyToOneServer(ctx, serverID, keyID, pubKey, bindAsAuth)
 		}(i, sid)
 	}
@@ -88,30 +101,13 @@ func (m *Manager) deployKeyToOneServer(
 	}
 	defer dialRes.Close()
 
-	sshSess, err := dialRes.Client.NewSession()
-	if err != nil {
-		res.Message = fmt.Sprintf("创建 SSH 会话失败: %v", err)
-		return res
-	}
-	defer sshSess.Close()
-
 	qPub := shellQuote(pubKey)
 	installCmd := fmt.Sprintf(
-		"mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qxF %s ~/.ssh/authorized_keys || printf '%%s\\n' %s >> ~/.ssh/authorized_keys)",
+		`mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qxF %s ~/.ssh/authorized_keys || { [ ! -s ~/.ssh/authorized_keys ] || [ -z "$(tail -c 1 ~/.ssh/authorized_keys)" ] || printf '\n' >> ~/.ssh/authorized_keys; printf '%%s\n' %s >> ~/.ssh/authorized_keys; })`,
 		qPub, qPub,
 	)
 
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-done:
-		case <-dialCtx.Done():
-			_ = sshSess.Close()
-		}
-	}()
-
-	out, runErr := sshSess.CombinedOutput(installCmd)
-	close(done)
+	out, runErr := runSSHExec(dialCtx, dialRes.Client, installCmd, 0, true)
 	if runErr != nil {
 		snippet := strings.TrimSpace(string(out))
 		if len(snippet) > 180 {
