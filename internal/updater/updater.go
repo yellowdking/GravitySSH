@@ -128,7 +128,7 @@ func checkReleaseAtURL(ctx context.Context, apiURL, currentVersion string) (mode
 	}
 
 	latest := stripVersionPrefix(rel.TagName)
-	if latest == "" {
+	if _, ok := parseSemver(latest); !ok {
 		return models.UpdateCheckResult{}, errors.New("更新接口返回了无效的版本号")
 	}
 
@@ -158,8 +158,14 @@ type semver struct {
 
 // IsNewerVersion compares two semantic versions (e.g. "1.1.3" vs "1.2.0", "1.2.0-beta" vs "1.2.0").
 func IsNewerVersion(current, latest string) bool {
-	c := parseSemver(current)
-	l := parseSemver(latest)
+	l, lok := parseSemver(latest)
+	if !lok {
+		return false
+	}
+	c, cok := parseSemver(current)
+	if !cok {
+		return false
+	}
 	for i := 0; i < 3; i++ {
 		if l.nums[i] != c.nums[i] {
 			return l.nums[i] > c.nums[i]
@@ -179,14 +185,14 @@ func IsNewerVersion(current, latest string) bool {
 		if c.pre[i] == l.pre[i] {
 			continue
 		}
-		cn, cerr := strconv.Atoi(c.pre[i])
-		ln, lerr := strconv.Atoi(l.pre[i])
+		cn, cnum := parseASCIIDigits(c.pre[i])
+		ln, lnum := parseASCIIDigits(l.pre[i])
 		switch {
-		case cerr == nil && lerr == nil:
+		case cnum && lnum:
 			return ln > cn
-		case cerr == nil && lerr != nil:
+		case cnum && !lnum:
 			return true // numeric < alphanumeric
-		case cerr != nil && lerr == nil:
+		case !cnum && lnum:
 			return false
 		default:
 			return l.pre[i] > c.pre[i]
@@ -195,22 +201,57 @@ func IsNewerVersion(current, latest string) bool {
 	return len(l.pre) > len(c.pre)
 }
 
-func parseSemver(v string) semver {
+func parseASCIIDigits(s string) (uint64, bool) {
+	if s == "" {
+		return 0, false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+func parseSemver(v string) (semver, bool) {
 	v = stripVersionPrefix(v)
+	if v == "" {
+		return semver{}, false
+	}
 	if idx := strings.IndexByte(v, '+'); idx >= 0 {
 		v = v[:idx]
 	}
 	core, preStr, hasPre := strings.Cut(v, "-")
+	if core == "" {
+		return semver{}, false
+	}
 	parts := strings.Split(core, ".")
+	if len(parts) == 0 || len(parts) > 3 {
+		return semver{}, false
+	}
 	var out semver
-	for i := 0; i < 3 && i < len(parts); i++ {
-		n, err := strconv.Atoi(parts[i])
-		if err == nil && n >= 0 {
-			out.nums[i] = n
+	for i := 0; i < len(parts); i++ {
+		n, ok := parseASCIIDigits(parts[i])
+		if !ok || n > uint64(^uint(0)>>1) {
+			return semver{}, false
 		}
+		out.nums[i] = int(n)
 	}
-	if hasPre && preStr != "" {
-		out.pre = strings.Split(preStr, ".")
+	if hasPre {
+		if preStr == "" {
+			return semver{}, false
+		}
+		preParts := strings.Split(preStr, ".")
+		for _, p := range preParts {
+			if p == "" {
+				return semver{}, false
+			}
+		}
+		out.pre = preParts
 	}
-	return out
+	return out, true
 }

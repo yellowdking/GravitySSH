@@ -23,6 +23,15 @@ func TestIsNewerVersion(t *testing.T) {
 		{"1.2.0", "1.2.0-beta", false},
 		{"1.2.0-alpha.2", "1.2.0-alpha.10", true},
 		{"1.2.0-rc.1", "1.2.0-beta.2", false},
+		// SemVer 2.0.0: "-1" in 1.4.0--1 is alphanumeric (contains '-'), so numeric "0" < "-1"
+		{"1.4.0-0", "1.4.0--1", true},
+		{"1.4.0--1", "1.4.0-1", false},
+		{"1.4.0-+1", "1.4.0-1", false},
+		// Empty or invalid latest must NEVER be considered newer
+		{"0.0.0-alpha", "", false},
+		{"0.0.0-alpha", "invalid-tag", false},
+		{"1.4.0", "1.4.0-", false},
+		{"1.4.0", "1.4.0-alpha..1", false},
 	}
 	for _, tc := range cases {
 		if got := IsNewerVersion(tc.cur, tc.latest); got != tc.want {
