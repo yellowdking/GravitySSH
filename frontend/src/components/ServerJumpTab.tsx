@@ -1,5 +1,6 @@
 import React from 'react'
 import type { AuthType, JumpMode, ServerSaveRequest, ServerView, SSHKeyMeta } from '../types'
+import { NumericInput } from './NumericInput'
 
 interface Props {
   form: ServerSaveRequest
@@ -17,7 +18,7 @@ export const ServerJumpTab: React.FC<Props> = ({
   onChange,
 }) => (
   <div className="space-y-4">
-    <div className="p-3 rounded-xl bg-amber-500/8 border border-amber-500/20 text-xs text-amber-200/90 leading-relaxed">
+    <div className="p-3 rounded-xl bg-amber-500/[0.08] border border-amber-500/20 text-xs text-amber-200/90 leading-relaxed">
       通过跳板机 (Bastion / ProxyJump) 建立加密 SSH 隧道中转到目标机器，适合访问内网机器或线路不佳的海外节点（支持选择已保存服务器形成多级跳板链）。
     </div>
 
@@ -82,13 +83,13 @@ export const ServerJumpTab: React.FC<Props> = ({
           </div>
           <div className="col-span-2">
             <label className="block text-xs text-ag-muted mb-1.5">端口</label>
-            <input
-              type="number"
+            <NumericInput
+              min={1}
+              max={65535}
+              fallback={22}
               className="ag-input font-mono"
               value={form.jumpHost.port}
-              onChange={(e) =>
-                onChange({ ...form, jumpHost: { ...form.jumpHost, port: Number(e.target.value) || 22 } })
-              }
+              onChange={(port) => onChange({ ...form, jumpHost: { ...form.jumpHost, port } })}
             />
           </div>
           <div className="col-span-4">

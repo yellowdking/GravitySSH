@@ -4,7 +4,7 @@ const ANSI_TOKEN_RE = /(\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b
 const INCOMPLETE_TRAILING_ANSI_RE = /(?:\x1b\[[0-9;?]*[ -/]*|\x1b\][^\x07\x1b]*(?:\x1b)?|\x1b)$/
 
 const HIGHLIGHT_RE =
-  /(\b(?:error|fatal|panic|failed|failure|exception|critical|denied)\b|\b(?:warn|warning|deprecated|timeout|retry)\b|\b(?:ok|success|succeeded|passed|healthy)\b|active \(running\)|\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b)/gi
+  /(\b(?:error|fatal|panic|failed|failure|exception|critical|denied)\b|\b(?:warn|warning|deprecated|timeout|retry)\b|\b(?:ok|success|succeeded|passed|healthy)\b|active \(running\)|\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b)/gi
 
 const RED = '\x1b[38;5;203m'
 const AMBER = '\x1b[38;5;221m'

@@ -1,12 +1,12 @@
-import React, { useEffect, useState } from 'react'
-import { AlertTriangle, ShieldAlert, Sparkles, X } from 'lucide-react'
-import { inspectPasteSafety, stripHiddenChars, type PasteWarning } from '../utils/pasteGuard'
+import React, { useEffect, useMemo, useState } from 'react'
+import { AlertTriangle, CheckCircle2, ShieldAlert, Sparkles, X } from 'lucide-react'
+import { inspectPasteSafety, stripHiddenChars } from '../utils/pasteGuard'
+import { ModalShell } from './ModalShell'
 
 interface Props {
   open: boolean
   initialText: string
-  warnings: PasteWarning[]
-  hasHiddenChars: boolean
+  bracketedPasteActive: boolean
   onConfirm: (finalText: string) => void
   onCancel: () => void
 }
@@ -14,8 +14,7 @@ interface Props {
 export const PasteGuardModal: React.FC<Props> = ({
   open,
   initialText,
-  warnings,
-  hasHiddenChars,
+  bracketedPasteActive,
   onConfirm,
   onCancel,
 }) => {
@@ -25,13 +24,15 @@ export const PasteGuardModal: React.FC<Props> = ({
     if (open) setText(initialText)
   }, [open, initialText])
 
+  const live = useMemo(
+    () => inspectPasteSafety(text, bracketedPasteActive),
+    [text, bracketedPasteActive]
+  )
+
   if (!open) return null
 
-  const live = inspectPasteSafety(text, true)
-  const showStrip = hasHiddenChars || live.hasHiddenChars
-
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+    <ModalShell open={open} onClose={onCancel} backdropClassName="bg-black/75">
       <div className="w-full max-w-xl rounded-2xl bg-ag-panel border border-amber-500/40 shadow-ag overflow-hidden flex flex-col max-h-[85vh]">
         <div className="px-5 py-3.5 border-b border-ag-border bg-[#11151f] flex items-center justify-between">
           <div className="flex items-center gap-2.5">
@@ -50,28 +51,35 @@ export const PasteGuardModal: React.FC<Props> = ({
 
         <div className="p-5 space-y-3.5 overflow-y-auto flex-1">
           <div className="space-y-1.5">
-            {warnings.map((w, idx) => (
-              <div
-                key={`${w.kind}-${idx}`}
-                className={`flex items-start gap-2 rounded-xl px-3 py-2 text-xs border ${
-                  w.kind === 'danger' || w.kind === 'hidden-chars' || w.kind === 'homoglyph'
-                    ? 'bg-rose-500/10 border-rose-500/30 text-rose-200'
-                    : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
-                }`}
-              >
-                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                <div>
-                  <span className="font-semibold">{w.label}：</span>
-                  <span className="opacity-90">{w.detail}</span>
-                </div>
+            {live.warnings.length === 0 ? (
+              <div className="flex items-center gap-2 rounded-xl px-3 py-2 text-xs border bg-emerald-500/10 border-emerald-500/30 text-emerald-200">
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                <span>当前内容已无明显安全风险，可放心粘贴</span>
               </div>
-            ))}
+            ) : (
+              live.warnings.map((w, idx) => (
+                <div
+                  key={`${w.kind}-${idx}`}
+                  className={`flex items-start gap-2 rounded-xl px-3 py-2 text-xs border ${
+                    w.kind === 'danger' || w.kind === 'hidden-chars' || w.kind === 'homoglyph'
+                      ? 'bg-rose-500/10 border-rose-500/30 text-rose-200'
+                      : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+                  }`}
+                >
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-semibold">{w.label}：</span>
+                    <span className="opacity-90">{w.detail}</span>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
 
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-xs text-ag-muted">即将粘贴的内容（可直接编辑）</span>
-              {showStrip && (
+              {live.hasHiddenChars && (
                 <button
                   type="button"
                   onClick={() => setText((prev) => stripHiddenChars(prev))}
@@ -103,6 +111,6 @@ export const PasteGuardModal: React.FC<Props> = ({
           </button>
         </div>
       </div>
-    </div>
+    </ModalShell>
   )
 }
