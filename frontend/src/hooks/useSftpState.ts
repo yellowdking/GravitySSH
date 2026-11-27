@@ -8,6 +8,74 @@ import { createSftpActions } from './sftpActions'
 export const MAX_ERROR_TRANSFERS = 8
 export const MAX_DONE_TRANSFERS = 6
 
+export function normalizeSftpPath(rawPath: string, homeDir = ''): string {
+  const trimmed = rawPath.trim()
+  if (!trimmed || trimmed === '~') {
+    const h = homeDir.trim()
+    if (!h || h === '/') return '/'
+    return h.replace(/\/+$/, '') || '/'
+  }
+  if (trimmed === '/') return '/'
+  return trimmed.replace(/\/+$/, '') || '/'
+}
+
+export function shouldSkipDuplicateSftpList(
+  targetPath: string,
+  pendingPath: string | null,
+  homeDir = '',
+  force = false
+): boolean {
+  if (force || pendingPath === null) return false
+  return normalizeSftpPath(targetPath, homeDir) === normalizeSftpPath(pendingPath, homeDir)
+}
+
+export function shouldIgnoreCwdSync(
+  eventPath: string,
+  currentPath: string,
+  pendingPath: string | null,
+  homeDir = ''
+): boolean {
+  if (!eventPath.trim()) return true
+  const normEv = normalizeSftpPath(eventPath, homeDir)
+  if (normEv === normalizeSftpPath(currentPath, homeDir)) return true
+  if (pendingPath !== null && normEv === normalizeSftpPath(pendingPath, homeDir)) return true
+  return false
+}
+
+export interface UploadRefreshCoalescer {
+  schedule: (destPath?: string) => void
+  cancel: () => void
+}
+
+export function createUploadRefreshCoalescer(
+  delayMs: number,
+  onRefresh: (destPath?: string) => void
+): UploadRefreshCoalescer {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let pendingDest: string | undefined
+
+  const cancel = () => {
+    if (timer !== null) {
+      clearTimeout(timer)
+      timer = null
+    }
+    pendingDest = undefined
+  }
+
+  const schedule = (destPath?: string) => {
+    if (destPath !== undefined) pendingDest = destPath
+    if (timer !== null) clearTimeout(timer)
+    timer = setTimeout(() => {
+      const target = pendingDest
+      timer = null
+      pendingDest = undefined
+      onRefresh(target)
+    }, delayMs)
+  }
+
+  return { schedule, cancel }
+}
+
 export function pruneTransferMap(
   map: Record<string, TransferProgress>,
   maxErrors = MAX_ERROR_TRANSFERS,
@@ -67,12 +135,18 @@ export function useSftpState(
   const [busyPaths, setBusyPaths] = useState<Set<string>>(() => new Set())
   const [showHidden, setShowHidden] = useState(false)
   const [error, setError] = useState('')
-  const [transfers, setTransfers] = useState<Record<string, TransferProgress>>({})
   const [editingFile, setEditingFile] = useState<{ token: number; path: string; content: string } | null>(null)
   const [savingToken, setSavingToken] = useState<number | null>(null)
 
   const currentPathRef = useRef(currentPath)
   currentPathRef.current = currentPath
+  const pathInputRef = useRef(pathInput)
+  pathInputRef.current = pathInput
+  const parentPathRef = useRef(parentPath)
+  parentPathRef.current = parentPath
+  const homeDirRef = useRef(session.homeDir || '')
+  homeDirRef.current = session.homeDir || ''
+  const pendingPathRef = useRef<string | null>(null)
   const editingFileRef = useRef(editingFile)
   editingFileRef.current = editingFile
   const editorTokenRef = useRef(0)
@@ -80,7 +154,7 @@ export function useSftpState(
   const pathFocusedRef = useRef(false)
   const pathDirtyRef = useRef(false)
   const loadSeqRef = useRef(0)
-  const dismissTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const uploadCoalescerRef = useRef<UploadRefreshCoalescer | null>(null)
   const { confirm, prompt, dialogNode } = useActionDialogs()
 
   const setActiveEditingFile = useCallback((file: { path: string; content: string } | null) => {
@@ -125,48 +199,6 @@ export function useSftpState(
     }
   }, [])
 
-  const dismissTransfer = useCallback((transferId: string) => {
-    const existing = dismissTimersRef.current.get(transferId)
-    if (existing !== undefined) {
-      clearTimeout(existing)
-      dismissTimersRef.current.delete(transferId)
-    }
-    setTransfers((prev) => {
-      if (!(transferId in prev)) return prev
-      const next = { ...prev }
-      delete next[transferId]
-      return next
-    })
-  }, [])
-
-  const clearFinishedTransfers = useCallback(() => {
-    setTransfers((prev) => {
-      let changed = false
-      const next: Record<string, TransferProgress> = {}
-      for (const [id, tr] of Object.entries(prev)) {
-        if (tr.status === 'done' || tr.status === 'error') {
-          changed = true
-          const existing = dismissTimersRef.current.get(id)
-          if (existing !== undefined) {
-            clearTimeout(existing)
-            dismissTimersRef.current.delete(id)
-          }
-        } else {
-          next[id] = tr
-        }
-      }
-      return changed ? next : prev
-    })
-  }, [])
-
-  useEffect(() => {
-    const timers = dismissTimersRef.current
-    return () => {
-      for (const timer of timers.values()) clearTimeout(timer)
-      timers.clear()
-    }
-  }, [])
-
   const addBusyPath = useCallback((p: string) => {
     setBusyPaths((prev) => {
       if (prev.has(p)) return prev
@@ -190,8 +222,15 @@ export function useSftpState(
   }, [])
 
   const loadDir = useCallback(
-    async (targetPath: string, syncCwd = true, forceSyncInput = syncCwd) => {
+    async (targetPath: string, syncCwd = true, forceSyncInput = syncCwd, force = false) => {
       if (!session.sftpReady) return
+      const home = homeDirRef.current
+      if (shouldSkipDuplicateSftpList(targetPath, pendingPathRef.current, home, force)) {
+        return
+      }
+      uploadCoalescerRef.current?.cancel()
+      const normTarget = normalizeSftpPath(targetPath, home)
+      pendingPathRef.current = normTarget
       const seq = ++loadSeqRef.current
       setLoading(true)
       setError('')
@@ -212,70 +251,52 @@ export function useSftpState(
       } catch (err) {
         if (seq === loadSeqRef.current) setError(errMsg(err))
       } finally {
-        if (seq === loadSeqRef.current) setLoading(false)
+        if (seq === loadSeqRef.current) {
+          pendingPathRef.current = null
+          setLoading(false)
+        }
       }
     },
     [session.sessionId, session.sftpReady]
   )
 
   useEffect(() => {
-    if (session.sftpReady) void loadDir(session.homeDir || '', true, true)
+    const coalescer = createUploadRefreshCoalescer(150, (dest) => {
+      const cur = currentPathRef.current
+      if (dest !== undefined && normalizeSftpPath(dest, homeDirRef.current) !== normalizeSftpPath(cur, homeDirRef.current)) {
+        return
+      }
+      void loadDir(cur, false, false, true)
+    })
+    uploadCoalescerRef.current = coalescer
+    return () => {
+      coalescer.cancel()
+      if (uploadCoalescerRef.current === coalescer) uploadCoalescerRef.current = null
+    }
+  }, [loadDir])
+
+  const scheduleUploadRefresh = useCallback((destPath?: string) => {
+    uploadCoalescerRef.current?.schedule(destPath)
+  }, [])
+
+  const handleUploadProgressDone = useCallback(() => {
+    uploadCoalescerRef.current?.schedule(currentPathRef.current)
+  }, [])
+
+  useEffect(() => {
+    if (session.sftpReady) void loadDir(session.homeDir || '', true, true, false)
   }, [session.sftpReady, session.homeDir, loadDir])
 
   useEffect(() => {
     if (!followTerminal || !session.sftpReady) return
     return api.onEvent<{ sessionId: string; path: string }>('session:cwd', (ev) => {
-      if (ev.sessionId === session.sessionId && ev.path && ev.path !== currentPathRef.current) {
-        void loadDir(ev.path, false, false)
+      if (ev.sessionId !== session.sessionId || !ev.path) return
+      if (shouldIgnoreCwdSync(ev.path, currentPathRef.current, pendingPathRef.current, homeDirRef.current)) {
+        return
       }
+      void loadDir(ev.path, false, false, false)
     })
   }, [followTerminal, session.sftpReady, session.sessionId, loadDir])
-
-  useEffect(() => {
-    if (session.status === 'connected') return
-    setTransfers((prev) => markRunningTransfersInterrupted(prev))
-  }, [session.status])
-
-  useEffect(() => {
-    return api.onEvent<TransferProgress>('sftp:progress', (prog) => {
-      if (prog.sessionId !== session.sessionId) return
-      setTransfers((prev) => {
-        const updated = { ...prev }
-        delete updated[prog.transferId]
-        updated[prog.transferId] = prog
-        const { next, evictedIds } = pruneTransferMap(updated)
-        for (const id of evictedIds) {
-          const t = dismissTimersRef.current.get(id)
-          if (t !== undefined) {
-            clearTimeout(t)
-            dismissTimersRef.current.delete(id)
-          }
-        }
-        return next
-      })
-      if (prog.status === 'done') {
-        if (prog.direction === 'upload') void loadDir(currentPathRef.current, false, false)
-        const existing = dismissTimersRef.current.get(prog.transferId)
-        if (existing !== undefined) clearTimeout(existing)
-        const timer = setTimeout(() => {
-          dismissTimersRef.current.delete(prog.transferId)
-          setTransfers((p) => {
-            if (!(prog.transferId in p)) return p
-            const n = { ...p }
-            delete n[prog.transferId]
-            return n
-          })
-        }, 3500)
-        dismissTimersRef.current.set(prog.transferId, timer)
-      } else if (prog.status === 'error') {
-        const existing = dismissTimersRef.current.get(prog.transferId)
-        if (existing !== undefined) {
-          clearTimeout(existing)
-          dismissTimersRef.current.delete(prog.transferId)
-        }
-      }
-    })
-  }, [session.sessionId, loadDir])
 
   useEffect(() => {
     if (!active || !session.sftpReady) return
@@ -286,18 +307,17 @@ export function useSftpState(
         const count = await api.sftpUploadFiles(session.sessionId, paths, dest)
         if (count > 0) {
           onToast(`已通过拖拽上传 ${count} 个文件到 ${dest}`)
-          if (currentPathRef.current === dest) void loadDir(dest, false, false)
+          if (currentPathRef.current === dest) scheduleUploadRefresh(dest)
         }
       } catch (err) { onToast(`拖拽上传失败: ${errMsg(err)}`, 'error') }
     })
-  }, [active, session.sftpReady, session.sessionId, loadDir, onToast])
+  }, [active, session.sftpReady, session.sessionId, scheduleUploadRefresh, onToast])
 
   const visibleEntries = useMemo(
     () => (showHidden ? entries : entries.filter((e) => !e.name.startsWith('.'))),
     [entries, showHidden]
   )
 
-  const transferList = useMemo(() => Object.values(transfers), [transfers])
   const savingFile = editingFile !== null && savingToken === editingFile.token
 
   const actions = useMemo(
@@ -313,18 +333,60 @@ export function useSftpState(
         updateEditingFileIfCurrent,
         beginSaving,
         endSaving,
-        loadDir: (p, syncCwd) => loadDir(p, syncCwd, false),
+        loadDir: (p, syncCwd, force = true) => loadDir(p, syncCwd, false, force),
+        scheduleUploadRefresh,
         confirm,
         prompt,
         onToast,
       }),
-    [session.sessionId, addBusyPath, removeBusyPath, removeEntryLocally, setActiveEditingFile, updateEditingFileIfCurrent, beginSaving, endSaving, loadDir, confirm, prompt, onToast]
+    [
+      session.sessionId,
+      addBusyPath,
+      removeBusyPath,
+      removeEntryLocally,
+      setActiveEditingFile,
+      updateEditingFileIfCurrent,
+      beginSaving,
+      endSaving,
+      loadDir,
+      scheduleUploadRefresh,
+      confirm,
+      prompt,
+      onToast,
+    ]
   )
 
+  const handleSubmitPath = useCallback(() => { void loadDir(pathInputRef.current, true, true, true) }, [loadDir])
+  const handleGoHome = useCallback(() => { void loadDir(homeDirRef.current || '~', true, true, true) }, [loadDir])
+  const handleGoUp = useCallback(() => { void loadDir(parentPathRef.current, true, true, true) }, [loadDir])
+  const handleToggleHidden = useCallback(() => setShowHidden((v) => !v), [])
+  const handleRefresh = useCallback(() => { void loadDir(currentPathRef.current, true, true, true) }, [loadDir])
+  const handleOpenDir = useCallback((p: string) => { void loadDir(p, true, true, false) }, [loadDir])
+  const handleCloseEditor = useCallback(() => setActiveEditingFile(null), [setActiveEditingFile])
+
   return {
-    currentPath, pathInput, setPathInput: handlePathInputChange, onPathInputFocusChange: handlePathInputFocusChange,
-    parentPath, visibleEntries, loading, busyPaths,
-    showHidden, setShowHidden, error, transfers: transferList, dismissTransfer, clearFinishedTransfers,
-    editingFile, setEditingFile: setActiveEditingFile, savingFile, loadDir, dialogNode, ...actions,
+    currentPath,
+    pathInput,
+    setPathInput: handlePathInputChange,
+    onPathInputFocusChange: handlePathInputFocusChange,
+    parentPath,
+    visibleEntries,
+    loading,
+    busyPaths,
+    showHidden,
+    error,
+    editingFile,
+    savingFile,
+    loadDir,
+    handleUploadProgressDone,
+    handleSubmitPath,
+    handleGoHome,
+    handleGoUp,
+    handleToggleHidden,
+    handleRefresh,
+    handleOpenDir,
+    handleCloseEditor,
+    dialogNode,
+    ...actions,
   }
 }
