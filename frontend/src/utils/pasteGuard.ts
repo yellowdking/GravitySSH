@@ -1,4 +1,4 @@
-export interface PasteWarning {
+interface PasteWarning {
   kind: 'danger' | 'pipe-shell' | 'hidden-chars' | 'homoglyph' | 'multiline'
   label: string
   detail: string

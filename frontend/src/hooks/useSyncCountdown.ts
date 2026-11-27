@@ -1,0 +1,60 @@
+import { useEffect, useState } from 'react'
+
+export function fmtSec(n: number): string {
+  const clamped = Math.max(0, n)
+  return `${String(Math.floor(clamped / 60)).padStart(2, '0')}:${String(clamped % 60).padStart(2, '0')}`
+}
+
+export function useSyncCountdown(expiresAt: string | null | undefined): number {
+  const [left, setLeft] = useState(0)
+
+  useEffect(() => {
+    if (!expiresAt) {
+      setLeft(0)
+      return
+    }
+    const expiresMs = new Date(expiresAt).getTime()
+    if (!Number.isFinite(expiresMs)) {
+      setLeft(0)
+      return
+    }
+
+    let id: ReturnType<typeof setInterval> | null = null
+    const tick = () => {
+      const rem = Math.max(0, Math.floor((expiresMs - Date.now()) / 1000))
+      setLeft(rem)
+      if (rem <= 0 && id !== null) {
+        clearInterval(id)
+        id = null
+      }
+      return rem
+    }
+
+    const startIfNeeded = () => {
+      if (id !== null || document.hidden) return
+      if (tick() > 0) id = setInterval(tick, 1000)
+    }
+
+    const onVisibility = () => {
+      if (document.hidden) {
+        if (id !== null) {
+          clearInterval(id)
+          id = null
+        }
+      } else {
+        startIfNeeded()
+      }
+    }
+
+    document.addEventListener('visibilitychange', onVisibility)
+    if (tick() > 0 && !document.hidden) {
+      id = setInterval(tick, 1000)
+    }
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      if (id !== null) clearInterval(id)
+    }
+  }, [expiresAt])
+
+  return left
+}

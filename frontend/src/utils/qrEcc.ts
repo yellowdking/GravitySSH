@@ -1,6 +1,6 @@
 // GF(256) Reed-Solomon ECC & Byte-mode codeword encoder for QR Versions 1-6 (Level M).
 
-export interface QrVersionSpec {
+interface QrVersionSpec {
   ver: number
   size: number
   dataCap: number

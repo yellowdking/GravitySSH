@@ -137,13 +137,3 @@ export function createLogHighlighter(): LogHighlighter {
     },
   }
 }
-
-/**
- * Applies soft ANSI coloring to uncolored log keywords (errors, warnings, ok, IPv4)
- * while preserving all existing ANSI escape sequences and skipping already-colored text.
- */
-export function highlightLogText(text: string): string {
-  if (!text) return text
-  const hl = createLogHighlighter()
-  return hl.highlight(text) + hl.reset()
-}

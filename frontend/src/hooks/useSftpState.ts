@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { SessionInfo, SFTPFileEntry, TransferProgress } from '../types'
 import { api } from '../wailsApi'
+import { errMsg } from '../utils/errors'
+import { useActionDialogs } from './useActionDialogs'
 import { createSftpActions } from './sftpActions'
 
 export function useSftpState(
@@ -23,8 +25,25 @@ export function useSftpState(
 
   const currentPathRef = useRef(currentPath)
   currentPathRef.current = currentPath
+  const editingFileRef = useRef(editingFile)
+  editingFileRef.current = editingFile
+  const pathFocusedRef = useRef(false)
+  const pathDirtyRef = useRef(false)
   const loadSeqRef = useRef(0)
   const dismissTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const { confirm, prompt, dialogNode } = useActionDialogs()
+
+  const handlePathInputChange = useCallback((next: string) => {
+    pathDirtyRef.current = next !== currentPathRef.current
+    setPathInput(next)
+  }, [])
+
+  const handlePathInputFocusChange = useCallback((focused: boolean) => {
+    pathFocusedRef.current = focused
+    if (!focused && !pathDirtyRef.current) {
+      setPathInput(currentPathRef.current)
+    }
+  }, [])
 
   const dismissTransfer = useCallback((transferId: string) => {
     const existing = dismissTimersRef.current.get(transferId)
@@ -71,7 +90,7 @@ export function useSftpState(
   }, [])
 
   const loadDir = useCallback(
-    async (targetPath: string, syncCwd = true) => {
+    async (targetPath: string, syncCwd = true, forceSyncInput = syncCwd) => {
       if (!session.sftpReady) return
       const seq = ++loadSeqRef.current
       setLoading(true)
@@ -81,12 +100,17 @@ export function useSftpState(
         if (seq !== loadSeqRef.current) return
         currentPathRef.current = res.path
         setCurrentPath(res.path)
-        setPathInput(res.path)
+        if (forceSyncInput) {
+          pathDirtyRef.current = false
+          setPathInput(res.path)
+        } else if (!pathFocusedRef.current && !pathDirtyRef.current) {
+          setPathInput(res.path)
+        }
         setParentPath(res.parent)
         setEntries(res.entries || [])
         if (syncCwd) void api.setSessionCwd(session.sessionId, res.path)
       } catch (err) {
-        if (seq === loadSeqRef.current) setError(String(err))
+        if (seq === loadSeqRef.current) setError(errMsg(err))
       } finally {
         if (seq === loadSeqRef.current) setLoading(false)
       }
@@ -95,14 +119,14 @@ export function useSftpState(
   )
 
   useEffect(() => {
-    if (session.sftpReady) void loadDir(session.homeDir || '')
+    if (session.sftpReady) void loadDir(session.homeDir || '', true, true)
   }, [session.sftpReady, session.homeDir, loadDir])
 
   useEffect(() => {
     if (!followTerminal || !session.sftpReady) return
     return api.onEvent<{ sessionId: string; path: string }>('session:cwd', (ev) => {
       if (ev.sessionId === session.sessionId && ev.path && ev.path !== currentPathRef.current) {
-        void loadDir(ev.path, false)
+        void loadDir(ev.path, false, false)
       }
     })
   }, [followTerminal, session.sftpReady, session.sessionId, loadDir])
@@ -112,7 +136,7 @@ export function useSftpState(
       if (prog.sessionId !== session.sessionId) return
       setTransfers((prev) => ({ ...prev, [prog.transferId]: prog }))
       if (prog.status === 'done') {
-        if (prog.direction === 'upload') void loadDir(currentPathRef.current, false)
+        if (prog.direction === 'upload') void loadDir(currentPathRef.current, false, false)
         const existing = dismissTimersRef.current.get(prog.transferId)
         if (existing !== undefined) clearTimeout(existing)
         const timer = setTimeout(() => {
@@ -135,8 +159,8 @@ export function useSftpState(
       try {
         const dest = currentPathRef.current
         const count = await api.sftpUploadFiles(session.sessionId, paths, dest)
-        if (count > 0) { onToast(`已通过拖拽上传 ${count} 个文件到 ${dest}`); void loadDir(dest, false) }
-      } catch (err) { onToast(`拖拽上传失败: ${err}`, 'error') }
+        if (count > 0) { onToast(`已通过拖拽上传 ${count} 个文件到 ${dest}`); void loadDir(dest, false, false) }
+      } catch (err) { onToast(`拖拽上传失败: ${errMsg(err)}`, 'error') }
     })
   }, [active, session.sftpReady, session.sessionId, loadDir, onToast])
 
@@ -145,22 +169,31 @@ export function useSftpState(
     [entries, showHidden]
   )
 
-  const actions = createSftpActions({
-    sessionId: session.sessionId,
-    getCurrentPath: () => currentPathRef.current,
-    editingFile,
-    addBusyPath,
-    removeBusyPath,
-    removeEntryLocally,
-    setEditingFile,
-    setSavingFile,
-    loadDir,
-    onToast,
-  })
+  const transferList = useMemo(() => Object.values(transfers), [transfers])
+
+  const actions = useMemo(
+    () =>
+      createSftpActions({
+        sessionId: session.sessionId,
+        getCurrentPath: () => currentPathRef.current,
+        getEditingFile: () => editingFileRef.current,
+        addBusyPath,
+        removeBusyPath,
+        removeEntryLocally,
+        setEditingFile,
+        setSavingFile,
+        loadDir: (p, syncCwd) => loadDir(p, syncCwd, false),
+        confirm,
+        prompt,
+        onToast,
+      }),
+    [session.sessionId, addBusyPath, removeBusyPath, removeEntryLocally, loadDir, confirm, prompt, onToast]
+  )
 
   return {
-    currentPath, pathInput, setPathInput, parentPath, visibleEntries, loading, busyPaths,
-    showHidden, setShowHidden, error, transfers: Object.values(transfers), dismissTransfer,
-    editingFile, setEditingFile, savingFile, loadDir, ...actions,
+    currentPath, pathInput, setPathInput: handlePathInputChange, onPathInputFocusChange: handlePathInputFocusChange,
+    parentPath, visibleEntries, loading, busyPaths,
+    showHidden, setShowHidden, error, transfers: transferList, dismissTransfer,
+    editingFile, setEditingFile, savingFile, loadDir, dialogNode, ...actions,
   }
 }

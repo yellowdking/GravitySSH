@@ -35,14 +35,22 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
   const fitRef = useRef<FitAddon | null>(null)
   const searchAddonRef = useRef<SearchAddon | null>(null)
   const imeRef = useRef<((f?: boolean) => void) | null>(null)
-  const wq = useRef(Promise.resolve())
+  const lastSizeRef = useRef<{ cols: number; rows: number } | null>(null)
   const sRef = useRef(settings)
   sRef.current = settings
   const cRef = useRef(opts)
   cRef.current = opts
 
   const enqueueWrite = useCallback((d: string) => {
-    if (d) wq.current = wq.current.then(() => api.writeTerminal(sessionId, d)).catch(() => {})
+    if (d) void api.writeTerminal(sessionId, d).catch(() => {})
+  }, [sessionId])
+
+  const sendResize = useCallback((cols: number, rows: number) => {
+    if (cols <= 0 || rows <= 0) return
+    const prev = lastSizeRef.current
+    if (prev && prev.cols === cols && prev.rows === rows) return
+    lastSizeRef.current = { cols, rows }
+    void api.resizeTerminal(sessionId, cols, rows).catch(() => {})
   }, [sessionId])
 
   const doPaste = useCallback((raw: string, guarded: boolean) => {
@@ -66,15 +74,20 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
   const syncSize = useCallback(() => {
     const f = fitRef.current
     const t = termRef.current
-    if (f && t) {
-      try {
-        f.fit()
-        if (t.cols > 0 && t.rows > 0) void api.resizeTerminal(sessionId, t.cols, t.rows)
-      } catch {
-        /**/
+    const el = containerRef.current
+    if (!f || !t || !el || el.clientWidth === 0 || el.clientHeight === 0) return
+    try {
+      const proposed = f.proposeDimensions()
+      if (proposed && proposed.cols === t.cols && proposed.rows === t.rows) {
+        sendResize(t.cols, t.rows)
+        return
       }
+      f.fit()
+      sendResize(t.cols, t.rows)
+    } catch {
+      /**/
     }
-  }, [sessionId])
+  }, [sendResize])
 
   useEffect(() => {
     const t = termRef.current
@@ -93,24 +106,52 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
+    lastSizeRef.current = null
     const { term, fit, searchAddon } = initTerm(el, sRef.current)
     termRef.current = term
     fitRef.current = fit
     searchAddonRef.current = searchAddon
-    if (term.cols > 0 && term.rows > 0) void api.resizeTerminal(sessionId, term.cols, term.rows)
+    sendResize(term.cols, term.rows)
 
     let dec = new TextDecoder('utf-8')
     const hl = createLogHighlighter()
     let wasHighlighting = false
+    let inAltScreen = term.buffer.active.type === 'alternate'
+    let pendingWrites = 0
+    let escTail = ''
+    const ALT_SCREEN_RE = /\x1b\[\?(?:47|1047|1049)([hl])/g
+    const INCOMPLETE_ALT_TAIL_RE = /\x1b(?:\[(?:\?(?:[0-9]{1,4})?)?)?$/
 
-    const flushHighlightPipeline = () => {
+    const queuedWrite = (payload: string | Uint8Array) => {
+      if (typeof payload === 'string' ? payload.length === 0 : payload.byteLength === 0) return
+      pendingWrites++
+      term.write(payload, () => {
+        pendingWrites = Math.max(0, pendingWrites - 1)
+        if (pendingWrites === 0) {
+          inAltScreen = term.buffer.active.type === 'alternate'
+        }
+      })
+    }
+
+    const flushHighlightPipeline = (writeTail: boolean) => {
+      if (escTail) {
+        const tail = escTail
+        escTail = ''
+        if (writeTail) queuedWrite(tail)
+      }
       if (!wasHighlighting) return
       wasHighlighting = false
       const decodedTail = dec.decode()
       const hlOut = (decodedTail ? hl.highlight(decodedTail) : '') + hl.reset()
-      if (hlOut) term.write(hlOut)
+      if (writeTail && hlOut) queuedWrite(hlOut)
       dec = new TextDecoder('utf-8')
     }
+
+    const onBufferChange = term.buffer.onBufferChange((buf) => {
+      if (pendingWrites === 0) {
+        inAltScreen = buf.type === 'alternate'
+      }
+    })
 
     const onPaste = (e: ClipboardEvent) => {
       const t = e.clipboardData?.getData('text/plain')
@@ -147,28 +188,73 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
       else c.onClearSuggestions()
     })
     const onResize = term.onResize(({ cols, rows }) => {
-      void api.resizeTerminal(sessionId, cols, rows)
+      sendResize(cols, rows)
     })
     const unsub = api.onEvent<{ sessionId: string; data: string }>('terminal:data', (p) => {
       if (p.sessionId !== sessionId || !p.data) return
       const b = base64ToUint8Array(p.data)
-      if (sRef.current.keywordHighlightEnabled && term.buffer.active.type === 'normal') {
-        wasHighlighting = true
-        const s = dec.decode(b, { stream: true })
-        if (s) {
-          const out = hl.highlight(s)
-          if (out) term.write(out)
+      if (!sRef.current.keywordHighlightEnabled) {
+        flushHighlightPipeline(!inAltScreen)
+        queuedWrite(b)
+        return
+      }
+      if (inAltScreen && !escTail && b.indexOf(0x1b) === -1) {
+        queuedWrite(b)
+        return
+      }
+
+      let chunk = escTail + dec.decode(b, { stream: true })
+      escTail = ''
+      const tailMatch = INCOMPLETE_ALT_TAIL_RE.exec(chunk)
+      if (tailMatch) {
+        escTail = tailMatch[0]
+        chunk = chunk.slice(0, tailMatch.index)
+      }
+      if (!chunk) return
+
+      ALT_SCREEN_RE.lastIndex = 0
+      let cursor = 0
+      let match: RegExpExecArray | null
+      while ((match = ALT_SCREEN_RE.exec(chunk)) !== null) {
+        const seg = chunk.slice(cursor, match.index)
+        if (seg) {
+          if (inAltScreen) {
+            queuedWrite(seg)
+          } else {
+            wasHighlighting = true
+            const out = hl.highlight(seg)
+            if (out) queuedWrite(out)
+          }
         }
-      } else {
-        flushHighlightPipeline()
-        term.write(b)
+        if (match[1] === 'h') {
+          if (!inAltScreen) flushHighlightPipeline(true)
+          inAltScreen = true
+        } else {
+          inAltScreen = false
+        }
+        queuedWrite(match[0])
+        cursor = match.index + match[0].length
+      }
+
+      const rest = chunk.slice(cursor)
+      if (rest) {
+        if (inAltScreen) {
+          queuedWrite(rest)
+        } else {
+          wasHighlighting = true
+          const out = hl.highlight(rest)
+          if (out) queuedWrite(out)
+        }
       }
     })
     let roT = 0
     const ro = new ResizeObserver(() => {
       clearTimeout(roT)
       roT = window.setTimeout(() => {
+        if (el.clientWidth === 0 || el.clientHeight === 0) return
         try {
+          const proposed = fit.proposeDimensions()
+          if (proposed && proposed.cols === term.cols && proposed.rows === term.rows) return
           fit.fit()
         } catch {
           /**/
@@ -183,14 +269,16 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
       imeRef.current = null
       ro.disconnect()
       unsub()
+      onBufferChange.dispose()
       onData.dispose()
       onResize.dispose()
       term.dispose()
       termRef.current = null
       fitRef.current = null
       searchAddonRef.current = null
+      lastSizeRef.current = null
     }
-  }, [sessionId, enqueueWrite, pasteText])
+  }, [sessionId, enqueueWrite, pasteText, sendResize])
 
   useEffect(() => {
     if (status !== 'connected') return
