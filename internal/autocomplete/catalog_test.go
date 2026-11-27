@@ -179,3 +179,96 @@ func TestHistoryAffinityFrecencyAndDenylist(t *testing.T) {
 		t.Fatalf("rebase: %+v", r)
 	}
 }
+
+func TestAutocompleteP2Hardening(t *testing.T) {
+	now := time.Now()
+	cwdEntries := []models.SFTPFileEntry{
+		{Name: "Makefile", Size: 100},
+		{Name: "makefile", Size: 200},
+		{Name: "README.md", Size: 300},
+		{Name: "app.conf", Size: 400},
+	}
+
+	// 1. Preserve quoted multi-space strings in history InsertText (no destructive normWS).
+	hist := []models.CommandRecord{
+		{Command: `grep "foo  bar" app.log`, ServerID: "s1", ExecutedAt: now},
+		{Command: `/usr/bin/sudo rm -rf /`, ServerID: "s1", ExecutedAt: now},
+		{Command: `sudo -u=root rm -rf /`, ServerID: "s1", ExecutedAt: now},
+		{Command: `rm -rf //`, ServerID: "s1", ExecutedAt: now},
+		{Command: `rm -rf ~/*`, ServerID: "s1", ExecutedAt: now},
+		{Command: `curl -u admin:s3cr3t https://example.com`, ServerID: "s1", ExecutedAt: now},
+		{Command: `curl https://admin:s3cr3t@example.com`, ServerID: "s1", ExecutedAt: now},
+		{Command: `sshpass -p hunter2 ssh root@10.0.0.1`, ServerID: "s1", ExecutedAt: now},
+		{Command: `curl -H "Authorization: Basic dXNlcjpwYXNz" https://example.com`, ServerID: "s1", ExecutedAt: now},
+	}
+	quotedRes := SuggestWithContext(SuggestRequest{
+		Input: `grep "foo  `, ServerID: "s1", History: hist, IncludeHistory: true, Limit: 5,
+	})
+	if len(quotedRes) != 1 || quotedRes[0].InsertText != `grep "foo  bar" app.log` {
+		t.Fatalf("expected quoted double-space preserved in InsertText, got %+v", quotedRes)
+	}
+
+	// 2. Tightened denylist and secretPattern bypasses must all be suppressed.
+	for _, q := range []string{"/usr/bin/sudo", "sudo -u=root", "rm -rf /", "rm -rf ~", "curl -u", "curl https://admin", "sshpass", "curl -H"} {
+		for _, it := range SuggestWithContext(SuggestRequest{Input: q, ServerID: "s1", History: hist, IncludeHistory: true, Limit: 5}) {
+			if it.Source == "history" || it.Source == "history_local" {
+				t.Fatalf("expected dangerous/secret history denied for query %q, got %+v", q, it)
+			}
+		}
+	}
+
+	// 3. Command-specific case-sensitive FileFlags & non-file value flags.
+	for _, noFiles := range []string{"curl -I ", "grep -i ", "journalctl -f ", "docker logs -f "} {
+		if _, active := ExtractPathContextWithHome(noFiles, "/srv", "/root"); active {
+			t.Fatalf("expected %q NOT to trigger local file completion", noFiles)
+		}
+	}
+	// journalctl -f -u nginx - must NOT skip -u as an arg to -f (so -u is deduplicated!).
+	jFlags := MatchFlags([]string{"journalctl", "-f", "-u", "nginx", "-"}, "-")
+	for _, f := range jFlags {
+		if f.Token == "-u" || f.Token == "-f" {
+			t.Fatalf("expected -u and -f deduplicated in journalctl flags, got %+v", jFlags)
+		}
+	}
+	// docker compose -p myproj up - must skip non-file value 'myproj' and resolve 'docker compose up' flags.
+	dcUp := SuggestWithContext(SuggestRequest{Input: "docker compose -p myproj up -", Limit: 5})
+	if len(dcUp) == 0 || dcUp[0].Source != "flag" || dcUp[0].Command != "-d" {
+		t.Fatalf("expected docker compose up flags after -p myproj, got %+v", dcUp)
+	}
+
+	// 4. Case-sensitive file dedup (Makefile vs makefile) & case-fix suggestion (cat readme.md -> cat README.md).
+	mkItems := SuggestWithContext(SuggestRequest{Input: "cat make", CWD: "/srv", CWDEntries: cwdEntries, Limit: 8})
+	seenMK := map[string]bool{}
+	for _, it := range mkItems {
+		seenMK[it.Command] = true
+	}
+	if !seenMK["Makefile"] || !seenMK["makefile"] {
+		t.Fatalf("expected both Makefile and makefile preserved without case-colliding dedup, got %+v", mkItems)
+	}
+	caseFix := SuggestWithContext(SuggestRequest{Input: "cat readme.md", CWD: "/srv", CWDEntries: cwdEntries, Limit: 5})
+	if len(caseFix) == 0 || caseFix[0].InsertText != "cat README.md" {
+		t.Fatalf("expected case-fix suggestion 'cat README.md' for 'cat readme.md', got %+v", caseFix)
+	}
+
+	// 5. EscapePathToken double-quote '!' (no \!), literal \$HOME & '$HOME' escaping, and <&0 FD redirect.
+	if got := EscapePathToken("", "hi!there.txt", false, '"'); got != `"hi!there.txt"` {
+		t.Fatalf("double-quoted '!' must not be backslash-escaped, got %q", got)
+	}
+	litEntries := []models.SFTPFileEntry{{Name: "app.conf", Size: 10}}
+	litEsc := SuggestWithContext(SuggestRequest{
+		Input: `cat \$HOME/a`, CWD: "/srv", HomeDir: "/home/u", TargetEntries: litEntries, Limit: 5,
+	})
+	if len(litEsc) == 0 || litEsc[0].InsertText != `cat \$HOME/app.conf` {
+		t.Fatalf(`expected literal \$HOME/ to stay escaped, got %+v`, litEsc)
+	}
+	litSingle := SuggestWithContext(SuggestRequest{
+		Input: `cat '$HOME'/a`, CWD: "/srv", HomeDir: "/home/u", TargetEntries: litEntries, Limit: 5,
+	})
+	if len(litSingle) == 0 || litSingle[0].InsertText != `cat \$HOME/app.conf` {
+		t.Fatalf(`expected literal '$HOME'/ not to turn into unescaped $HOME/, got %+v`, litSingle)
+	}
+	pre, act := splitActiveSegment("cat <&0 app")
+	if pre != "" || act != "cat <&0 app" {
+		t.Fatalf("splitActiveSegment wrongly split <&0 redirection: pre=%q act=%q", pre, act)
+	}
+}

@@ -22,7 +22,57 @@ var (
 	FileCentricCommands = wordSet("cd ls ll la dir cat less more head tail nano vi vim nvim code rm cp mv ln touch mkdir rmdir chmod chown unzip tar gunzip 7z gzip zcat sh bash zsh source . python python3 node go grep stat file du wc scp rsync diff sed awk find tree pushd")
 	DirOnlyCommands     = wordSet("cd rmdir pushd tree")
 	SubcmdRoots         = wordSet("docker systemctl journalctl apt apt-get apk dnf yum git kubectl pm2 tmux nginx ufw firewall-cmd ss ip curl df ps kill free")
-	FileFlags           = wordSet("-f --file -c --config -i -o --env-file")
+	// cmdFileFlags maps command/subcommand paths to case-sensitive flags that expect a file/dir path argument.
+	cmdFileFlags = map[string]map[string]bool{
+		"docker compose": wordSet("-f --file --env-file --project-directory"),
+		"docker build":   wordSet("-f --file"),
+		"docker":         wordSet("--config"),
+		"kubectl":        wordSet("-f --filename --kubeconfig"),
+		"curl":           wordSet("-o --output -K --config -T --upload-file --cacert --cert --key"),
+		"tar":            wordSet("-f --file -C -T -X"),
+		"nginx":          wordSet("-c"),
+		"grep":           wordSet("-f --file"),
+		"sed":            wordSet("-f --file"),
+		"awk":            wordSet("-f --file"),
+		"make":           wordSet("-f --file -C"),
+		"ssh":            wordSet("-i -F -E"),
+		"scp":            wordSet("-i -F"),
+		"sftp":           wordSet("-i -F -b"),
+		"tmux":           wordSet("-f"),
+		"journalctl":     wordSet("--file --directory -D"),
+		"go":             wordSet("-o"),
+		"rsync":          wordSet("--files-from --exclude-from"),
+		"git":            wordSet("-C --git-dir --work-tree"),
+	}
+	// cmdValueFlags maps command/subcommand paths to case-sensitive non-file flags that consume a following value argument.
+	cmdValueFlags = map[string]map[string]bool{
+		"docker":              wordSet("-H --host --context -l --log-level"),
+		"docker compose":      wordSet("-p --project-name --profile"),
+		"docker logs":         wordSet("--tail --since --until -n"),
+		"docker compose logs": wordSet("--tail --since --until -n"),
+		"docker ps":           wordSet("--format --filter -n --last"),
+		"docker build":        wordSet("-t --tag --target --build-arg --platform"),
+		"docker exec":         wordSet("-u --user -w --workdir -e --env"),
+		"kubectl":             wordSet("-n --namespace -o --output -l --selector --context -c --container --tail --since"),
+		"journalctl":          wordSet("-u --unit -n --lines --since --until -p --priority -o --output -g --grep"),
+		"curl":                wordSet("-X --request -H --header -d --data --data-raw --data-binary -u --user -A --user-agent -e --referer -b --cookie -c --cookie-jar -m --max-time --connect-timeout -x --proxy"),
+		"grep":                wordSet("-e --regexp -m --max-count -A -B -C"),
+		"find":                wordSet("-name -iname -path -type -maxdepth -mindepth -mtime -size -user -group -perm"),
+		"tmux":                wordSet("-s -t -c -L -S"),
+		"nginx":               wordSet("-s -p -g"),
+		"git":                 wordSet("-c -m -b -n"),
+		"pm2":                 wordSet("--lines --name -n -i"),
+		"free":                wordSet("-s -c"),
+		"ssh":                 wordSet("-p -l -o -J -L -R -D -W -b -c"),
+		"scp":                 wordSet("-P -o -J -c -l"),
+	}
+	// cmdBoolFlagOverrides disables an inherited root file/value flag on specific subcommands where it is boolean.
+	cmdBoolFlagOverrides = map[string]map[string]bool{
+		"docker logs":         wordSet("-f --follow"),
+		"docker compose logs": wordSet("-f --follow"),
+		"docker rm":           wordSet("-f --force"),
+		"kubectl logs":        wordSet("-f --follow"),
+	}
 
 	RootCommandList = parseSpecs("docker :容器;systemctl :服务;journalctl :日志;git :Git;kubectl :K8s;apt :APT;apt-get :APT;apk :APK;dnf :DNF;yum :YUM;pm2 :PM2;tmux :终端;nginx :Nginx;ufw :防火墙;free :内存;find :查找;firewall-cmd :防火墙;ss :端口;ip :网络;curl :HTTP;tar :归档;rsync :同步;chmod :权限;chown :属主;grep :搜索;ls :列表;cd :目录;df :磁盘;du :大小;ps :进程;cat :查看;tail :末尾;head :开头;less :分页;nano :编辑;vim :编辑;rm :删除;cp :复制;mv :移动;mkdir :目录;scp :复制;ssh :SSH;sudo :提权;top:监控;htop:监控;kill :终止;lsof :端口;ping :连通;unzip :解压;python3 :Py3;node :Node;npm :NPM;go :Go;make :构建;certbot :证书;crontab :定时")
 
@@ -60,6 +110,64 @@ ps=aux:全部;aux | grep :筛选;-ef:完整
 free=-h:人类可读;-m:MB显示;-g:GB显示;-h -s 2:每2秒刷新`)
 )
 
+func lookupScopedFlag(nonFlags []string, flag string, table map[string]map[string]bool) bool {
+	if len(nonFlags) == 0 || !strings.HasPrefix(flag, "-") || strings.Contains(flag, "=") {
+		return false
+	}
+	for n := len(nonFlags); n >= 1; n-- {
+		key := strings.Join(nonFlags[:n], " ")
+		if ov, ok := cmdBoolFlagOverrides[key]; ok && ov[flag] {
+			return false
+		}
+		if m, ok := table[key]; ok && m[flag] {
+			return true
+		}
+	}
+	return false
+}
+
+func isFileFlagForNonFlags(nonFlags []string, flag string) bool {
+	if flag == "--file" || flag == "--config" || flag == "--env-file" {
+		return true
+	}
+	return lookupScopedFlag(nonFlags, flag, cmdFileFlags)
+}
+
+func isValueFlagForNonFlags(nonFlags []string, flag string) bool {
+	return isFileFlagForNonFlags(nonFlags, flag) || lookupScopedFlag(nonFlags, flag, cmdValueFlags)
+}
+
+func collectNonFlags(tokens []string) []string {
+	if len(tokens) == 0 {
+		return nil
+	}
+	parts := make([]string, 0, len(tokens))
+	parts = append(parts, strings.ToLower(tokens[0]))
+	for i := 1; i < len(tokens); i++ {
+		t := tokens[i]
+		if strings.HasPrefix(t, "-") {
+			if isValueFlagForNonFlags(parts, t) && i+1 < len(tokens) {
+				i++
+			}
+			continue
+		}
+		parts = append(parts, strings.ToLower(t))
+	}
+	return parts
+}
+
+func isFileFlagForCmd(prefixTokens []string, flag string) bool {
+	return isFileFlagForNonFlags(collectNonFlags(prefixTokens), flag)
+}
+
+func isValueFlagForCmd(prefixTokens []string, flag string) bool {
+	return isValueFlagForNonFlags(collectNonFlags(prefixTokens), flag)
+}
+
+func hasPositionalArg(pre []string) bool {
+	return len(collectNonFlags(pre)) > 1
+}
+
 func NormalizedCmdPath(eff []string, endsWithSpace bool) string {
 	if len(eff) == 0 || (len(eff) == 1 && !endsWithSpace) {
 		return ""
@@ -68,18 +176,7 @@ func NormalizedCmdPath(eff []string, endsWithSpace bool) string {
 	if !endsWithSpace {
 		pre = eff[:len(eff)-1]
 	}
-	parts := make([]string, 0, len(pre))
-	for i := 0; i < len(pre); i++ {
-		low := strings.ToLower(pre[i])
-		if i > 0 && strings.HasPrefix(low, "-") {
-			if FileFlags[low] && i+1 < len(pre) {
-				i++
-			}
-			continue
-		}
-		parts = append(parts, low)
-	}
-	return strings.Join(parts, " ")
+	return strings.Join(collectNonFlags(pre), " ")
 }
 
 func matchSubcommandsForPath(cmdPath string, eff []string, endsWithSpace bool) []SubcmdSpec {
@@ -90,7 +187,7 @@ func matchSubcommandsForPath(cmdPath string, eff []string, endsWithSpace bool) [
 	if !endsWithSpace {
 		pre, cur = eff[:len(eff)-1], strings.ToLower(eff[len(eff)-1])
 	}
-	if len(pre) > 1 && FileFlags[strings.ToLower(pre[len(pre)-1])] {
+	if len(pre) > 1 && isValueFlagForCmd(pre[:len(pre)-1], pre[len(pre)-1]) {
 		return nil
 	}
 	specs := subcmdTree[cmdPath]

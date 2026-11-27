@@ -81,7 +81,7 @@ func FileExtDelta(cmd, prevTok string, entry models.SFTPFileEntry, isFirstToken 
 		return 0
 	}
 	lo, hp, hs, ct := strings.ToLower, strings.HasPrefix, strings.HasSuffix, strings.Contains
-	name, c, p := lo(entry.Name), lo(cmd), lo(prevTok)
+	name, c, p := lo(entry.Name), lo(cmd), prevTok
 	switch {
 	case isFirstToken:
 		if hs(name, ".sh") {

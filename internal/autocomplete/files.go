@@ -29,9 +29,9 @@ func suggestFileCandidates(p ParsedLine, input string, entries []models.SFTPFile
 	isFirstTok := len(p.Effective) == 0 || (len(p.Effective) == 1 && !p.EndsWithSpace)
 	lowerPref := strings.ToLower(p.NamePrefix)
 	prefRunes := utf8.RuneCountInString(p.NamePrefix)
-	prevLo := strings.ToLower(p.PrevTok)
-	showHidden := strings.HasPrefix(p.NamePrefix, ".") || prevLo == "--env-file"
-	arcOrFileFlag := prevLo == "-f" || prevLo == "--file" || archiveCommands[cmd]
+	prevTok := p.PrevTok
+	showHidden := strings.HasPrefix(p.NamePrefix, ".") || prevTok == "--env-file"
+	arcOrFileFlag := prevTok == "-f" || prevTok == "--file" || archiveCommands[cmd]
 
 	out := make([]models.CompletionItem, 0, len(entries))
 	for _, entry := range entries {
@@ -78,8 +78,8 @@ func suggestFileCandidates(p ParsedLine, input string, entries []models.SFTPFile
 		if entry.IsDir {
 			displayName += "/"
 		}
-		fullLine := p.TokPrefix + EscapePathToken(p.TokenDir, name, entry.IsDir, p.CurTok.Quote)
-		if fullLine == input || (!entry.IsDir && strings.EqualFold(strings.TrimSpace(fullLine), strings.TrimSpace(input))) {
+		fullLine := p.TokPrefix + escapePathToken(p.TokenDir, name, entry.IsDir, p.CurTok.Quote, p.PreserveLeadingEnvVar)
+		if fullLine == input || (!entry.IsDir && strings.TrimSpace(fullLine) == strings.TrimSpace(input)) {
 			continue
 		}
 

@@ -18,9 +18,103 @@ type histAgg struct {
 	locAgeH, anyAgeH float64
 }
 
-var secretPattern = regexp.MustCompile(`(?i)((password|passwd|token|secret|api[_-]?key)\s*=|\baws_secret_access_key\b|\bbearer\s+\S+)`)
+var secretPattern = regexp.MustCompile(`(?i)((password|passwd|token|secret|api[_-]?key)\s*=|\baws_secret_access_key\b|\bbearer\s+\S+|\bauthorization\s*:\s*basic\s+\S+|://[^/\s:@]+:[^/\s@]+@|\bsshpass\b[^|;&]*(?:^|\s)(?:-p\s*\S+|--password[=\s]\S+)|\bcurl\b[^|;&]*(?:^|\s)(?:-u\s*\S+:\S+|--user[=\s]\S+:\S+))`)
 
-func normWS(s string) string { return strings.Join(strings.Fields(s), " ") }
+// normWS collapses unquoted whitespace runs to a single space while preserving
+// spaces/tabs inside single quotes, double quotes, and backslash-escaped spaces.
+func normWS(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	var q byte
+	esc, pendingSpace := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if esc {
+			if pendingSpace && b.Len() > 0 {
+				b.WriteByte(' ')
+				pendingSpace = false
+			}
+			b.WriteByte(c)
+			esc = false
+			continue
+		}
+		if q != 0 {
+			if q == '"' && c == '\\' {
+				esc = true
+			} else if c == q {
+				q = 0
+			}
+			b.WriteByte(c)
+			continue
+		}
+		if c == ' ' || c == '\t' {
+			pendingSpace = true
+			continue
+		}
+		if pendingSpace && b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		pendingSpace = false
+		if c == '\\' {
+			esc = true
+		} else if c == '\'' || c == '"' {
+			q = c
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+func isRootOrWildcardRoot(a string) bool {
+	if a == "" {
+		return false
+	}
+	if strings.HasSuffix(a, "/*") || strings.HasSuffix(a, "/*/") {
+		base := strings.TrimSuffix(strings.TrimSuffix(a, "/"), "/*")
+		if base == "" {
+			return true
+		}
+		if path.Clean(base) == "/" {
+			return true
+		}
+	}
+	return path.Clean(a) == "/"
+}
+
+func isDangerousRMTarget(a string) bool {
+	if a == "" {
+		return false
+	}
+	if isRootOrWildcardRoot(a) {
+		return true
+	}
+	// Check home/tilde targets with any number of slashes or trailing glob (e.g. ~, ~/, ~/*, ~//*, $HOME/*, ${HOME}/*)
+	trimmedSlash := strings.TrimRight(a, "/")
+	for _, home := range []string{"~", "$HOME", "${HOME}"} {
+		if trimmedSlash == home {
+			return true
+		}
+		if strings.HasPrefix(a, home+"/") {
+			rest := strings.TrimLeft(a[len(home):], "/")
+			rest = strings.TrimRight(rest, "/")
+			if rest == "" || rest == "*" || rest == "." || rest == "./*" {
+				return true
+			}
+		}
+	}
+	// Check . / .. / ./* / ../*
+	cleaned := path.Clean(a)
+	if cleaned == "." || cleaned == ".." {
+		return true
+	}
+	if strings.HasSuffix(a, "/*") || strings.HasSuffix(a, "/*/") {
+		base := strings.TrimSuffix(strings.TrimSuffix(a, "/"), "/*")
+		if c := path.Clean(base); c == "." || c == ".." {
+			return true
+		}
+	}
+	return false
+}
 
 func isDestructiveSeg(seg string) bool {
 	toks, _ := tokenizeSegment(seg)
@@ -42,18 +136,22 @@ func isDestructiveSeg(seg string) bool {
 			}
 		}
 	case "rm":
-		r, f, bad := false, false, false
+		r, f, bad, afterDD := false, false, false, false
 		for _, a := range eff[1:] {
+			if !afterDD && a == "--" {
+				afterDD = true
+				continue
+			}
 			switch {
-			case a == "--no-preserve-root":
+			case !afterDD && a == "--no-preserve-root":
 				return true
-			case a == "--recursive":
+			case !afterDD && a == "--recursive":
 				r = true
-			case a == "--force":
+			case !afterDD && a == "--force":
 				f = true
-			case hp(a, "-") && !hp(a, "--"):
+			case !afterDD && hp(a, "-") && !hp(a, "--"):
 				r, f = r || strings.ContainsAny(a[1:], "rR"), f || ct(a[1:], "f")
-			case ct(" / /* ~ ~/ $HOME ${HOME} $HOME/ . .. ", " "+a+" "):
+			case isDangerousRMTarget(a):
 				bad = true
 			}
 		}
@@ -61,7 +159,10 @@ func isDestructiveSeg(seg string) bool {
 	case "chmod", "chown":
 		rec, root := false, false
 		for _, a := range eff[1:] {
-			rec, root = rec || a == "-R" || a == "--recursive", root || a == "/" || a == "/*"
+			rec = rec || a == "-R" || a == "--recursive"
+			if isRootOrWildcardRoot(a) {
+				root = true
+			}
 		}
 		return rec && root
 	}
@@ -128,14 +229,14 @@ func rankHistoryCandidates(p ParsedLine, input, srvID string, history []models.C
 		}
 		a := agg[key]
 		if a == nil {
-			if isNoisyOrDestructive(norm) {
+			if isNoisyOrDestructive(raw) {
 				continue
 			}
 			ageH := float64(i) * 2.0
 			if !r.ExecutedAt.IsZero() {
 				ageH = max(0.0, now.Sub(r.ExecutedAt).Hours())
 			}
-			a = &histAgg{cmd: norm, srv: r.ServerName, locAgeH: 1e9, anyAgeH: ageH}
+			a = &histAgg{cmd: raw, srv: r.ServerName, locAgeH: 1e9, anyAgeH: ageH}
 			agg[key] = a
 		}
 		ageH := float64(i) * 2.0
@@ -146,13 +247,13 @@ func rankHistoryCandidates(p ParsedLine, input, srvID string, history []models.C
 		if ageH < a.anyAgeH {
 			a.anyAgeH = ageH
 			if !a.local {
-				a.cmd, a.srv = norm, r.ServerName
+				a.cmd, a.srv = raw, r.ServerName
 			}
 		}
 		if srvID != "" && r.ServerID == srvID {
 			a.local, a.locFreq = true, min(30, a.locFreq+1)
 			if ageH < a.locAgeH {
-				a.locAgeH, a.cmd, a.srv = ageH, norm, r.ServerName
+				a.locAgeH, a.cmd, a.srv = ageH, raw, r.ServerName
 			}
 		}
 	}

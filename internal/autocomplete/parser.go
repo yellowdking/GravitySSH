@@ -20,6 +20,7 @@ type ParsedLine struct {
 	EndsWithSpace, PathActive       bool
 	TargetDir, TokenDir, NamePrefix string
 	DirsOnly                        bool
+	PreserveLeadingEnvVar           bool
 }
 
 func splitActiveSegment(s string) (string, string) {
@@ -41,7 +42,7 @@ func splitActiveSegment(s string) (string, string) {
 			q = c
 		} else if (c == '&' || c == '|') && i+1 < len(s) && (s[i+1] == c || (c == '|' && s[i+1] == '&')) {
 			last, i = i+2, i+1
-		} else if c == ';' || c == '|' || (c == '&' && (i == 0 || s[i-1] != '>') && (i+1 >= len(s) || s[i+1] != '>')) {
+		} else if c == ';' || c == '|' || (c == '&' && (i == 0 || (s[i-1] != '>' && s[i-1] != '<')) && (i+1 >= len(s) || s[i+1] != '>')) {
 			last = i + 1
 		}
 	}
@@ -67,7 +68,7 @@ func tokenizeSegment(s string) ([]Token, bool) {
 			if q != 0 {
 				if c == q {
 					q = 0
-				} else if q == '"' && c == '\\' && i+1 < n && strings.IndexByte(`\"$`+"`!", s[i+1]) >= 0 {
+				} else if q == '"' && c == '\\' && i+1 < n && strings.IndexByte("\\\"$`", s[i+1]) >= 0 {
 					i++
 					b.WriteByte(s[i])
 				} else {
@@ -102,6 +103,18 @@ func isEnvAssign(s string) bool {
 	return eq > 0
 }
 
+func isShortFlagClusterOf(f, allowed string) bool {
+	if len(f) < 2 || f[0] != '-' || f[1] == '-' {
+		return false
+	}
+	for i := 1; i < len(f); i++ {
+		if strings.IndexByte(allowed, f[i]) < 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func stripWrappers(toks []Token, endSp bool) []string {
 	lim := len(toks)
 	if !endSp && lim > 0 {
@@ -109,17 +122,14 @@ func stripWrappers(toks []Token, endSp bool) []string {
 	}
 	i := 0
 	for i < lim {
-		t, low := toks[i].Unquoted, strings.ToLower(toks[i].Unquoted)
-		if isEnvAssign(t) || low == "command" || low == "time" || low == "nohup" {
+		t := toks[i].Unquoted
+		base := path.Base(strings.ToLower(t))
+		if isEnvAssign(t) || base == "command" || base == "time" || base == "nohup" {
 			i++
 			continue
 		}
-		if low != "sudo" && low != "env" {
+		if base != "sudo" && base != "env" {
 			break
-		}
-		bf, vf := " -E -H -i -s -n -k -A -b -v -P -S ", " -u -g -C -p -t -h -D -r "
-		if low == "env" {
-			bf, vf = " -i -0 --ignore-environment - ", " -u -C --unset --chdir "
 		}
 		for i++; i < lim; {
 			f := toks[i].Unquoted
@@ -127,14 +137,43 @@ func stripWrappers(toks []Token, endSp bool) []string {
 				i++
 				break
 			}
-			if strings.Contains(bf, " "+f+" ") || (low == "env" && (strings.HasPrefix(f, "--unset=") || strings.HasPrefix(f, "--chdir="))) {
-				i++
-			} else if strings.Contains(vf, " "+f+" ") && i+1 < lim {
-				i += 2
-			} else {
-				break
+			if base == "sudo" {
+				switch {
+				case isShortFlagClusterOf(f, "EHisknAbvPS") ||
+					f == "--preserve-env" || f == "--set-home" || f == "--login" ||
+					f == "--shell" || f == "--non-interactive" || f == "--reset-timestamp" ||
+					f == "--background" || f == "--stdin":
+					i++
+				case strings.HasPrefix(f, "--user=") || strings.HasPrefix(f, "--group=") ||
+					strings.HasPrefix(f, "--close-from=") || strings.HasPrefix(f, "--prompt=") ||
+					strings.HasPrefix(f, "--type=") || strings.HasPrefix(f, "--host=") ||
+					strings.HasPrefix(f, "--chdir=") || strings.HasPrefix(f, "--role=") ||
+					strings.HasPrefix(f, "--preserve-env="):
+					i++
+				case (f == "-u" || f == "-g" || f == "-C" || f == "-p" || f == "-t" || f == "-h" || f == "-D" || f == "-r" ||
+					f == "--user" || f == "--group" || f == "--close-from" || f == "--prompt" ||
+					f == "--type" || f == "--host" || f == "--chdir" || f == "--role") && i+1 < lim:
+					i += 2
+				case len(f) >= 3 && f[0] == '-' && f[1] != '-' && strings.IndexByte("ugCpthDr", f[1]) >= 0:
+					// Covers both -u=root and attached -uroot
+					i++
+				default:
+					goto nextWrapper
+				}
+			} else { // env
+				switch {
+				case f == "-" || isShortFlagClusterOf(f, "i0") || f == "--ignore-environment" ||
+					strings.HasPrefix(f, "--unset=") || strings.HasPrefix(f, "--chdir=") ||
+					strings.HasPrefix(f, "-u=") || strings.HasPrefix(f, "-C="):
+					i++
+				case (f == "-u" || f == "-C" || f == "--unset" || f == "--chdir") && i+1 < lim:
+					i += 2
+				default:
+					goto nextWrapper
+				}
 			}
 		}
+	nextWrapper:
 	}
 	eff := make([]string, len(toks)-i)
 	for j, t := range toks[i:] {
@@ -173,8 +212,15 @@ func ParseLine(input, cwd, homeDir string) ParsedLine {
 			return p
 		}
 	} else {
-		pf := FileFlags[lo(p.PrevTok)]
+		pre := eff
+		if !endSp && len(pre) > 0 {
+			pre = pre[:len(pre)-1]
+		}
+		pf := len(pre) >= 2 && isFileFlagForCmd(pre[:len(pre)-1], pre[len(pre)-1])
 		if (SubcmdRoots[cmd] || (!FileCentricCommands[cmd] && cur == "")) && !strings.Contains(cur, "/") && !pf {
+			return p
+		}
+		if cmd == "grep" && !pf && !strings.Contains(cur, "/") && !hasPositionalArg(pre) {
 			return p
 		}
 		p.DirsOnly = DirOnlyCommands[cmd] && !pf
@@ -188,6 +234,7 @@ func ParseLine(input, cwd, homeDir string) ParsedLine {
 		p.TokenDir, p.NamePrefix = d, cur[sl+1:]
 		raw := p.CurTok.Raw
 		unescapedHomeVar := p.CurTok.Quote != '\'' && !hp(raw, `\$`) && !hp(raw, `"\$`) && !hp(raw, `'`)
+		p.PreserveLeadingEnvVar = unescapedHomeVar && leadingEnvVarLen(d) > 0
 		switch {
 		case hp(d, "~/") && hp(raw, "~/"):
 			if homeDir == "" {
@@ -255,6 +302,10 @@ func leadingEnvVarLen(s string) int {
 }
 
 func EscapePathToken(tokenDir, name string, isDir bool, quote byte) string {
+	return escapePathToken(tokenDir, name, isDir, quote, true)
+}
+
+func escapePathToken(tokenDir, name string, isDir bool, quote byte, preserveEnvVar bool) string {
 	full := tokenDir + name
 	if isDir {
 		full += "/"
@@ -270,9 +321,12 @@ func EscapePathToken(tokenDir, name string, isDir bool, quote byte) string {
 	var b strings.Builder
 	if quote == '"' {
 		b.WriteByte('"')
-		set = `\"$` + "`!"
+		set = "\\\"$`"
 	}
-	skip := leadingEnvVarLen(tokenDir)
+	skip := 0
+	if preserveEnvVar {
+		skip = leadingEnvVarLen(tokenDir)
+	}
 	if skip > 0 {
 		b.WriteString(full[:skip])
 	}

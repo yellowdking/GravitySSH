@@ -74,7 +74,7 @@ func MatchFlags(eff []string, curTok string) []SubcmdSpec {
 			used[t] = true
 			if eq := strings.IndexByte(t, '='); eq > 0 {
 				used[t[:eq+1]], used[t[:eq]] = true, true
-			} else if FileFlags[strings.ToLower(t)] && i+1 < len(prior) {
+			} else if isValueFlagForNonFlags(nonFlags, t) && i+1 < len(prior) {
 				i++
 			}
 		} else {
