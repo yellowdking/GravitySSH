@@ -22,9 +22,9 @@ export const TemplateCard: React.FC<Props> = ({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5 flex-wrap">
           <span className="text-xs font-semibold text-ag-text">{tpl.name}</span>
-          <span className="text-[10px] px-1.5 py-0.2 rounded bg-violet-500/15 text-violet-300 border border-violet-500/25">{tpl.category}</span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 border border-violet-500/25">{tpl.category}</span>
           {tpl.presetId && (
-            <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/25">预置</span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/25">预置</span>
           )}
         </div>
         {tpl.description && <p className="text-[11px] text-ag-muted mt-1">{tpl.description}</p>}
