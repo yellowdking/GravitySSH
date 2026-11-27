@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { Plus, RotateCcw, Sparkles, X } from 'lucide-react'
 import type { BuiltinTemplate } from '../types'
 import { api } from '../wailsApi'
+import { ModalShell } from './ModalShell'
 import { TemplateEditorModal } from './TemplateEditorModal'
 import { TemplateCard } from './TemplateCard'
 
@@ -82,7 +83,7 @@ export const ShortcutTemplatesModal: React.FC<Props> = ({ open, hasActiveSession
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+    <ModalShell open={open} onClose={onClose}>
       <div className="w-full max-w-2xl rounded-2xl bg-ag-panel border border-ag-borderStrong shadow-ag overflow-hidden flex flex-col max-h-[86vh]">
         <div className="px-5 py-3.5 border-b border-ag-border bg-[#11151f] flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -143,6 +144,6 @@ export const ShortcutTemplatesModal: React.FC<Props> = ({ open, hasActiveSession
       </div>
 
       <TemplateEditorModal open={!!editing} initial={editing} saving={saving} onClose={() => setEditing(null)} onSubmit={handleSaveTemplate} />
-    </div>
+    </ModalShell>
   )
 }

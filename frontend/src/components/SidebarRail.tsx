@@ -57,7 +57,7 @@ export const SidebarRail: React.FC<Props> = ({
               onClick={() => onSelectNav(item.id)}
               title={item.label}
               className={`relative w-9 h-9 rounded-lg flex items-center justify-center transition ${
-                active ? 'bg-indigo-500/18 text-indigo-300' : 'text-ag-muted hover:text-ag-text hover:bg-ag-hover/70'
+                active ? 'bg-indigo-500/[0.18] text-indigo-300' : 'text-ag-muted hover:text-ag-text hover:bg-ag-hover/70'
               }`}
             >
               {active && <span className="absolute -left-1.5 top-2 bottom-2 w-[3px] rounded-r-full bg-indigo-400" />}

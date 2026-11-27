@@ -1,14 +1,14 @@
-import React, { useRef, useState } from 'react'
+import React, { Suspense, lazy, useCallback, useRef, useState } from 'react'
 import type { AppSettings, SessionInfo } from '../types'
 import type { PasteInspection } from '../utils/pasteGuard'
-import { getActiveTokenPrefix } from '../utils/autocomplete'
 import { useAutocomplete } from '../hooks/useAutocomplete'
 import { useTerminalInstance } from '../hooks/useTerminalInstance'
 import { TerminalToolbar } from './TerminalToolbar'
 import { TerminalSearchBar } from './TerminalSearchBar'
 import { AutocompletePopup } from './AutocompletePopup'
 import { MonitorBar } from './MonitorBar'
-import { PasteGuardModal } from './PasteGuardModal'
+
+const PasteGuardModal = lazy(() => import('./PasteGuardModal').then((m) => ({ default: m.PasteGuardModal })))
 
 interface TerminalPaneProps {
   session: SessionInfo
@@ -22,14 +22,20 @@ interface TerminalPaneProps {
   onReconnect: (serverId: string) => void
 }
 
-export const TerminalPane: React.FC<TerminalPaneProps> = ({
+interface PendingPaste {
+  text: string
+  inspection: PasteInspection
+  bracketedPasteActive: boolean
+}
+
+export const TerminalPane: React.FC<TerminalPaneProps> = React.memo(({
   session, active, settings, showSftp, rightDrawer, onToggleSftp, onToggleRightDrawer, onToggleAutocomplete, onReconnect,
 }) => {
   const inputLineRef = useRef('')
   const focusTermRef = useRef<() => void>(() => {})
   const [showSearch, setShowSearch] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
-  const [pendingPaste, setPendingPaste] = useState<{ text: string; inspection: PasteInspection } | null>(null)
+  const [pendingPaste, setPendingPaste] = useState<PendingPaste | null>(null)
 
   const ac = useAutocomplete({
     enabled: settings.autocompleteEnabled,
@@ -54,11 +60,26 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     onMoveSelection: ac.moveSelection,
     onApplySelected: ac.applySelected,
     onOpenSearch: () => setShowSearch(true),
-    onPasteGuard: (text, inspection) => setPendingPaste({ text, inspection }),
+    onPasteGuard: (text, inspection, bracketedPasteActive) =>
+      setPendingPaste({ text, inspection, bracketedPasteActive }),
   })
   focusTermRef.current = () => termRef.current?.focus()
 
-  const activePrefix = getActiveTokenPrefix(inputLineRef.current, ac.suggestions[0]?.source || '')
+  const closeSearch = useCallback(() => {
+    setShowSearch(false)
+    searchAddonRef.current?.clearDecorations()
+    termRef.current?.focus()
+  }, [searchAddonRef, termRef])
+
+  const toggleSearch = useCallback(() => {
+    setShowSearch((prev) => {
+      if (prev) {
+        searchAddonRef.current?.clearDecorations()
+        termRef.current?.focus()
+      }
+      return !prev
+    })
+  }, [searchAddonRef, termRef])
 
   return (
     <div className="flex flex-col h-full min-w-0 flex-1 bg-ag-bg relative">
@@ -70,7 +91,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         rightDrawer={rightDrawer}
         onReconnect={onReconnect}
         onToggleAutocomplete={onToggleAutocomplete}
-        onToggleSearch={() => setShowSearch((v) => !v)}
+        onToggleSearch={toggleSearch}
         onToggleSftp={onToggleSftp}
         onToggleRightDrawer={onToggleRightDrawer}
       />
@@ -80,7 +101,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           onChange={(v) => { setSearchTerm(v); searchAddonRef.current?.findNext(v) }}
           onPrev={() => searchAddonRef.current?.findPrevious(searchTerm)}
           onNext={() => searchAddonRef.current?.findNext(searchTerm)}
-          onClose={() => setShowSearch(false)}
+          onClose={closeSearch}
         />
       )}
       <div className="flex-1 min-h-0 w-full relative overflow-hidden">
@@ -102,7 +123,6 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           <AutocompletePopup
             suggestions={ac.suggestions}
             selectedIdx={ac.selectedIdx}
-            activePrefix={activePrefix}
             inputLine={inputLineRef.current}
             onSelectIndex={ac.setSelectedIdx}
             onApply={(item) => void ac.applySuggestion(item)}
@@ -110,14 +130,17 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         )}
       </div>
       <MonitorBar sessionId={session.sessionId} status={session.status} active={active} enabled={settings.monitorBarEnabled} />
-      <PasteGuardModal
-        open={!!pendingPaste}
-        initialText={pendingPaste?.text || ''}
-        warnings={pendingPaste?.inspection.warnings || []}
-        hasHiddenChars={!!pendingPaste?.inspection.hasHiddenChars}
-        onConfirm={(finalText) => { setPendingPaste(null); commitPaste(finalText) }}
-        onCancel={() => { setPendingPaste(null); termRef.current?.focus() }}
-      />
+      {pendingPaste && (
+        <Suspense fallback={null}>
+          <PasteGuardModal
+            open
+            initialText={pendingPaste.text}
+            bracketedPasteActive={pendingPaste.bracketedPasteActive}
+            onConfirm={(finalText) => { setPendingPaste(null); commitPaste(finalText) }}
+            onCancel={() => { setPendingPaste(null); termRef.current?.focus() }}
+          />
+        </Suspense>
+      )}
     </div>
   )
-}
+})

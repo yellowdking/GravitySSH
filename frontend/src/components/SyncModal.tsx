@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { ArrowDownToLine, ArrowUpFromLine, RefreshCw, X } from 'lucide-react'
 import type { AppSettings } from '../types'
 import { api } from '../wailsApi'
+import { ModalShell } from './ModalShell'
 import { SyncRelayBar } from './SyncRelayBar'
 import { SyncSendTab } from './SyncSendTab'
 import { SyncReceiveTab } from './SyncReceiveTab'
@@ -26,10 +27,12 @@ export const SyncModal: React.FC<SyncModalProps> = ({
 
   useEffect(() => {
     if (!open) return
+    let cancelled = false
     setRelayInput(settings.syncRelayUrl || '')
     void api.getDefaultSyncRelayUrl().then((url) => {
-      if (url) setDefaultRelay(url)
+      if (!cancelled && url) setDefaultRelay(url)
     }).catch(() => {})
+    return () => { cancelled = true }
   }, [open, settings.syncRelayUrl])
 
   if (!open) return null
@@ -37,7 +40,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({
   const activeRelay = relayInput.trim()
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+    <ModalShell open={open} onClose={onClose}>
       <div className="w-full max-w-xl bg-ag-panel border border-ag-borderStrong rounded-2xl shadow-ag overflow-hidden flex flex-col max-h-[88vh]">
         <div className="px-5 py-4 border-b border-ag-border flex items-center justify-between bg-[#11151f]">
           <div className="flex items-center gap-2.5">
@@ -45,8 +48,8 @@ export const SyncModal: React.FC<SyncModalProps> = ({
               <RefreshCw className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-sm font-semibold text-ag-text">多设备零知识同步</h2>
-              <p className="text-[11px] text-ag-muted">Windows ↔ Android 端到端加密配置互传</p>
+              <h2 className="text-sm font-semibold text-ag-text">多端零知识同步</h2>
+              <p className="text-[11px] text-ag-muted">Windows / macOS / Linux / Android 多端同步 · 端到端加密互传</p>
             </div>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text">
@@ -90,6 +93,6 @@ export const SyncModal: React.FC<SyncModalProps> = ({
           )}
         </div>
       </div>
-    </div>
+    </ModalShell>
   )
 }

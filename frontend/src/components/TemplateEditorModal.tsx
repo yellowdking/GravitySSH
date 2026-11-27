@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Save, Sparkles, X } from 'lucide-react'
 import type { BuiltinTemplate } from '../types'
+import { ModalShell } from './ModalShell'
 
 interface Props {
   open: boolean
@@ -46,7 +47,7 @@ export const TemplateEditorModal: React.FC<Props> = ({ open, initial, saving, on
   }
 
   return (
-    <div className="fixed inset-0 z-[60] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+    <ModalShell open={open} onClose={onClose} zIndexClass="z-[60]" backdropClassName="bg-black/75">
       <div className="w-full max-w-2xl rounded-2xl bg-ag-panel border border-ag-borderStrong shadow-ag overflow-hidden flex flex-col max-h-[88vh]">
         <div className="px-5 py-3.5 border-b border-ag-border bg-[#11151f] flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -115,6 +116,6 @@ export const TemplateEditorModal: React.FC<Props> = ({ open, initial, saving, on
           </div>
         </form>
       </div>
-    </div>
+    </ModalShell>
   )
 }

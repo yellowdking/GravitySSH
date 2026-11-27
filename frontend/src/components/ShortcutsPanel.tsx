@@ -66,6 +66,10 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
   }
 
   const handleRunTemplateNow = async (tpl: BuiltinTemplate) => {
+    if (!activeSessionId) {
+      onToast('请先在左侧连接一台服务器', 'error')
+      return
+    }
     if (!onRunCommand) return
     onRunCommand(tpl.command + '\r', false)
     onToast(`已下发运维脚本：${tpl.name}`)

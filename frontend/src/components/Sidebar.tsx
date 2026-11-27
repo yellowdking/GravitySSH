@@ -19,7 +19,6 @@ interface SidebarProps {
   sessions: SessionInfo[]
   keyCount: number
   shortcutCount: number
-  historyCount: number
   onAddServer: () => void
   onEditServer: (srv: ServerView) => void
   onDeleteServer: (srv: ServerView) => void

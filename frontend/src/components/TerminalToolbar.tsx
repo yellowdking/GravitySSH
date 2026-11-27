@@ -42,7 +42,7 @@ export const TerminalToolbar: React.FC<Props> = ({
           {session.username}@{session.host}:{session.port}
         </span>
         {session.viaSummary && (
-          <span className="hidden md:inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-amber-500/12 text-amber-300 border border-amber-500/20 truncate max-w-[260px]">
+          <span className="hidden md:inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-amber-500/[0.12] text-amber-300 border border-amber-500/20 truncate max-w-[260px]">
             <Waypoints className="w-3 h-3 shrink-0" />
             {session.viaSummary}
           </span>
