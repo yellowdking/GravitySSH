@@ -2,7 +2,11 @@ package crypto
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
+	"fmt"
+	"io"
 	"testing"
 )
 
@@ -15,6 +19,54 @@ func (m *mockOtherMachineProtector) Unprotect(c []byte) ([]byte, error) {
 func (m *mockOtherMachineProtector) EngineName() string   { return "mock-other" }
 func (m *mockOtherMachineProtector) IsMachineBound() bool { return true }
 func (m *mockOtherMachineProtector) IsUserBound() bool    { return true }
+
+// sealV1 is retained in tests only to verify backward compatibility with legacy GSV1 vaults.
+func (e *EnvelopeCrypto) sealV1(plaintext []byte) ([]byte, error) {
+	masterKey := make([]byte, masterKeySize)
+	if _, err := io.ReadFull(rand.Reader, masterKey); err != nil {
+		return nil, fmt.Errorf("generate master key: %w", err)
+	}
+	defer ZeroBytes(masterKey)
+
+	wrappedKey, err := e.protector.Protect(masterKey)
+	if err != nil {
+		return nil, fmt.Errorf("protect master key: %w", err)
+	}
+
+	salt := make([]byte, saltSize)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return nil, fmt.Errorf("generate salt: %w", err)
+	}
+
+	dataKey, err := deriveDataKeyV1(masterKey, salt)
+	if err != nil {
+		return nil, err
+	}
+	defer ZeroBytes(dataKey)
+
+	gcm, err := newAESGCM(dataKey)
+	if err != nil {
+		return nil, err
+	}
+
+	nonce := make([]byte, nonceSize)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("generate nonce: %w", err)
+	}
+
+	headerLen := 4 + 4 + len(wrappedKey) + saltSize + nonceSize
+	out := make([]byte, 0, headerLen+len(plaintext)+gcm.Overhead())
+	out = append(out, vaultMagicV1...)
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(wrappedKey)))
+	out = append(out, lenBuf[:]...)
+	out = append(out, wrappedKey...)
+	out = append(out, salt...)
+	out = append(out, nonce...)
+
+	ciphertext := gcm.Seal(nil, nonce, plaintext, out[:headerLen])
+	return append(out, ciphertext...), nil
+}
 
 func TestEnvelopeSealAndOpenRoundTrip(t *testing.T) {
 	enc := NewEnvelopeCrypto(NewDefaultProtector())
@@ -98,13 +150,31 @@ func TestEnvelopePasswordDualLayer(t *testing.T) {
 		t.Fatalf("expected ErrWrongPassword for wrong password, got %v", err)
 	}
 
-	// Correct password unlocks cleanly
-	opened, err := enc.OpenWithPassword(sealed, "MyStrongPass!123")
+	// Correct password unlocks cleanly and returns cached pwSalt/pwKey
+	opened, pwSalt, pwKey, err := enc.OpenWithPasswordAndKey(sealed, "MyStrongPass!123")
 	if err != nil {
-		t.Fatalf("OpenWithPassword failed: %v", err)
+		t.Fatalf("OpenWithPasswordAndKey failed: %v", err)
 	}
+	defer ZeroBytes(pwKey)
 	if !bytes.Equal(opened, secret) {
 		t.Fatalf("decrypted mismatch: got %q, want %q", opened, secret)
+	}
+	if len(pwSalt) != pwSaltSize || len(pwKey) != masterKeySize {
+		t.Fatalf("unexpected cached key lengths: salt=%d key=%d", len(pwSalt), len(pwKey))
+	}
+
+	// Resealing with cached key must stay 100% GSV2 compatible with OpenWithPassword
+	updatedSecret := []byte(`{"version":5,"servers":[{"name":"prod-db-2"}]}`)
+	resealed, err := enc.SealV2WithCachedKey(updatedSecret, pwSalt, pwKey)
+	if err != nil {
+		t.Fatalf("SealV2WithCachedKey failed: %v", err)
+	}
+	opened2, err := enc.OpenWithPassword(resealed, "MyStrongPass!123")
+	if err != nil {
+		t.Fatalf("OpenWithPassword on cached-key blob failed: %v", err)
+	}
+	if !bytes.Equal(opened2, updatedSecret) {
+		t.Fatalf("resealed mismatch: got %q, want %q", opened2, updatedSecret)
 	}
 
 	// Even with correct password, foreign machine fails DPAPI layer

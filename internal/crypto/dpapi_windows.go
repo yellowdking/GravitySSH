@@ -50,6 +50,12 @@ func (b *dataBlob) toBytes() []byte {
 	return out
 }
 
+func (b *dataBlob) zero() {
+	if b.cbData > 0 && b.pbData != nil {
+		ZeroBytes(unsafe.Slice(b.pbData, b.cbData))
+	}
+}
+
 // windowsDPAPIProtector binds wrapped keys to the current Windows user,
 // current Windows machine (DPAPI + HKLM MachineGuid), and GravitySSH app entropy.
 type windowsDPAPIProtector struct {
@@ -108,7 +114,10 @@ func (p *windowsDPAPIProtector) Protect(plaintext []byte) ([]byte, error) {
 	if r == 0 {
 		return nil, fmt.Errorf("DPAPI CryptProtectData failed: %w", err)
 	}
-	defer procLocalFree.Call(uintptr(unsafe.Pointer(outBlob.pbData)))
+	defer func() {
+		outBlob.zero()
+		procLocalFree.Call(uintptr(unsafe.Pointer(outBlob.pbData)))
+	}()
 
 	return outBlob.toBytes(), nil
 }
@@ -130,7 +139,10 @@ func (p *windowsDPAPIProtector) Unprotect(ciphertext []byte) ([]byte, error) {
 	if r == 0 {
 		return nil, fmt.Errorf("DPAPI CryptUnprotectData failed (vault belongs to another machine/user or was tampered): %w", err)
 	}
-	defer procLocalFree.Call(uintptr(unsafe.Pointer(outBlob.pbData)))
+	defer func() {
+		outBlob.zero()
+		procLocalFree.Call(uintptr(unsafe.Pointer(outBlob.pbData)))
+	}()
 
 	return outBlob.toBytes(), nil
 }

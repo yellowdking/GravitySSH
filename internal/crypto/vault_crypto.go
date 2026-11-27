@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -96,63 +95,26 @@ func (e *EnvelopeCrypto) IsPasswordProtected(blob []byte) (bool, error) {
 
 // OpenWithPassword decrypts a GSV1 or GSV2 (Mode 0x01 / Mode 0x02) binary envelope.
 func (e *EnvelopeCrypto) OpenWithPassword(blob []byte, password string) ([]byte, error) {
-	if len(blob) < 4 {
-		return nil, ErrInvalidFormat
-	}
-	if bytes.Equal(blob[:4], vaultMagicV1) {
-		return e.openV1(blob)
-	}
-	if bytes.Equal(blob[:4], vaultMagicV2) {
-		return e.openV2(blob, password)
-	}
-	return nil, ErrInvalidFormat
+	plain, _, pwKey, err := e.OpenWithPasswordAndKey(blob, password)
+	ZeroBytes(pwKey)
+	return plain, err
 }
 
-func (e *EnvelopeCrypto) sealV1(plaintext []byte) ([]byte, error) {
-	masterKey := make([]byte, masterKeySize)
-	if _, err := io.ReadFull(rand.Reader, masterKey); err != nil {
-		return nil, fmt.Errorf("generate master key: %w", err)
+// OpenWithPasswordAndKey decrypts a GSV1 or GSV2 envelope and, for Mode 0x02 vaults,
+// returns the password salt and derived Argon2id key so subsequent saves can reuse
+// them via SealV2WithCachedKey without repeating 64 MiB Argon2id derivation.
+func (e *EnvelopeCrypto) OpenWithPasswordAndKey(blob []byte, password string) (plaintext, pwSalt, pwKey []byte, err error) {
+	if len(blob) < 4 {
+		return nil, nil, nil, ErrInvalidFormat
 	}
-	defer zeroBytes(masterKey)
-
-	wrappedKey, err := e.protector.Protect(masterKey)
-	if err != nil {
-		return nil, fmt.Errorf("protect master key: %w", err)
+	if bytes.Equal(blob[:4], vaultMagicV1) {
+		plain, err := e.openV1(blob)
+		return plain, nil, nil, err
 	}
-
-	salt := make([]byte, saltSize)
-	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-		return nil, fmt.Errorf("generate salt: %w", err)
+	if bytes.Equal(blob[:4], vaultMagicV2) {
+		return e.openV2WithKey(blob, password)
 	}
-
-	dataKey, err := deriveDataKeyV1(masterKey, salt)
-	if err != nil {
-		return nil, err
-	}
-	defer zeroBytes(dataKey)
-
-	gcm, err := newAESGCM(dataKey)
-	if err != nil {
-		return nil, err
-	}
-
-	nonce := make([]byte, nonceSize)
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, fmt.Errorf("generate nonce: %w", err)
-	}
-
-	headerLen := 4 + 4 + len(wrappedKey) + saltSize + nonceSize
-	out := make([]byte, 0, headerLen+len(plaintext)+gcm.Overhead())
-	out = append(out, vaultMagicV1...)
-	var lenBuf [4]byte
-	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(wrappedKey)))
-	out = append(out, lenBuf[:]...)
-	out = append(out, wrappedKey...)
-	out = append(out, salt...)
-	out = append(out, nonce...)
-
-	ciphertext := gcm.Seal(nil, nonce, plaintext, out[:headerLen])
-	return append(out, ciphertext...), nil
+	return nil, nil, nil, ErrInvalidFormat
 }
 
 func (e *EnvelopeCrypto) openV1(blob []byte) ([]byte, error) {
@@ -179,7 +141,7 @@ func (e *EnvelopeCrypto) openV1(blob []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrDecryptFailed, err)
 	}
-	defer zeroBytes(masterKey)
+	defer ZeroBytes(masterKey)
 	if len(masterKey) != masterKeySize {
 		return nil, ErrDecryptFailed
 	}
@@ -188,7 +150,7 @@ func (e *EnvelopeCrypto) openV1(blob []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer zeroBytes(dataKey)
+	defer ZeroBytes(dataKey)
 
 	gcm, err := newAESGCM(dataKey)
 	if err != nil {
@@ -218,7 +180,8 @@ func deriveDataKeyV1(masterKey, salt []byte) ([]byte, error) {
 	return key, nil
 }
 
-func zeroBytes(b []byte) {
+// ZeroBytes overwrites a byte slice with zeros to scrub sensitive material from memory.
+func ZeroBytes(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
