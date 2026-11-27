@@ -84,7 +84,7 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	limit := int64(maxSmallBodyBytes)
-	isHeavy := r.URL.Path == "/v1/drop"
+	isHeavy := r.URL.Path == "/v1/drop" || r.URL.Path == "/v1/pair/approve"
 	if isHeavy {
 		limit = maxBodyBytes
 	}
@@ -132,11 +132,32 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleCancel(w, rawBody)
 	case "/v1/ping":
 		s.handlePing(w)
+	case "/v1/pair/init":
+		s.handlePairInit(w, ip, rawBody)
+	case "/v1/pair/request":
+		s.handlePairRequest(w, ip, rawBody)
+	case "/v1/pair/poll":
+		s.handlePairPoll(w, ip, rawBody)
+	case "/v1/pair/approve":
+		s.handlePairApprove(w, ip, rawBody)
+	case "/v1/pair/reject":
+		s.handlePairReject(w, ip, rawBody)
+	case "/v1/pair/status":
+		s.handlePairStatus(w, ip, rawBody)
+	case "/v1/pair/cancel":
+		s.handlePairCancel(w, ip, rawBody)
 	}
 }
 
 func isValidEndpoint(p string) bool {
-	return p == "/v1/drop" || p == "/v1/pickup" || p == "/v1/cancel" || p == "/v1/ping"
+	switch p {
+	case "/v1/drop", "/v1/pickup", "/v1/cancel", "/v1/ping",
+		"/v1/pair/init", "/v1/pair/request", "/v1/pair/poll",
+		"/v1/pair/approve", "/v1/pair/reject", "/v1/pair/status", "/v1/pair/cancel":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *relayServer) validateHeaders(r *http.Request) (string, []byte, bool) {

@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -319,5 +321,386 @@ func TestEnsureAssetsInitAndReload(t *testing.T) {
 	}
 	if a2.SPKIHex != a1.SPKIHex || a2.AppGateKey != a1.AppGateKey {
 		t.Fatalf("reload changed assets")
+	}
+}
+
+func makeTestHex64(tag string) string {
+	s := sha256.Sum256([]byte(tag))
+	return hex.EncodeToString(s[:])
+}
+
+func TestPairFullFlowAndBurnAfterRead(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	store := newMemStore(nowFn)
+	guard := newIPGuard(nowFn)
+	srv := newRelayServer(store, guard, testAppKey, nowFn)
+
+	ch := makeTestHex64("pair-chan-1")
+	senderTok := makeTestHex64("sender-tok-1")
+	reqID := makeTestHex64("req-id-1")
+	senderIP := "198.51.100.30"
+	recvIP := "198.51.100.31"
+
+	// 1. PairInit
+	initBody := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s","ttlSeconds":300}`, ch, senderTok))
+	rInit := httptest.NewRecorder()
+	srv.ServeHTTP(rInit, signReq(t, http.MethodPost, "/v1/pair/init", initBody, testAppKey, now.Unix(), senderIP))
+	if rInit.Code != http.StatusOK || !strings.Contains(rInit.Body.String(), `"ok":true`) {
+		t.Fatalf("pair/init failed: %d %s", rInit.Code, rInit.Body.String())
+	}
+
+	// Duplicate init -> 409 exists
+	rDupInit := httptest.NewRecorder()
+	srv.ServeHTTP(rDupInit, signReq(t, http.MethodPost, "/v1/pair/init", initBody, testAppKey, now.Unix(), senderIP))
+	if rDupInit.Code != http.StatusConflict || !strings.Contains(rDupInit.Body.String(), `"exists"`) {
+		t.Fatalf("duplicate pair/init expected 409 exists, got %d %s", rDupInit.Code, rDupInit.Body.String())
+	}
+
+	// v1 pickup & cancel must NOT affect pairing slot
+	rV1Pick := httptest.NewRecorder()
+	srv.ServeHTTP(rV1Pick, signReq(t, http.MethodPost, "/v1/pickup", []byte(fmt.Sprintf(`{"channelId":"%s"}`, ch)), testAppKey, now.Unix(), "198.51.100.32"))
+	if rV1Pick.Code != http.StatusNotFound {
+		t.Fatalf("v1 pickup on pair slot expected 404, got %d", rV1Pick.Code)
+	}
+	rV1Can := httptest.NewRecorder()
+	srv.ServeHTTP(rV1Can, signReq(t, http.MethodPost, "/v1/cancel", []byte(fmt.Sprintf(`{"channelId":"%s"}`, ch)), testAppKey, now.Unix(), "198.51.100.32"))
+	if rV1Can.Code != http.StatusOK || store.Len() != 1 {
+		t.Fatalf("v1 cancel must not delete pair slot: code=%d len=%d", rV1Can.Code, store.Len())
+	}
+
+	// 2. PairPoll while waiting
+	pollBody := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s"}`, ch, senderTok))
+	rPollWait := httptest.NewRecorder()
+	srv.ServeHTTP(rPollWait, signReq(t, http.MethodPost, "/v1/pair/poll", pollBody, testAppKey, now.Unix(), senderIP))
+	if rPollWait.Code != http.StatusOK || rPollWait.Body.String() != `{"state":"waiting"}` {
+		t.Fatalf("pair/poll waiting got %d %s", rPollWait.Code, rPollWait.Body.String())
+	}
+
+	// 3. PairRequest
+	reqSalt := base64.StdEncoding.EncodeToString([]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16})
+	reqNonce := base64.StdEncoding.EncodeToString([]byte{11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22})
+	reqCT := base64.StdEncoding.EncodeToString([]byte("encrypted-pair-request-info"))
+	reqBody := []byte(fmt.Sprintf(
+		`{"channelId":"%s","requestId":"%s","salt":"%s","nonce":"%s","ciphertext":"%s"}`,
+		ch, reqID, reqSalt, reqNonce, reqCT,
+	))
+	rReq := httptest.NewRecorder()
+	srv.ServeHTTP(rReq, signReq(t, http.MethodPost, "/v1/pair/request", reqBody, testAppKey, now.Unix(), recvIP))
+	if rReq.Code != http.StatusOK || !strings.Contains(rReq.Body.String(), `"ok":true`) {
+		t.Fatalf("pair/request failed: %d %s", rReq.Code, rReq.Body.String())
+	}
+	if store.TotalBytes() != int64(16+12+len("encrypted-pair-request-info")) {
+		t.Fatalf("unexpected totalBytes after pair/request: %d", store.TotalBytes())
+	}
+
+	// Concurrent second request -> 409 busy
+	reqID2 := makeTestHex64("req-id-2")
+	reqBody2 := []byte(fmt.Sprintf(
+		`{"channelId":"%s","requestId":"%s","salt":"%s","nonce":"%s","ciphertext":"%s"}`,
+		ch, reqID2, reqSalt, reqNonce, reqCT,
+	))
+	rBusy := httptest.NewRecorder()
+	srv.ServeHTTP(rBusy, signReq(t, http.MethodPost, "/v1/pair/request", reqBody2, testAppKey, now.Unix(), "198.51.100.33"))
+	if rBusy.Code != http.StatusConflict || !strings.Contains(rBusy.Body.String(), `"busy"`) {
+		t.Fatalf("concurrent pair/request expected 409 busy, got %d %s", rBusy.Code, rBusy.Body.String())
+	}
+
+	// 4. PairStatus while requested -> pending
+	statusBody := []byte(fmt.Sprintf(`{"channelId":"%s","requestId":"%s"}`, ch, reqID))
+	rStatusPend := httptest.NewRecorder()
+	srv.ServeHTTP(rStatusPend, signReq(t, http.MethodPost, "/v1/pair/status", statusBody, testAppKey, now.Unix(), recvIP))
+	if rStatusPend.Code != http.StatusOK || rStatusPend.Body.String() != `{"state":"pending"}` {
+		t.Fatalf("pair/status pending got %d %s", rStatusPend.Code, rStatusPend.Body.String())
+	}
+
+	// 5. PairPoll while requested -> returns requestId + encrypted request
+	rPollReq := httptest.NewRecorder()
+	srv.ServeHTTP(rPollReq, signReq(t, http.MethodPost, "/v1/pair/poll", pollBody, testAppKey, now.Unix(), senderIP))
+	if rPollReq.Code != http.StatusOK {
+		t.Fatalf("pair/poll requested got %d %s", rPollReq.Code, rPollReq.Body.String())
+	}
+	var pollResp struct {
+		State      string `json:"state"`
+		RequestID  string `json:"requestId"`
+		Salt       string `json:"salt"`
+		Nonce      string `json:"nonce"`
+		Ciphertext string `json:"ciphertext"`
+	}
+	if err := json.Unmarshal(rPollReq.Body.Bytes(), &pollResp); err != nil {
+		t.Fatalf("unmarshal poll resp: %v", err)
+	}
+	if pollResp.State != "requested" || pollResp.RequestID != reqID ||
+		pollResp.Salt != reqSalt || pollResp.Nonce != reqNonce || pollResp.Ciphertext != reqCT {
+		t.Fatalf("unexpected poll resp: %+v", pollResp)
+	}
+
+	// 6. PairApprove (test heavy body > 4096 bytes allowed on /v1/pair/approve)
+	appSaltRaw := bytes.Repeat([]byte{0xaa}, 16)
+	appNonceRaw := bytes.Repeat([]byte{0xbb}, 12)
+	appCTRaw := bytes.Repeat([]byte{0xcc}, 8192)
+	appSalt := base64.StdEncoding.EncodeToString(appSaltRaw)
+	appNonce := base64.StdEncoding.EncodeToString(appNonceRaw)
+	appCT := base64.StdEncoding.EncodeToString(appCTRaw)
+	appBody := []byte(fmt.Sprintf(
+		`{"channelId":"%s","senderToken":"%s","requestId":"%s","salt":"%s","nonce":"%s","ciphertext":"%s"}`,
+		ch, senderTok, reqID, appSalt, appNonce, appCT,
+	))
+	rApp := httptest.NewRecorder()
+	srv.ServeHTTP(rApp, signReq(t, http.MethodPost, "/v1/pair/approve", appBody, testAppKey, now.Unix(), senderIP))
+	if rApp.Code != http.StatusOK || !strings.Contains(rApp.Body.String(), `"ok":true`) {
+		t.Fatalf("pair/approve failed: %d %s", rApp.Code, rApp.Body.String())
+	}
+	wantBytes := int64(len(appSaltRaw) + len(appNonceRaw) + len(appCTRaw))
+	if store.TotalBytes() != wantBytes {
+		t.Fatalf("expected totalBytes=%d after approve, got %d", wantBytes, store.TotalBytes())
+	}
+
+	// 7. PairStatus when approved -> returns payload and burns slot
+	now = now.Add(6 * time.Second)
+	rStatusApp := httptest.NewRecorder()
+	srv.ServeHTTP(rStatusApp, signReq(t, http.MethodPost, "/v1/pair/status", statusBody, testAppKey, now.Unix(), recvIP))
+	if rStatusApp.Code != http.StatusOK {
+		t.Fatalf("pair/status approved failed: %d %s", rStatusApp.Code, rStatusApp.Body.String())
+	}
+	var statusResp struct {
+		State      string `json:"state"`
+		Salt       string `json:"salt"`
+		Nonce      string `json:"nonce"`
+		Ciphertext string `json:"ciphertext"`
+	}
+	if err := json.Unmarshal(rStatusApp.Body.Bytes(), &statusResp); err != nil {
+		t.Fatalf("unmarshal status resp: %v", err)
+	}
+	if statusResp.State != "approved" || statusResp.Salt != appSalt || statusResp.Nonce != appNonce || statusResp.Ciphertext != appCT {
+		t.Fatalf("unexpected approved status resp: %+v", statusResp)
+	}
+	if store.Len() != 0 || store.TotalBytes() != 0 {
+		t.Fatalf("expected clean store after burn-after-read, len=%d bytes=%d", store.Len(), store.TotalBytes())
+	}
+
+	// 8. Second PairStatus & PairPoll after burn -> silent 404
+	rStatusGone := httptest.NewRecorder()
+	srv.ServeHTTP(rStatusGone, signReq(t, http.MethodPost, "/v1/pair/status", statusBody, testAppKey, now.Unix(), recvIP))
+	if rStatusGone.Code != http.StatusNotFound || rStatusGone.Body.Len() != 0 {
+		t.Fatalf("expected silent 404 on 2nd pair/status, got %d body=%q", rStatusGone.Code, rStatusGone.Body.String())
+	}
+	rPollGone := httptest.NewRecorder()
+	srv.ServeHTTP(rPollGone, signReq(t, http.MethodPost, "/v1/pair/poll", pollBody, testAppKey, now.Unix(), senderIP))
+	if rPollGone.Code != http.StatusNotFound || rPollGone.Body.Len() != 0 {
+		t.Fatalf("expected silent 404 on pair/poll after burn, got %d body=%q", rPollGone.Code, rPollGone.Body.String())
+	}
+}
+
+func TestPairRejectAndExpiryClamp(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	store := newMemStore(nowFn)
+	guard := newIPGuard(nowFn)
+	srv := newRelayServer(store, guard, testAppKey, nowFn)
+
+	ch := makeTestHex64("pair-rej-chan")
+	senderTok := makeTestHex64("pair-rej-tok")
+	reqID := makeTestHex64("pair-rej-req")
+	senderIP := "198.51.100.40"
+	recvIP := "198.51.100.41"
+
+	initBody := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s","ttlSeconds":300}`, ch, senderTok))
+	rInit := httptest.NewRecorder()
+	srv.ServeHTTP(rInit, signReq(t, http.MethodPost, "/v1/pair/init", initBody, testAppKey, now.Unix(), senderIP))
+	if rInit.Code != http.StatusOK {
+		t.Fatalf("init failed: %d", rInit.Code)
+	}
+
+	reqBody := []byte(fmt.Sprintf(
+		`{"channelId":"%s","requestId":"%s","salt":"AQID","nonce":"BAUG","ciphertext":"BwgJ"}`,
+		ch, reqID,
+	))
+	rReq := httptest.NewRecorder()
+	srv.ServeHTTP(rReq, signReq(t, http.MethodPost, "/v1/pair/request", reqBody, testAppKey, now.Unix(), recvIP))
+	if rReq.Code != http.StatusOK {
+		t.Fatalf("request failed: %d", rReq.Code)
+	}
+	if store.TotalBytes() == 0 {
+		t.Fatal("expected nonzero totalBytes after pair/request")
+	}
+
+	rejBody := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s","requestId":"%s"}`, ch, senderTok, reqID))
+	rRej := httptest.NewRecorder()
+	srv.ServeHTTP(rRej, signReq(t, http.MethodPost, "/v1/pair/reject", rejBody, testAppKey, now.Unix(), senderIP))
+	if rRej.Code != http.StatusOK || !strings.Contains(rRej.Body.String(), `"ok":true`) {
+		t.Fatalf("reject failed: %d %s", rRej.Code, rRej.Body.String())
+	}
+	if store.TotalBytes() != 0 {
+		t.Fatalf("expected totalBytes=0 immediately after reject, got %d", store.TotalBytes())
+	}
+
+	// Receiver sees rejected once, then slot is deleted
+	statusBody := []byte(fmt.Sprintf(`{"channelId":"%s","requestId":"%s"}`, ch, reqID))
+	rStatus := httptest.NewRecorder()
+	srv.ServeHTTP(rStatus, signReq(t, http.MethodPost, "/v1/pair/status", statusBody, testAppKey, now.Unix(), recvIP))
+	if rStatus.Code != http.StatusOK || rStatus.Body.String() != `{"state":"rejected"}` {
+		t.Fatalf("status rejected got %d %s", rStatus.Code, rStatus.Body.String())
+	}
+	if store.Len() != 0 || store.TotalBytes() != 0 {
+		t.Fatalf("expected empty store after rejected status, len=%d bytes=%d", store.Len(), store.TotalBytes())
+	}
+
+	// Also test expiry clamp: TTL=300s -> after reject at t=0, expires at t+30s
+	ch2 := makeTestHex64("pair-rej-clamp")
+	if _, err := store.PairInit(ch2, []byte("tok2"), 300); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PairRequest(ch2, reqID, []byte{1}, []byte{2}, []byte{3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PairReject(ch2, []byte("tok2"), reqID); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(31 * time.Second)
+	if swept := store.Sweep(); swept != 1 {
+		t.Fatalf("expected rejected slot to expire after 30s clamp, swept=%d", swept)
+	}
+	if store.Len() != 0 || store.TotalBytes() != 0 {
+		t.Fatalf("expected empty store after sweep, len=%d bytes=%d", store.Len(), store.TotalBytes())
+	}
+}
+
+func TestPairAuthStrikesSmallBodyLimitAndCancel(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	store := newMemStore(nowFn)
+	guard := newIPGuard(nowFn)
+	srv := newRelayServer(store, guard, testAppKey, nowFn)
+
+	ch := makeTestHex64("pair-sec-chan")
+	senderTok := makeTestHex64("pair-sec-tok")
+	wrongTok := makeTestHex64("pair-wrong-tok")
+	reqID := makeTestHex64("pair-sec-req")
+	wrongReqID := makeTestHex64("pair-wrong-req")
+	ownerIP := "198.51.100.50"
+
+	initBody := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s","ttlSeconds":120}`, ch, senderTok))
+	rInit := httptest.NewRecorder()
+	srv.ServeHTTP(rInit, signReq(t, http.MethodPost, "/v1/pair/init", initBody, testAppKey, now.Unix(), ownerIP))
+	if rInit.Code != http.StatusOK {
+		t.Fatalf("init failed: %d", rInit.Code)
+	}
+	reqBody := []byte(fmt.Sprintf(
+		`{"channelId":"%s","requestId":"%s","salt":"AQID","nonce":"BAUG","ciphertext":"BwgJ"}`,
+		ch, reqID,
+	))
+	rReq := httptest.NewRecorder()
+	srv.ServeHTTP(rReq, signReq(t, http.MethodPost, "/v1/pair/request", reqBody, testAppKey, now.Unix(), "198.51.100.51"))
+	if rReq.Code != http.StatusOK {
+		t.Fatalf("request failed: %d", rReq.Code)
+	}
+
+	// Small body cap (> 4096 bytes) enforced on /v1/pair/request
+	oversizedSmall := bytes.Repeat([]byte("a"), maxSmallBodyBytes+10)
+	rSmall := httptest.NewRecorder()
+	srv.ServeHTTP(rSmall, signReq(t, http.MethodPost, "/v1/pair/request", oversizedSmall, testAppKey, now.Unix(), "198.51.100.52"))
+	if rSmall.Code != http.StatusNotFound || rSmall.Body.Len() != 0 {
+		t.Fatalf("expected silent 404 on >4096 pair/request, got %d", rSmall.Code)
+	}
+
+	// Wrong senderToken / wrong requestId -> silent 404 + strike -> ban after strikeLimit
+	badIP := "198.51.100.99"
+	badPoll := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s"}`, ch, wrongTok))
+	badStatus := []byte(fmt.Sprintf(`{"channelId":"%s","requestId":"%s"}`, ch, wrongReqID))
+	badCancel := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s"}`, ch, wrongTok))
+	for i := 0; i < strikeLimit; i++ {
+		var path string
+		var body []byte
+		switch i % 3 {
+		case 0:
+			path, body = "/v1/pair/poll", badPoll
+		case 1:
+			path, body = "/v1/pair/status", badStatus
+		default:
+			path, body = "/v1/pair/cancel", badCancel
+		}
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, signReq(t, http.MethodPost, path, body, testAppKey, now.Unix(), badIP))
+		if rec.Code != http.StatusNotFound || rec.Body.Len() != 0 {
+			t.Fatalf("strike %d on %s expected silent 404, got %d body=%q", i+1, path, rec.Code, rec.Body.String())
+		}
+		now = now.Add(10 * time.Second)
+	}
+	if !guard.IsBanned(badIP) {
+		t.Fatalf("expected %s to be banned after %d bad token/requestId strikes", badIP, strikeLimit)
+	}
+
+	// Valid PairCancel cleans slot and releases bytes
+	canBody := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s"}`, ch, senderTok))
+	rCan := httptest.NewRecorder()
+	srv.ServeHTTP(rCan, signReq(t, http.MethodPost, "/v1/pair/cancel", canBody, testAppKey, now.Unix(), ownerIP))
+	if rCan.Code != http.StatusOK || !strings.Contains(rCan.Body.String(), `"ok":true`) {
+		t.Fatalf("pair/cancel failed: %d %s", rCan.Code, rCan.Body.String())
+	}
+	if store.Len() != 0 || store.TotalBytes() != 0 {
+		t.Fatalf("expected empty store after pair/cancel, len=%d bytes=%d", store.Len(), store.TotalBytes())
+	}
+}
+
+func TestPairStoreMemoryLimitsAndZeroing(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	st := newMemStore(func() time.Time { return now })
+
+	// Fill store close to maxTotalBytes using Drop, leaving 100 bytes free
+	bigCh := makeTestHex64("fill-store")
+	if _, err := st.Drop(bigCh, nil, nil, make([]byte, maxTotalBytes-100), 120); err != nil {
+		t.Fatalf("drop fill: %v", err)
+	}
+
+	pairCh := makeTestHex64("pair-mem-limit")
+	tok := []byte("0123456789abcdef0123456789abcdef")
+	reqID := makeTestHex64("req-mem-limit")
+	if _, err := st.PairInit(pairCh, tok, 120); err != nil {
+		t.Fatalf("pair init: %v", err)
+	}
+	if _, err := st.PairRequest(pairCh, reqID, make([]byte, 16), make([]byte, 12), make([]byte, 32)); err != nil {
+		t.Fatalf("pair request (60B): %v", err)
+	}
+	// Replacing 60B with 120B exceeds maxTotalBytes by 20B -> errStoreFull
+	if err := st.PairApprove(pairCh, tok, reqID, make([]byte, 16), make([]byte, 12), make([]byte, 92)); err != errStoreFull {
+		t.Fatalf("expected errStoreFull on PairApprove delta overflow, got %v", err)
+	}
+
+	// Free bigCh -> PairApprove succeeds and zeroes old req* slices
+	st.Cancel(bigCh)
+	sRef := st.slots[pairCh]
+	reqCTRef := sRef.reqCiphertext
+	if err := st.PairApprove(pairCh, tok, reqID, []byte("s1"), []byte("n1"), []byte("final-ct")); err != nil {
+		t.Fatalf("pair approve after reclaim: %v", err)
+	}
+	for _, b := range reqCTRef {
+		if b != 0 {
+			t.Fatalf("expected old reqCiphertext to be zeroed on approve, found %d", b)
+		}
+	}
+	if st.TotalBytes() != int64(len("s1")+len("n1")+len("final-ct")) {
+		t.Fatalf("unexpected totalBytes after approve: %d", st.TotalBytes())
+	}
+
+	state, entry, code := st.PairStatus(pairCh, reqID)
+	if code != http.StatusOK || state != "approved" || entry == nil {
+		t.Fatalf("pair status expected approved, got state=%q code=%d", state, code)
+	}
+	tokRef := entry.senderToken
+	ctRef := entry.ciphertext
+	zeroSlot(entry)
+	for _, b := range tokRef {
+		if b != 0 {
+			t.Fatalf("expected senderToken zeroed, found %d", b)
+		}
+	}
+	for _, b := range ctRef {
+		if b != 0 {
+			t.Fatalf("expected ciphertext zeroed, found %d", b)
+		}
+	}
+	if st.Len() != 0 || st.TotalBytes() != 0 {
+		t.Fatalf("expected empty store, len=%d bytes=%d", st.Len(), st.TotalBytes())
 	}
 }
