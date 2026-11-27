@@ -3,6 +3,7 @@ import type { ServerView } from '../types'
 import {
   getAvailableJumpServers,
   isServerConnectionDirty,
+  isServerFormDirty,
   makeInitialServerForm,
   wouldCreateJumpCycle,
 } from './serverForm'
@@ -127,6 +128,30 @@ describe('isServerConnectionDirty', () => {
         srv,
         30
       )
+    ).toBe(true)
+  })
+})
+
+describe('isServerFormDirty', () => {
+  it('returns false for untouched new and existing server forms', () => {
+    expect(isServerFormDirty(makeInitialServerForm(null, 30), null, 30)).toBe(false)
+    const srv = makeServer('A')
+    expect(isServerFormDirty(makeInitialServerForm(srv, 30), srv, 30)).toBe(false)
+  })
+
+  it('detects edits to metadata, auth, proxy, jumpHost, and advanced options', () => {
+    const srv = makeServer('A')
+    const base = makeInitialServerForm(srv, 30)
+
+    expect(isServerFormDirty({ ...base, name: 'Prod' }, srv, 30)).toBe(true)
+    expect(isServerFormDirty({ ...base, notes: 'edited' }, srv, 30)).toBe(true)
+    expect(isServerFormDirty({ ...base, keepAliveSeconds: 60 }, srv, 30)).toBe(true)
+    expect(isServerFormDirty({ ...base, authType: 'key', sshKeyId: 'k1' }, srv, 30)).toBe(true)
+    expect(
+      isServerFormDirty({ ...base, proxy: { ...base.proxy, type: 'http' } }, srv, 30)
+    ).toBe(true)
+    expect(
+      isServerFormDirty({ ...base, jumpHost: { ...base.jumpHost, mode: 'custom', host: '10.0.0.1' } }, srv, 30)
     ).toBe(true)
   })
 })

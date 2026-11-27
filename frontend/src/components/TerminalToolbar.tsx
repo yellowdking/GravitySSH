@@ -15,7 +15,7 @@ interface Props {
   onToggleRightDrawer: (mode: 'history' | 'shortcuts') => void
 }
 
-export const TerminalToolbar: React.FC<Props> = ({
+export const TerminalToolbar: React.FC<Props> = React.memo(({
   session,
   autocompleteEnabled,
   showSearch,
@@ -124,4 +124,4 @@ export const TerminalToolbar: React.FC<Props> = ({
       </div>
     </div>
   )
-}
+})

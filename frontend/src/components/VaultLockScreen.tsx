@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { AlertCircle, Eye, EyeOff, FolderLock, Loader2, Lock, Terminal } from 'lucide-react'
 import { api } from '../wailsApi'
+import { errMsg } from '../utils/errors'
 
 interface VaultLockScreenProps {
   vaultPath: string
@@ -26,7 +27,7 @@ export const VaultLockScreen: React.FC<VaultLockScreenProps> = ({ vaultPath, onU
       setPassword('')
       onUnlocked()
     } catch (err) {
-      setError(String(err).replace(/^Error:\s*/i, '') || '密码错误，无法解锁配置文件')
+      setError(errMsg(err) || '密码错误，无法解锁配置文件')
     } finally {
       setBusy(false)
     }

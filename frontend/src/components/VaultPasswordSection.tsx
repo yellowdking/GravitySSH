@@ -8,6 +8,7 @@ interface Props {
   securityInfo: VaultSecurityInfo | null
   lockState: VaultLockState | null
   onLockStateChanged: () => void
+  onLocked?: () => void
   onBusyChange?: (busy: boolean) => void
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
@@ -16,6 +17,7 @@ export const VaultPasswordSection: React.FC<Props> = ({
   securityInfo,
   lockState,
   onLockStateChanged,
+  onLocked,
   onBusyChange,
   onToast,
 }) => {
@@ -27,6 +29,7 @@ export const VaultPasswordSection: React.FC<Props> = ({
   const [newPwd, setNewPwd] = useState('')
   const [confirmPwd, setConfirmPwd] = useState('')
   const [busy, setBusy] = useState(false)
+  const [locking, setLocking] = useState(false)
   const [error, setError] = useState('')
 
   const mountedRef = useRef(true)
@@ -84,6 +87,34 @@ export const VaultPasswordSection: React.FC<Props> = ({
     }
   }
 
+  const handleLockNow = async () => {
+    if (busyRef.current || !hasPassword) return
+    setError('')
+    busyRef.current = true
+    setBusy(true)
+    setLocking(true)
+    onBusyChange?.(true)
+    try {
+      await api.lockVault()
+      if (mountedRef.current) onToast('保险库已锁定')
+      if (onLocked) onLocked()
+      else onLockStateChanged()
+    } catch (err) {
+      const msg = errMsg(err)
+      if (mountedRef.current) {
+        setError(msg)
+        onToast(msg, 'error')
+      }
+    } finally {
+      busyRef.current = false
+      onBusyChange?.(false)
+      if (mountedRef.current) {
+        setBusy(false)
+        setLocking(false)
+      }
+    }
+  }
+
   return (
     <section className="space-y-2.5">
       <div className="flex items-center justify-between">
@@ -111,20 +142,37 @@ export const VaultPasswordSection: React.FC<Props> = ({
         )}
 
         {action === 'none' ? (
-          <div className="flex flex-wrap items-center gap-2">
-            {!hasPassword ? (
-              <button type="button" onClick={() => setAction('set')} className="ag-btn-secondary text-xs py-1.5 px-3">
-                <KeyRound className="w-3.5 h-3.5 text-indigo-400" />设置自定义加密密码
-              </button>
-            ) : (
-              <>
-                <button type="button" onClick={() => setAction('change')} className="ag-btn-secondary text-xs py-1.5 px-3">
-                  <KeyRound className="w-3.5 h-3.5 text-indigo-400" />修改密码
+          <div className="space-y-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              {!hasPassword ? (
+                <button type="button" disabled={busy} onClick={() => setAction('set')} className="ag-btn-secondary text-xs py-1.5 px-3">
+                  <KeyRound className="w-3.5 h-3.5 text-indigo-400" />设置自定义加密密码
                 </button>
-                <button type="button" onClick={() => setAction('remove')} className="ag-btn-ghost text-xs text-rose-300 hover:text-rose-200">
-                  <Unlock className="w-3.5 h-3.5" />移除密码
-                </button>
-              </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void handleLockNow()}
+                    className="ag-btn-secondary text-xs py-1.5 px-3 border-amber-500/35 text-amber-200 hover:bg-amber-500/15"
+                  >
+                    {locking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Lock className="w-3.5 h-3.5 text-amber-400" />}
+                    {locking ? '正在锁定...' : '立即锁定'}
+                  </button>
+                  <button type="button" disabled={busy} onClick={() => setAction('change')} className="ag-btn-secondary text-xs py-1.5 px-3">
+                    <KeyRound className="w-3.5 h-3.5 text-indigo-400" />修改密码
+                  </button>
+                  <button type="button" disabled={busy} onClick={() => setAction('remove')} className="ag-btn-ghost text-xs text-rose-300 hover:text-rose-200">
+                    <Unlock className="w-3.5 h-3.5" />移除密码
+                  </button>
+                </>
+              )}
+            </div>
+            {error && (
+              <div className="flex items-center gap-1.5 text-xs text-rose-300">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                <span className="break-all">{error}</span>
+              </div>
             )}
           </div>
         ) : (
