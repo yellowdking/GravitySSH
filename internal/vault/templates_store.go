@@ -19,6 +19,9 @@ func (s *Store) ListTemplates() []models.BuiltinTemplate {
 func (s *Store) SaveTemplate(tpl models.BuiltinTemplate) (models.BuiltinTemplate, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return models.BuiltinTemplate{}, errVaultClosed
+	}
 	if s.locked {
 		return models.BuiltinTemplate{}, errVaultLocked
 	}
@@ -71,6 +74,9 @@ func (s *Store) SaveTemplate(tpl models.BuiltinTemplate) (models.BuiltinTemplate
 func (s *Store) DeleteTemplate(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return errVaultClosed
+	}
 	if s.locked {
 		return errVaultLocked
 	}
@@ -100,6 +106,9 @@ func (s *Store) DeleteTemplate(id string) error {
 func (s *Store) LoadPresetTemplates() (models.PresetLoadResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return models.PresetLoadResult{}, errVaultClosed
+	}
 	if s.locked {
 		return models.PresetLoadResult{}, errVaultLocked
 	}

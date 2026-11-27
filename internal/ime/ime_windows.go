@@ -120,23 +120,30 @@ func SwitchToEnglish() {
 	}
 
 	// 2. Clear native/full-shape conversion mode without closing Microsoft Pinyin openStatus.
-	zh, cleared := isChineseHKL(hkl), false
-	seenIME := map[uintptr]bool{}
-	for _, h := range targets {
-		if ime, _, _ := pDefIMEWnd.Call(h); ime != 0 && !seenIME[ime] {
-			seenIME[ime] = true
-			if toEnglish(ime, zh) {
-				cleared = true
+	// Only treat IMM32 as having cleared the IME when focus's own IME window was observed in
+	// native/full-shape mode and verified to transition to half-width English; idle or TSF-only
+	// HWNDs reporting mode 0 must never suppress the WebView2 VK_IME_OFF fallback.
+	zh := isChineseHKL(hkl)
+	focusIME, _, _ := pDefIMEWnd.Call(focus)
+	cleared := clearTargetsToEnglish(
+		focusIME,
+		targets,
+		zh,
+		func(h uintptr) uintptr {
+			ime, _, _ := pDefIMEWnd.Call(h)
+			return ime
+		},
+		imeCtl,
+		func(h uintptr) {
+			if himc, _, _ := pImmCtx.Call(h); himc != 0 {
+				pImmSetConv.Call(himc, 0, 0)
+				if !zh {
+					pImmSetOpen.Call(himc, 0)
+				}
+				pImmRelCtx.Call(h, himc)
 			}
-		}
-		if himc, _, _ := pImmCtx.Call(h); himc != 0 {
-			pImmSetConv.Call(himc, 0, 0)
-			if !zh {
-				pImmSetOpen.Call(himc, 0)
-			}
-			pImmRelCtx.Call(h, himc)
-		}
-	}
+		},
+	)
 
 	// 3. Idempotent VK_IME_OFF fallback for TSF-only WebView2 windows that ignore IMM32.
 	if !cleared && !modifierDown() {
@@ -150,32 +157,61 @@ func SwitchToEnglish() {
 	}
 }
 
+func clearTargetsToEnglish(
+	focusIME uintptr,
+	targets []uintptr,
+	zh bool,
+	getDefIME func(uintptr) uintptr,
+	ctl func(ime, w, l uintptr) (uintptr, bool),
+	clearIMM func(uintptr),
+) bool {
+	cleared := false
+	seenIME := map[uintptr]bool{}
+	for _, h := range targets {
+		if ime := getDefIME(h); ime != 0 && !seenIME[ime] {
+			seenIME[ime] = true
+			if toEnglishWithCtl(ime, zh, ctl) && focusIME != 0 && ime == focusIME {
+				cleared = true
+			}
+		}
+		if clearIMM != nil {
+			clearIMM(h)
+		}
+	}
+	return cleared
+}
+
 func toEnglish(ime uintptr, zh bool) bool {
-	open, okOpen := imeCtl(ime, 5, 0) // IMC_GETOPENSTATUS
-	before, okB := imeCtl(ime, 1, 0)  // IMC_GETCONVERSIONMODE
+	return toEnglishWithCtl(ime, zh, imeCtl)
+}
+
+func toEnglishWithCtl(ime uintptr, zh bool, ctl func(ime, w, l uintptr) (uintptr, bool)) bool {
+	open, okOpen := ctl(ime, 5, 0) // IMC_GETOPENSTATUS
+	before, okB := ctl(ime, 1, 0)  // IMC_GETCONVERSIONMODE
 	hadNative := okB && needsEnglishConversion(before)
 	if zh {
 		if okB && !hadNative {
-			return true
+			return false
 		}
-		imeCtl(ime, 2, 0) // IMC_SETCONVERSIONMODE = 0 (half-width English)
-		after, okA := imeCtl(ime, 1, 0)
-		if okA && !needsEnglishConversion(after) {
+		ctl(ime, 2, 0) // IMC_SETCONVERSIONMODE = 0 (half-width English)
+		after, okA := ctl(ime, 1, 0)
+		if hadNative && okA && !needsEnglishConversion(after) {
 			return true
 		}
 		if okA && needsEnglishConversion(after) {
-			imeCtl(ime, 6, 0) // IMC_SETOPENSTATUS = 0 fallback for legacy IMEs
-			imeCtl(ime, 2, 0)
+			ctl(ime, 6, 0) // IMC_SETOPENSTATUS = 0 fallback for legacy IMEs
+			ctl(ime, 2, 0)
 		}
 		return false
 	}
 	if okOpen && open == 0 && okB && !hadNative {
-		return true
+		return false
 	}
 	if !okOpen || open != 0 || !okB || hadNative {
-		imeCtl(ime, 2, 0)
-		imeCtl(ime, 6, 0)
-		return hadNative || (okOpen && open != 0)
+		ctl(ime, 2, 0)
+		ctl(ime, 6, 0)
+		after, okA := ctl(ime, 1, 0)
+		return hadNative && okA && !needsEnglishConversion(after)
 	}
 	return false
 }

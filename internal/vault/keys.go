@@ -44,6 +44,9 @@ func (s *Store) GetSSHKeyInternal(id string) (*models.SSHKeyRecord, error) {
 }
 
 func (s *Store) ImportSSHKey(name, pemContent, passphrase, comment string) (models.SSHKeyMeta, error) {
+	if s.isClosed() {
+		return models.SSHKeyMeta{}, errVaultClosed
+	}
 	if s.IsLocked() {
 		return models.SSHKeyMeta{}, errVaultLocked
 	}
@@ -70,6 +73,9 @@ func (s *Store) ImportSSHKey(name, pemContent, passphrase, comment string) (mode
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return models.SSHKeyMeta{}, errVaultClosed
+	}
 	if s.locked {
 		return models.SSHKeyMeta{}, errVaultLocked
 	}
@@ -83,6 +89,9 @@ func (s *Store) ImportSSHKey(name, pemContent, passphrase, comment string) (mode
 }
 
 func (s *Store) GenerateSSHKey(name, algorithm, passphrase, comment string) (models.SSHKeyMeta, error) {
+	if s.isClosed() {
+		return models.SSHKeyMeta{}, errVaultClosed
+	}
 	if s.IsLocked() {
 		return models.SSHKeyMeta{}, errVaultLocked
 	}
@@ -114,6 +123,9 @@ func (s *Store) GenerateSSHKey(name, algorithm, passphrase, comment string) (mod
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return models.SSHKeyMeta{}, errVaultClosed
+	}
 	if s.locked {
 		return models.SSHKeyMeta{}, errVaultLocked
 	}
@@ -143,6 +155,9 @@ func keyMetaFromRecord(rec models.SSHKeyRecord, usageCount int) models.SSHKeyMet
 func (s *Store) DeleteSSHKey(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return errVaultClosed
+	}
 	if s.locked {
 		return errVaultLocked
 	}

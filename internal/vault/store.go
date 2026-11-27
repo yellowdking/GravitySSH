@@ -17,23 +17,33 @@ import (
 const (
 	vaultSchemaVersion      = 5
 	defaultRecordFlushDelay = 1500 * time.Millisecond
+	maxFlushRetryDelay      = 60 * time.Second
 )
 
-var errVaultLocked = errors.New("配置文件处于锁定状态，请先输入密码解锁")
+var (
+	errVaultLocked = errors.New("配置文件处于锁定状态，请先输入密码解锁")
+	errVaultClosed = errors.New("配置文件存储已关闭")
+)
 
 type Store struct {
-	mu          sync.RWMutex
-	filePath    string
-	enc         *crypto.EnvelopeCrypto
-	data        models.VaultData
-	locked      bool
-	hasPassword bool
-	pwSalt      []byte
-	pwKey       []byte
-	dirty       bool
-	closed      bool
-	flushTimer  *time.Timer
-	flushDelay  time.Duration
+	mu            sync.RWMutex
+	filePath      string
+	enc           *crypto.EnvelopeCrypto
+	data          models.VaultData
+	locked        bool
+	hasPassword   bool
+	pwSalt        []byte
+	pwKey         []byte
+	dirty         bool
+	closed        bool
+	flushTimer    *time.Timer
+	flushDelay    time.Duration
+	maxRetryDelay time.Duration
+	flushFailures int
+}
+
+func vaultBackupPath(targetPath string) string {
+	return targetPath + ".bak"
 }
 
 func Open(filePath string, protector crypto.KeyProtector) (*Store, error) {
@@ -63,9 +73,28 @@ func Open(filePath string, protector crypto.KeyProtector) (*Store, error) {
 		},
 	}
 
+	bakPath := vaultBackupPath(filePath)
 	raw, err := os.ReadFile(filePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			bakRaw, bakErr := os.ReadFile(bakPath)
+			if bakErr == nil {
+				if len(bakRaw) == 0 {
+					return nil, fmt.Errorf("vault file missing and backup %s is empty", bakPath)
+				}
+				if recErr := s.loadRawLocked(bakRaw); recErr != nil {
+					return nil, fmt.Errorf("vault file missing and backup %s could not be recovered: %w", bakPath, recErr)
+				}
+				if renameErr := os.Rename(bakPath, filePath); renameErr != nil {
+					if writeErr := writeFileAtomic(filePath, bakRaw); writeErr != nil {
+						return nil, fmt.Errorf("restore vault backup: %w", writeErr)
+					}
+				}
+				return s, nil
+			}
+			if !errors.Is(bakErr, os.ErrNotExist) {
+				return nil, fmt.Errorf("read vault backup: %w", bakErr)
+			}
 			s.data.Shortcuts = defaultShortcuts()
 			s.data.Templates = BuiltinOpsTemplates()
 			if err := s.saveLocked(); err != nil {
@@ -76,29 +105,46 @@ func Open(filePath string, protector crypto.KeyProtector) (*Store, error) {
 		return nil, fmt.Errorf("read vault file: %w", err)
 	}
 
+	if err := s.loadRawLocked(raw); err != nil {
+		if bakRaw, bakErr := os.ReadFile(bakPath); bakErr == nil && len(bakRaw) > 0 {
+			if recErr := s.loadRawLocked(bakRaw); recErr == nil {
+				if writeErr := writeFileAtomic(filePath, bakRaw); writeErr != nil {
+					return nil, fmt.Errorf("recover corrupted vault from backup: %w", writeErr)
+				}
+				return s, nil
+			}
+		}
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Store) loadRawLocked(raw []byte) error {
 	isPw, err := s.enc.IsPasswordProtected(raw)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if isPw {
 		s.locked = true
 		s.hasPassword = true
-		return s, nil
+		return nil
 	}
 
 	plain, err := s.enc.OpenWithPassword(raw, "")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer clear(plain)
 
 	var loaded models.VaultData
 	if err := json.Unmarshal(plain, &loaded); err != nil {
-		return nil, fmt.Errorf("decode vault json: %w", err)
+		return fmt.Errorf("decode vault json: %w", err)
 	}
 	normalizeVault(&loaded)
 	s.data = loaded
-	return s, nil
+	s.locked = false
+	s.hasPassword = false
+	return nil
 }
 
 func normalizeVault(v *models.VaultData) {
@@ -218,7 +264,16 @@ func defaultShortcuts() []models.CommandShortcut {
 	}
 }
 
+func (s *Store) isClosed() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.closed
+}
+
 func (s *Store) saveLocked() error {
+	if s.closed {
+		return errVaultClosed
+	}
 	if s.locked {
 		return errVaultLocked
 	}
@@ -251,6 +306,7 @@ func (s *Store) saveLocked() error {
 		s.flushTimer.Stop()
 		s.flushTimer = nil
 	}
+	s.flushFailures = 0
 	s.dirty = false
 	return nil
 }
@@ -288,6 +344,8 @@ func writeFileAtomic(targetPath string, data []byte) error {
 		return fmt.Errorf("close temp vault: %w", err)
 	}
 
+	bakPath := vaultBackupPath(targetPath)
+
 	// Retry direct rename briefly to absorb transient Windows AV/indexer locks.
 	var renameErr error
 	for attempt := 0; attempt < 3; attempt++ {
@@ -297,52 +355,101 @@ func writeFileAtomic(targetPath string, data []byte) error {
 		renameErr = os.Rename(tmpPath, targetPath)
 		if renameErr == nil {
 			cleanupTmp = false
+			_ = os.Remove(bakPath)
 			return nil
 		}
 	}
 
-	// Safe backup-and-swap fallback: move old file to a backup instead of deleting it,
-	// and restore the backup if moving the new temp file into place fails.
+	// Safe backup-and-swap fallback: move old file to deterministic vault.gsv.bak
+	// instead of deleting it, and restore or report if moving the new temp file fails.
 	if _, statErr := os.Stat(targetPath); statErr == nil {
-		bakPath := tmpPath + ".bak"
+		_ = os.Remove(bakPath)
 		if bakErr := os.Rename(targetPath, bakPath); bakErr == nil {
 			if err2 := os.Rename(tmpPath, targetPath); err2 == nil {
 				cleanupTmp = false
 				_ = os.Remove(bakPath)
 				return nil
 			} else {
-				_ = os.Rename(bakPath, targetPath)
+				if restoreErr := os.Rename(bakPath, targetPath); restoreErr != nil {
+					return fmt.Errorf("commit vault file: %w (restore backup failed: %v; backup preserved at %s)", err2, restoreErr, bakPath)
+				}
 				return fmt.Errorf("commit vault file: %w", err2)
 			}
+		} else {
+			return fmt.Errorf("commit vault file: %w (backup rename failed: %v)", renameErr, bakErr)
 		}
 	}
 	return fmt.Errorf("commit vault file: %w", renameErr)
 }
 
 func (s *Store) scheduleFlushLocked() {
+	if s.closed {
+		return
+	}
 	s.dirty = true
-	if s.flushTimer != nil || s.closed {
+	if s.flushTimer != nil {
 		return
 	}
 	delay := s.flushDelay
 	if delay <= 0 {
 		delay = defaultRecordFlushDelay
 	}
-	s.flushTimer = time.AfterFunc(delay, func() {
+	s.startFlushTimerLocked(delay)
+}
+
+func (s *Store) nextFlushRetryDelayLocked() time.Duration {
+	base := s.flushDelay
+	if base <= 0 {
+		base = defaultRecordFlushDelay
+	}
+	maxDelay := s.maxRetryDelay
+	if maxDelay <= 0 {
+		maxDelay = maxFlushRetryDelay
+	}
+	delay := base
+	for i := 0; i < s.flushFailures && delay < maxDelay; i++ {
+		if delay > maxDelay/2 {
+			delay = maxDelay
+			break
+		}
+		delay *= 2
+	}
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+	return delay
+}
+
+func (s *Store) startFlushTimerLocked(delay time.Duration) {
+	if s.closed {
+		return
+	}
+	var t *time.Timer
+	t = time.AfterFunc(delay, func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		if s.flushTimer != t {
+			return
+		}
 		s.flushTimer = nil
 		if s.closed || !s.dirty || s.locked {
 			return
 		}
-		_ = s.saveLocked()
+		if err := s.saveLocked(); err != nil {
+			s.flushFailures++
+			s.startFlushTimerLocked(s.nextFlushRetryDelayLocked())
+		}
 	})
+	s.flushTimer = t
 }
 
 // Flush immediately persists any coalesced dirty writes (such as recent command history).
 func (s *Store) Flush() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return errVaultClosed
+	}
 	if s.flushTimer != nil {
 		s.flushTimer.Stop()
 		s.flushTimer = nil
@@ -357,6 +464,9 @@ func (s *Store) Flush() error {
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
 	if s.flushTimer != nil {
 		s.flushTimer.Stop()
 		s.flushTimer = nil

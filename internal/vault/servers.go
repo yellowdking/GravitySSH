@@ -121,6 +121,9 @@ func normalizeServerConfig(srv *models.ServerConfig, defaultKeepAlive int) bool 
 func (s *Store) SaveServer(req models.ServerSaveRequest) (models.ServerView, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return models.ServerView{}, errVaultClosed
+	}
 	if s.locked {
 		return models.ServerView{}, errVaultLocked
 	}
@@ -217,6 +220,9 @@ func (s *Store) SaveServer(req models.ServerSaveRequest) (models.ServerView, err
 func (s *Store) DeleteServer(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return errVaultClosed
+	}
 	if s.locked {
 		return errVaultLocked
 	}
@@ -245,6 +251,9 @@ func (s *Store) DeleteServer(id string) error {
 func (s *Store) BindSSHKeyToServer(serverID, keyID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return errVaultClosed
+	}
 	if s.locked {
 		return errors.New("配置文件已锁定")
 	}
@@ -271,7 +280,7 @@ func (s *Store) BindSSHKeyToServer(serverID, keyID string) error {
 func (s *Store) MarkServerConnected(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.locked {
+	if s.closed || s.locked {
 		return
 	}
 	now := time.Now()

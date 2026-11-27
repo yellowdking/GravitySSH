@@ -27,8 +27,32 @@ func TestBuiltinOpsTemplatesCompleteAndSafe(t *testing.T) {
 		if strings.TrimSpace(tpl.Name) == "" || strings.TrimSpace(tpl.Command) == "" {
 			t.Fatalf("template %s has empty name or command", tpl.ID)
 		}
-		if tpl.ID == "tpl-ssh-port" && (!strings.Contains(tpl.Command, "sshd -t") || !strings.Contains(tpl.Command, "600")) {
-			t.Fatal("ssh-port template must validate sshd -t and include rollback safeguard")
+		if tpl.ID == "tpl-ssh-port" {
+			if !strings.Contains(tpl.Command, "sshd -t") || !strings.Contains(tpl.Command, "600") {
+				t.Fatal("ssh-port template must validate sshd -t and include rollback safeguard")
+			}
+			if strings.Contains(tpl.Command, "/tmp/.gssh_port_pending") {
+				t.Fatal("ssh-port template must not use predictable world-writable /tmp marker")
+			}
+			markerIdx := strings.Index(tpl.Command, "/run/gssh_port_pending")
+			nohupIdx := strings.Index(tpl.Command, "sudo nohup sh -c")
+			if markerIdx < 0 || nohupIdx < 0 || markerIdx > nohupIdx {
+				t.Fatalf("ssh-port template must create root-owned /run/gssh_port_pending before launching sudo nohup rollback (marker=%d, nohup=%d)", markerIdx, nohupIdx)
+			}
+			if !strings.Contains(tpl.Command, "sudo rm -f /run/gssh_port_pending") {
+				t.Fatal("ssh-port template must tell user to cancel rollback with sudo rm -f /run/gssh_port_pending")
+			}
+			afterNohup := tpl.Command[nohupIdx:]
+			lineEnd := strings.IndexByte(afterNohup, '\n')
+			if lineEnd > 0 {
+				afterNohup = afterNohup[:lineEnd]
+			}
+			if strings.Contains(afterNohup[len("sudo nohup sh -c"):], "sudo ") {
+				t.Fatalf("rollback command inside sudo nohup sh -c must not invoke sudo after sleep 600: %s", afterNohup)
+			}
+		}
+		if tpl.ID == "tpl-swap" && strings.Contains(tpl.Command, "exit 0") {
+			t.Fatal("tpl-swap should avoid exit 0 so it can never terminate a login shell")
 		}
 		if strings.Contains(tpl.Command, "exit 0") || strings.Contains(tpl.Command, "exit 1") {
 			trimmed := strings.TrimSpace(tpl.Command)

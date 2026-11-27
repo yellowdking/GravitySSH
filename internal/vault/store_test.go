@@ -2,9 +2,12 @@ package vault
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/yellowdking/GravitySSH/internal/models"
 	"github.com/yellowdking/GravitySSH/internal/sshkey"
@@ -321,5 +324,243 @@ func TestMarkServerConnectedAndShortcutUseCoalesceAndBindKey(t *testing.T) {
 	}
 	if gotUse != 2 {
 		t.Fatalf("expected UseCount=2 persisted, got %d", gotUse)
+	}
+}
+
+func TestVaultOpenRecoversFromDeterministicBackup(t *testing.T) {
+	// Case 1: Mode 0x01 primary missing, valid vault.gsv.bak exists (crash during backup-and-swap).
+	vaultPath := filepath.Join(t.TempDir(), "vault.gsv")
+	bakPath := vaultBackupPath(vaultPath)
+
+	s, err := Open(vaultPath, nil)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	srv, err := s.SaveServer(models.ServerSaveRequest{Name: "Prod-Recover", Host: "10.9.0.1", Username: "root", Password: "pw1"})
+	if err != nil {
+		t.Fatalf("SaveServer failed: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	if err := os.Rename(vaultPath, bakPath); err != nil {
+		t.Fatalf("simulate missing primary via rename: %v", err)
+	}
+	recovered, err := Open(vaultPath, nil)
+	if err != nil {
+		t.Fatalf("Open failed to recover from %s: %v", bakPath, err)
+	}
+	gotSrv, err := recovered.GetServerInternal(srv.ID)
+	if err != nil || gotSrv.Password != "pw1" {
+		t.Fatalf("recovered server mismatch: %+v err=%v", gotSrv, err)
+	}
+	if _, err := os.Stat(vaultPath); err != nil {
+		t.Fatalf("expected primary vault.gsv to be restored after recovery: %v", err)
+	}
+	_ = recovered.Close()
+
+	// Case 2: Mode 0x02 password-protected primary missing, valid vault.gsv.bak exists.
+	pwPath := filepath.Join(t.TempDir(), "vault.gsv")
+	pwBak := vaultBackupPath(pwPath)
+	s2, err := Open(pwPath, nil)
+	if err != nil {
+		t.Fatalf("Open pw vault failed: %v", err)
+	}
+	srv2, err := s2.SaveServer(models.ServerSaveRequest{Name: "Locked-Recover", Host: "10.9.0.2", Username: "admin", Password: "pw2"})
+	if err != nil {
+		t.Fatalf("SaveServer pw failed: %v", err)
+	}
+	if err := s2.SetPassword("", "vault-secret-pw"); err != nil {
+		t.Fatalf("SetPassword failed: %v", err)
+	}
+	_ = s2.Close()
+
+	if err := os.Rename(pwPath, pwBak); err != nil {
+		t.Fatalf("rename pw vault to bak: %v", err)
+	}
+	rec2, err := Open(pwPath, nil)
+	if err != nil {
+		t.Fatalf("Open locked vault backup recovery failed: %v", err)
+	}
+	if !rec2.IsLocked() || !rec2.LockState().HasPassword {
+		t.Fatalf("expected recovered password vault to stay locked")
+	}
+	if err := rec2.Unlock("vault-secret-pw"); err != nil {
+		t.Fatalf("Unlock recovered backup failed: %v", err)
+	}
+	if got2, err := rec2.GetServerInternal(srv2.ID); err != nil || got2.Password != "pw2" {
+		t.Fatalf("recovered locked server mismatch: %+v err=%v", got2, err)
+	}
+	_ = rec2.Close()
+
+	// Case 3: Corrupted primary with valid vault.gsv.bak recovers cleanly.
+	rawValid, err := os.ReadFile(vaultPath)
+	if err != nil {
+		t.Fatalf("read valid vault: %v", err)
+	}
+	if err := os.WriteFile(bakPath, rawValid, 0o600); err != nil {
+		t.Fatalf("write backup: %v", err)
+	}
+	if err := os.WriteFile(vaultPath, []byte("corrupted-bytes"), 0o600); err != nil {
+		t.Fatalf("corrupt primary: %v", err)
+	}
+	rec3, err := Open(vaultPath, nil)
+	if err != nil {
+		t.Fatalf("expected Open to recover corrupted primary from backup: %v", err)
+	}
+	if got3, err := rec3.GetServerInternal(srv.ID); err != nil || got3.Password != "pw1" {
+		t.Fatalf("corrupted primary recovery mismatch: %+v err=%v", got3, err)
+	}
+	_ = rec3.Close()
+
+	// Case 4: Primary missing and backup corrupted must return error (never silently wipe).
+	badDir := t.TempDir()
+	badVault := filepath.Join(badDir, "vault.gsv")
+	if err := os.WriteFile(vaultBackupPath(badVault), []byte("bad-bak"), 0o600); err != nil {
+		t.Fatalf("write bad bak: %v", err)
+	}
+	if _, err := Open(badVault, nil); err == nil {
+		t.Fatal("expected error when primary is missing and backup is corrupted")
+	}
+}
+
+type threadSafeFailingProtector struct {
+	mu          sync.Mutex
+	failProtect bool
+	calls       int
+}
+
+func (f *threadSafeFailingProtector) setFail(v bool) {
+	f.mu.Lock()
+	f.failProtect = v
+	f.mu.Unlock()
+}
+
+func (f *threadSafeFailingProtector) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func (f *threadSafeFailingProtector) Protect(p []byte) ([]byte, error) {
+	f.mu.Lock()
+	f.calls++
+	fail := f.failProtect
+	f.mu.Unlock()
+	if fail {
+		return nil, os.ErrPermission
+	}
+	return append([]byte(nil), p...), nil
+}
+func (f *threadSafeFailingProtector) Unprotect(c []byte) ([]byte, error) {
+	return append([]byte(nil), c...), nil
+}
+func (f *threadSafeFailingProtector) EngineName() string   { return "ts-mock" }
+func (f *threadSafeFailingProtector) IsMachineBound() bool { return false }
+func (f *threadSafeFailingProtector) IsUserBound() bool    { return false }
+
+func TestVaultFlushRetryBackoffAndClosedRejection(t *testing.T) {
+	fp := &threadSafeFailingProtector{}
+	vaultPath := filepath.Join(t.TempDir(), "vault.gsv")
+	store, err := Open(vaultPath, fp)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// Speed up flush & retry delays for deterministic testing.
+	store.mu.Lock()
+	store.flushDelay = 15 * time.Millisecond
+	store.maxRetryDelay = 40 * time.Millisecond
+	store.mu.Unlock()
+
+	// Force initial debounced flush to fail and verify it reschedules and eventually persists on recovery.
+	fp.setFail(true)
+	callsBefore := fp.callCount()
+	if _, err := store.RecordCommand("srv-1", "Node", "sess-1", "uname -a"); err != nil {
+		t.Fatalf("RecordCommand failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if fp.callCount() >= callsBefore+2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fp.callCount() < callsBefore+2 {
+		t.Fatalf("expected debounced flush to retry after write failure, calls=%d", fp.callCount()-callsBefore)
+	}
+
+	// Allow disk write to succeed and wait for retry timer to clear dirty flag.
+	fp.setFail(false)
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		store.mu.RLock()
+		dirty := store.dirty
+		failures := store.flushFailures
+		store.mu.RUnlock()
+		if !dirty && failures == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	store.mu.RLock()
+	stillDirty := store.dirty
+	store.mu.RUnlock()
+	if stillDirty {
+		t.Fatal("expected retried debounced flush to persist and clear dirty flag")
+	}
+
+	// Verify stale timer #1 waiting on s.mu cannot clobber newer timer #2.
+	store.mu.Lock()
+	store.flushDelay = 20 * time.Millisecond
+	store.startFlushTimerLocked(10 * time.Millisecond) // T1 fires while we hold s.mu
+	time.Sleep(30 * time.Millisecond)                  // ensure T1 callback is spawned and blocked on s.mu
+	store.flushTimer = nil                             // simulate Flush/saveLocked clearing T1
+	store.dirty = true
+	store.startFlushTimerLocked(500 * time.Millisecond) // T2 armed
+	t2 := store.flushTimer
+	store.mu.Unlock()
+
+	time.Sleep(40 * time.Millisecond) // let T1 acquire s.mu and exit cleanly
+	store.mu.RLock()
+	curTimer := store.flushTimer
+	curDirty := store.dirty
+	store.mu.RUnlock()
+	if curTimer != t2 || !curDirty {
+		t.Fatalf("stale timer T1 clobbered T2 or flushed prematurely: sameTimer=%v dirty=%v", curTimer == t2, curDirty)
+	}
+
+	// Verify Close() is idempotent and rejects all subsequent mutations & saves.
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("second Close should be idempotent, got %v", err)
+	}
+	if err := store.Flush(); !errors.Is(err, errVaultClosed) {
+		t.Fatalf("expected errVaultClosed on Flush after Close, got %v", err)
+	}
+	if _, err := store.SaveServer(models.ServerSaveRequest{Name: "PostClose", Host: "10.0.0.9"}); !errors.Is(err, errVaultClosed) {
+		t.Fatalf("expected errVaultClosed on SaveServer after Close, got %v", err)
+	}
+	if err := store.SetPassword("", "should-not-set"); !errors.Is(err, errVaultClosed) {
+		t.Fatalf("expected errVaultClosed on SetPassword after Close, got %v", err)
+	}
+	if _, err := store.RecordCommand("srv-1", "Node", "sess-1", "ls"); !errors.Is(err, errVaultClosed) {
+		t.Fatalf("expected errVaultClosed on RecordCommand after Close, got %v", err)
+	}
+	if _, err := store.SaveShortcut(models.CommandShortcut{Command: "uptime"}); !errors.Is(err, errVaultClosed) {
+		t.Fatalf("expected errVaultClosed on SaveShortcut after Close, got %v", err)
+	}
+	if _, err := store.SaveTemplate(models.BuiltinTemplate{Name: "T", Command: "echo 1"}); !errors.Is(err, errVaultClosed) {
+		t.Fatalf("expected errVaultClosed on SaveTemplate after Close, got %v", err)
+	}
+	if _, err := store.ExportSyncBundle("PC"); !errors.Is(err, errVaultClosed) {
+		t.Fatalf("expected errVaultClosed on ExportSyncBundle after Close, got %v", err)
+	}
+	if store.pwKey != nil || store.pwSalt != nil {
+		t.Fatal("expected pwKey/pwSalt to remain nil after Close")
 	}
 }

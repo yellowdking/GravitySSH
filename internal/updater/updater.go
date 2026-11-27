@@ -16,9 +16,23 @@ import (
 )
 
 const (
-	latestReleaseAPI       = "https://api.github.com/repos/yellowdking/GravitySSH/releases/latest"
-	maxReleaseResponseSize = 4 << 20 // 4 MiB
+	latestReleaseAPI         = "https://api.github.com/repos/yellowdking/GravitySSH/releases/latest"
+	trustedReleasePathPrefix = "/yellowdking/GravitySSH/releases/"
+	maxReleaseResponseSize   = 4 << 20 // 4 MiB
 )
+
+func checkReleaseRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("更新接口重定向次数过多")
+	}
+	if req == nil || req.URL == nil || !strings.EqualFold(req.URL.Scheme, "https") {
+		return errors.New("拒绝非 HTTPS 更新重定向")
+	}
+	if req.URL.User != nil || req.URL.Port() != "" || !strings.EqualFold(req.URL.Host, "api.github.com") {
+		return errors.New("拒绝跳转到不受信任的更新主机")
+	}
+	return nil
+}
 
 var releaseHTTPClient = &http.Client{
 	Timeout: 15 * time.Second,
@@ -26,6 +40,7 @@ var releaseHTTPClient = &http.Client{
 		Proxy:                 http.ProxyFromEnvironment,
 		ResponseHeaderTimeout: 10 * time.Second,
 	},
+	CheckRedirect: checkReleaseRedirect,
 }
 
 type ghRelease struct {
@@ -45,12 +60,30 @@ func CheckLatestRelease(ctx context.Context, currentVersion string) (models.Upda
 }
 
 func isTrustedGitHubURL(raw string) bool {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || !strings.EqualFold(u.Scheme, "https") {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || strings.Contains(trimmed, "\\") {
 		return false
 	}
-	host := strings.ToLower(u.Hostname())
-	return host == "github.com" || strings.HasSuffix(host, ".githubusercontent.com")
+	u, err := url.Parse(trimmed)
+	if err != nil || !strings.EqualFold(u.Scheme, "https") || u.Opaque != "" {
+		return false
+	}
+	if u.User != nil || u.Port() != "" || !strings.EqualFold(u.Host, "github.com") {
+		return false
+	}
+	lowerRawPath := strings.ToLower(u.RawPath)
+	if strings.Contains(lowerRawPath, "%2f") || strings.Contains(lowerRawPath, "%5c") || strings.Contains(lowerRawPath, "%2e") {
+		return false
+	}
+	if !strings.HasPrefix(u.Path, trustedReleasePathPrefix) || len(u.Path) <= len(trustedReleasePathPrefix) {
+		return false
+	}
+	for _, seg := range strings.Split(u.Path, "/") {
+		if seg == "." || seg == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func stripVersionPrefix(v string) string {
@@ -90,8 +123,13 @@ func checkReleaseAtURL(ctx context.Context, apiURL, currentVersion string) (mode
 	}
 
 	releaseURL := strings.TrimSpace(rel.HTMLURL)
-	if releaseURL != "" && !isTrustedGitHubURL(releaseURL) {
+	if !isTrustedGitHubURL(releaseURL) {
 		return models.UpdateCheckResult{}, errors.New("更新接口返回了不受信任的发布页地址")
+	}
+
+	latest := stripVersionPrefix(rel.TagName)
+	if latest == "" {
+		return models.UpdateCheckResult{}, errors.New("更新接口返回了无效的版本号")
 	}
 
 	downloadURL := releaseURL
@@ -101,8 +139,6 @@ func checkReleaseAtURL(ctx context.Context, apiURL, currentVersion string) (mode
 			break
 		}
 	}
-
-	latest := stripVersionPrefix(rel.TagName)
 
 	return models.UpdateCheckResult{
 		CurrentVersion: cur,

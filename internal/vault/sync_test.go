@@ -161,19 +161,25 @@ func TestVaultSyncMergePreservesSecretsAndPreventsHijack(t *testing.T) {
 	store.IncrementShortcutUse(sc.ID)
 	store.IncrementShortcutUse(sc.ID)
 
-	// Incoming merge has empty passwords, blank-host server, shortcut with UseCount=0,
-	// and a custom template with the same name as a preset ("开启 BBR 网络加速")
+	// Incoming merge has empty passwords on MATCHING proxy/jump endpoints, blank-host server,
+	// shortcut with UseCount=0, and custom templates trying to hijack preset tpl-bbr by Name AND by ID.
 	incoming := models.SyncBundle{
 		SchemaVersion: 1, SourcePlatform: "android", SourceDevice: "Phone",
 		Servers: []models.ServerConfig{
-			{ID: "remote-1", Name: "Prod-API-Synced", Host: "10.0.1.1", Port: 22, Username: "ubuntu", AuthType: models.AuthPassword},
+			{
+				ID: "remote-1", Name: "Prod-API-Synced", Host: "10.0.1.1", Port: 22, Username: "ubuntu", AuthType: models.AuthPassword,
+				Proxy:    models.ProxyConfig{Type: models.ProxySOCKS5, Host: "127.0.0.1", Port: 1080},
+				JumpHost: models.JumpHostConfig{Mode: models.JumpCustom, Host: "10.0.1.254", Port: 22, Username: "jump"},
+			},
 			{ID: "blank-host", Name: "Invalid", Host: "   ", Port: 22, Username: "root"},
 		},
 		Shortcuts: []models.CommandShortcut{
 			{ID: "remote-sc", Name: "Status", Command: "uptime", UseCount: 0},
 		},
 		Templates: []models.BuiltinTemplate{
-			{ID: "custom-hijack", Name: "开启 BBR 网络加速", Category: "自定义", Command: "echo evil", PresetID: ""},
+			{ID: "custom-hijack-name", Name: "开启 BBR 网络加速", Category: "自定义", Command: "echo evil-name", PresetID: ""},
+			{ID: "tpl-bbr", Name: "Hijack By ID", Category: "自定义", Command: "echo evil-id", PresetID: ""},
+			{ID: "custom-forged-preset", Name: "Forged Preset", Category: "自定义", Command: "echo forged", PresetID: "tpl-bbr"},
 		},
 	}
 
@@ -189,7 +195,7 @@ func TestVaultSyncMergePreservesSecretsAndPreventsHijack(t *testing.T) {
 		t.Fatalf("GetServerInternal failed: %v", err)
 	}
 	if gotSrv.Password != "local-password" || gotSrv.Proxy.Password != "local-proxy-pass" || gotSrv.JumpHost.Password != "local-jump-pass" {
-		t.Fatalf("local passwords were wiped on merge: %+v", gotSrv)
+		t.Fatalf("local passwords were wiped on matching merge: %+v", gotSrv)
 	}
 	if gotSrv.LastConnectedAt == nil || gotSrv.CreatedAt.IsZero() {
 		t.Fatalf("expected LastConnectedAt and CreatedAt preserved")
@@ -202,10 +208,116 @@ func TestVaultSyncMergePreservesSecretsAndPreventsHijack(t *testing.T) {
 		}
 	}
 
-	// Verify preset tpl-bbr was NOT overwritten by custom template with same Name
+	// Verify preset tpl-bbr was NOT overwritten by custom template via matching Name, matching ID, or forged PresetID
 	for _, tpl := range store.ListTemplates() {
-		if tpl.ID == "tpl-bbr" && tpl.Command == "echo evil" {
-			t.Fatal("custom template hijacked preset tpl-bbr via matching name")
+		if tpl.ID == "tpl-bbr" && (tpl.Command == "echo evil-name" || tpl.Command == "echo evil-id" || tpl.Command == "echo forged") {
+			t.Fatalf("custom template hijacked preset tpl-bbr: %+v", tpl)
 		}
+		if tpl.ID == "tpl-bbr" && tpl.PresetID != "tpl-bbr" {
+			t.Fatalf("preset tpl-bbr lost its PresetID: %+v", tpl)
+		}
+	}
+}
+
+func TestVaultSyncMergeDoesNotLeakProxyOrJumpSecretsOnMismatchAndOverwriteSanitizesPresets(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "vault.gsv"), nil)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	srv1, err := store.SaveServer(models.ServerSaveRequest{
+		Name: "Corp-A", Host: "10.1.0.1", Port: 22, Username: "ops",
+		AuthType: models.AuthPassword, Password: "srv1-secret",
+		Proxy:    models.ProxySaveReq{Type: models.ProxySOCKS5, Host: "corp-proxy.internal", Port: 1080, Username: "alice", Password: "corp-proxy-secret"},
+		JumpHost: models.JumpSaveReq{Mode: models.JumpCustom, Host: "corp-bastion.internal", Port: 22, Username: "alice", Password: "corp-jump-secret"},
+	})
+	if err != nil {
+		t.Fatalf("SaveServer srv1 failed: %v", err)
+	}
+	srv2, err := store.SaveServer(models.ServerSaveRequest{
+		Name: "Corp-B", Host: "10.1.0.2", Port: 22, Username: "ops",
+		AuthType: models.AuthPassword, Password: "srv2-secret",
+		Proxy:    models.ProxySaveReq{Type: models.ProxySOCKS5, Host: "corp-proxy.internal", Port: 1080, Username: "alice", Password: "corp-proxy-secret-2"},
+		JumpHost: models.JumpSaveReq{Mode: models.JumpCustom, Host: "corp-bastion.internal", Port: 22, Username: "alice", Password: "corp-jump-secret-2"},
+	})
+	if err != nil {
+		t.Fatalf("SaveServer srv2 failed: %v", err)
+	}
+
+	// Merge: srv1 switches to DIFFERENT proxy & jump hosts (empty password); srv2 DISABLES proxy & jump.
+	incoming := models.SyncBundle{
+		SchemaVersion: 1, SourcePlatform: "android", SourceDevice: "Phone",
+		Servers: []models.ServerConfig{
+			{
+				ID: srv1.ID, Name: "Corp-A", Host: "10.1.0.1", Port: 22, Username: "ops", AuthType: models.AuthPassword,
+				Proxy:    models.ProxyConfig{Type: models.ProxySOCKS5, Host: "other-proxy.example", Port: 1080, Username: "alice"},
+				JumpHost: models.JumpHostConfig{Mode: models.JumpCustom, Host: "other-bastion.example", Port: 22, Username: "alice"},
+			},
+			{
+				ID: srv2.ID, Name: "Corp-B", Host: "10.1.0.2", Port: 22, Username: "ops", AuthType: models.AuthPassword,
+				Proxy:    models.ProxyConfig{Type: models.ProxyNone},
+				JumpHost: models.JumpHostConfig{Mode: models.JumpNone},
+			},
+		},
+	}
+	if _, err := store.ImportSyncBundle(incoming, "merge"); err != nil {
+		t.Fatalf("ImportSyncBundle merge failed: %v", err)
+	}
+
+	got1, _ := store.GetServerInternal(srv1.ID)
+	if got1.Proxy.Password != "" {
+		t.Fatalf("proxy password leaked to different proxy host: %q", got1.Proxy.Password)
+	}
+	if got1.JumpHost.Password != "" {
+		t.Fatalf("jump password leaked to different bastion host: %q", got1.JumpHost.Password)
+	}
+	if got1.Password != "srv1-secret" {
+		t.Fatalf("expected matching server endpoint password preserved, got %q", got1.Password)
+	}
+
+	got2, _ := store.GetServerInternal(srv2.ID)
+	if got2.Proxy.Password != "" || got2.JumpHost.Password != "" {
+		t.Fatalf("disabled proxy/jump retained stale secrets: proxy=%q jump=%q", got2.Proxy.Password, got2.JumpHost.Password)
+	}
+
+	// Overwrite mode: custom template claiming builtin preset ID, invalid presetId, and duplicate presetId must be sanitized.
+	overwriteBundle := models.SyncBundle{
+		SchemaVersion: 1, SourcePlatform: "android", SourceDevice: "Phone",
+		Templates: []models.BuiltinTemplate{
+			{ID: "tpl-bbr", Name: "Valid BBR", Category: "网络优化", Command: "sysctl -p", PresetID: "tpl-bbr"},
+			{ID: "tpl-bbr", Name: "Duplicate BBR", Category: "自定义", Command: "echo dup", PresetID: "tpl-bbr"},
+			{ID: "tpl-swap", Name: "Custom With Preset ID", Category: "自定义", Command: "echo hijack", PresetID: ""},
+			{ID: "custom-1", Name: "Unknown Preset", Category: "自定义", Command: "echo x", PresetID: "tpl-does-not-exist"},
+		},
+	}
+	if _, err := store.ImportSyncBundle(overwriteBundle, "overwrite"); err != nil {
+		t.Fatalf("ImportSyncBundle overwrite failed: %v", err)
+	}
+	bbrPresetCount := 0
+	for _, tpl := range store.ListTemplates() {
+		if tpl.PresetID == "tpl-bbr" {
+			bbrPresetCount++
+			if tpl.ID != "tpl-bbr" || tpl.Command != "sysctl -p" {
+				t.Fatalf("unexpected tpl-bbr preset after overwrite: %+v", tpl)
+			}
+		}
+		if tpl.Name == "Custom With Preset ID" && (tpl.ID == "tpl-swap" || tpl.PresetID != "") {
+			t.Fatalf("custom template kept builtin preset ID in overwrite: %+v", tpl)
+		}
+		if tpl.Name == "Unknown Preset" && tpl.PresetID != "" {
+			t.Fatalf("unknown presetId was not stripped in overwrite: %+v", tpl)
+		}
+	}
+	if bbrPresetCount != 1 {
+		t.Fatalf("expected exactly 1 deduplicated tpl-bbr preset, got %d", bbrPresetCount)
+	}
+	// Reloading built-in presets must restore tpl-swap without colliding with the sanitized custom template!
+	res, err := store.LoadPresetTemplates()
+	if err != nil {
+		t.Fatalf("LoadPresetTemplates failed: %v", err)
+	}
+	if res.Added != 5 || res.Skipped != 1 {
+		t.Fatalf("expected 5 missing presets added and 1 (tpl-bbr) skipped, got added=%d skipped=%d", res.Added, res.Skipped)
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 const (
 	syncPreviewTTL         = 10 * time.Minute
+	syncClockSkewGrace     = 135 * time.Second
 	maxSyncPreviewEntries  = 8
 	maxPendingSyncSessions = 8
 )
@@ -377,13 +378,13 @@ func (c *syncPreviewCache) pruneLocked(now time.Time) {
 		}
 	}
 	for k, s := range c.pendingSends {
-		if !now.Before(s.expiresAt) {
+		if !now.Before(s.expiresAt.Add(syncClockSkewGrace)) {
 			zeroSendSession(s)
 			delete(c.pendingSends, k)
 		}
 	}
 	for k, r := range c.pendingReceives {
-		if !now.Before(r.expiresAt) {
+		if !now.Before(r.expiresAt.Add(syncClockSkewGrace)) {
 			delete(c.pendingReceives, k)
 		}
 	}
@@ -407,20 +408,29 @@ func (c *syncPreviewCache) rescheduleLocked(now time.Time) {
 		consider(v.expiresAt)
 	}
 	for _, s := range c.pendingSends {
-		consider(s.expiresAt)
+		consider(s.expiresAt.Add(syncClockSkewGrace))
 	}
 	for _, r := range c.pendingReceives {
-		consider(r.expiresAt)
+		consider(r.expiresAt.Add(syncClockSkewGrace))
 	}
-	delay := time.Until(earliest)
+	delay := earliest.Sub(now)
 	if delay < time.Millisecond {
 		delay = time.Millisecond
 	}
-	c.timer = time.AfterFunc(delay, func() {
+	var t *time.Timer
+	t = time.AfterFunc(delay, func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
+		if c.timer != t {
+			return
+		}
+		c.timer = nil
+		if c.closed {
+			return
+		}
 		now := time.Now()
 		c.pruneLocked(now)
 		c.rescheduleLocked(now)
 	})
+	c.timer = t
 }

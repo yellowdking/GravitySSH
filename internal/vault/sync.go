@@ -14,6 +14,9 @@ import (
 func (s *Store) ExportSyncBundle(sourceDevice string) (models.SyncBundle, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.closed {
+		return models.SyncBundle{}, errVaultClosed
+	}
 	if s.locked {
 		return models.SyncBundle{}, errors.New("配置文件已锁定，请先解锁后再同步")
 	}
@@ -49,6 +52,9 @@ func (s *Store) ExportSyncBundle(sourceDevice string) (models.SyncBundle, error)
 func (s *Store) ImportSyncBundle(bundle models.SyncBundle, mode string) (models.SyncImportSummary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return models.SyncImportSummary{}, errVaultClosed
+	}
 	if s.locked {
 		return models.SyncImportSummary{}, errors.New("配置文件已锁定，请先解锁后再同步")
 	}

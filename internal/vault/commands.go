@@ -20,6 +20,9 @@ func (s *Store) ListShortcuts() []models.CommandShortcut {
 func (s *Store) SaveShortcut(sc models.CommandShortcut) (models.CommandShortcut, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return models.CommandShortcut{}, errVaultClosed
+	}
 	if s.locked {
 		return models.CommandShortcut{}, errVaultLocked
 	}
@@ -71,6 +74,9 @@ func (s *Store) SaveShortcut(sc models.CommandShortcut) (models.CommandShortcut,
 func (s *Store) DeleteShortcut(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return errVaultClosed
+	}
 	if s.locked {
 		return errVaultLocked
 	}
@@ -91,7 +97,7 @@ func (s *Store) DeleteShortcut(id string) error {
 func (s *Store) IncrementShortcutUse(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.locked {
+	if s.closed || s.locked {
 		return
 	}
 	for i := range s.data.Shortcuts {
@@ -111,6 +117,9 @@ func (s *Store) RecordCommand(serverID, serverName, sessionID, command string) (
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errVaultClosed
+	}
 	if s.locked {
 		return nil, errVaultLocked
 	}
@@ -162,6 +171,9 @@ func (s *Store) ListHistory(serverID string, limit int) []models.CommandRecord {
 func (s *Store) DeleteHistoryEntry(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return errVaultClosed
+	}
 	if s.locked {
 		return errVaultLocked
 	}
@@ -182,6 +194,9 @@ func (s *Store) DeleteHistoryEntry(id string) error {
 func (s *Store) ClearHistory(serverID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return errVaultClosed
+	}
 	if s.locked {
 		return errVaultLocked
 	}
@@ -213,6 +228,9 @@ func (s *Store) GetSettings() models.AppSettings {
 func (s *Store) SaveSettings(settings models.AppSettings) (models.AppSettings, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return models.AppSettings{}, errVaultClosed
+	}
 	if s.locked {
 		return models.AppSettings{}, errVaultLocked
 	}

@@ -74,6 +74,39 @@ func serverEndpointKey(srv models.ServerConfig) string {
 	return strings.ToLower(strings.TrimSpace(srv.Host)) + ":" + fmt.Sprintf("%d", port) + ":" + strings.TrimSpace(srv.Username)
 }
 
+func sameProxyEndpoint(a, b models.ProxyConfig) bool {
+	if a.Type == "" || a.Type == models.ProxyNone || a.Type != b.Type {
+		return false
+	}
+	hostA := strings.TrimSpace(a.Host)
+	if hostA == "" {
+		return false
+	}
+	return strings.EqualFold(hostA, strings.TrimSpace(b.Host)) &&
+		a.Port == b.Port &&
+		strings.TrimSpace(a.Username) == strings.TrimSpace(b.Username)
+}
+
+func effectiveJumpPort(port int) int {
+	if port <= 0 || port > 65535 {
+		return 22
+	}
+	return port
+}
+
+func sameCustomJumpEndpoint(a, b models.JumpHostConfig) bool {
+	if a.Mode != models.JumpCustom || b.Mode != models.JumpCustom {
+		return false
+	}
+	hostA := strings.TrimSpace(a.Host)
+	if hostA == "" {
+		return false
+	}
+	return strings.EqualFold(hostA, strings.TrimSpace(b.Host)) &&
+		effectiveJumpPort(a.Port) == effectiveJumpPort(b.Port) &&
+		strings.TrimSpace(a.Username) == strings.TrimSpace(b.Username)
+}
+
 func (s *Store) mergeServers(incoming []models.ServerConfig, keyMap map[string]string, sum *models.SyncImportSummary) {
 	srvIDMap := make(map[string]string, len(incoming))
 	importedIndices := make([]int, 0, len(incoming))
@@ -94,9 +127,15 @@ func (s *Store) mergeServers(incoming []models.ServerConfig, keyMap map[string]s
 		if idx >= 0 {
 			local := s.data.Servers[idx]
 			srv.ID = local.ID
-			fillEmptyString(&srv.Password, local.Password)
-			fillEmptyString(&srv.Proxy.Password, local.Proxy.Password)
-			fillEmptyString(&srv.JumpHost.Password, local.JumpHost.Password)
+			if serverEndpointKey(local) == ep && srv.AuthType != models.AuthKey {
+				fillEmptyString(&srv.Password, local.Password)
+			}
+			if sameProxyEndpoint(srv.Proxy, local.Proxy) {
+				fillEmptyString(&srv.Proxy.Password, local.Proxy.Password)
+			}
+			if sameCustomJumpEndpoint(srv.JumpHost, local.JumpHost) && srv.JumpHost.AuthType != models.AuthKey {
+				fillEmptyString(&srv.JumpHost.Password, local.JumpHost.Password)
+			}
 			if srv.LastConnectedAt == nil && local.LastConnectedAt != nil {
 				t := *local.LastConnectedAt
 				srv.LastConnectedAt = &t
@@ -153,20 +192,19 @@ func (s *Store) mergeTemplates(incoming []models.BuiltinTemplate, sum *models.Sy
 		idx := -1
 		if tpl.PresetID != "" {
 			idx = slices.IndexFunc(s.data.Templates, func(cur models.BuiltinTemplate) bool {
-				return cur.PresetID == tpl.PresetID || cur.ID == tpl.PresetID
+				return cur.PresetID == tpl.PresetID || (cur.PresetID == "" && cur.ID == tpl.PresetID)
 			})
-		}
-		if idx < 0 {
+		} else {
+			// Custom templates (PresetID == "") must never match or overwrite built-in presets by ID or Name.
 			idx = slices.IndexFunc(s.data.Templates, func(cur models.BuiltinTemplate) bool {
-				return cur.ID == tpl.ID
+				return cur.PresetID == "" && !validPresets[cur.ID] && cur.ID == tpl.ID
 			})
-		}
-		// Match by Name only between custom templates so a custom template can never hijack a preset (or vice versa).
-		if idx < 0 && tpl.PresetID == "" {
-			name := strings.TrimSpace(tpl.Name)
-			idx = slices.IndexFunc(s.data.Templates, func(cur models.BuiltinTemplate) bool {
-				return cur.PresetID == "" && strings.TrimSpace(cur.Name) == name
-			})
+			if idx < 0 {
+				name := strings.TrimSpace(tpl.Name)
+				idx = slices.IndexFunc(s.data.Templates, func(cur models.BuiltinTemplate) bool {
+					return cur.PresetID == "" && !validPresets[cur.ID] && strings.TrimSpace(cur.Name) == name
+				})
+			}
 		}
 
 		if idx >= 0 {
@@ -174,7 +212,13 @@ func (s *Store) mergeTemplates(incoming []models.BuiltinTemplate, sum *models.Sy
 			tpl.ID = local.ID
 			// Always preserve local PresetID so custom templates cannot claim a preset's PresetID
 			// and existing presets never lose their PresetID.
-			tpl.PresetID = local.PresetID
+			if local.PresetID != "" {
+				tpl.PresetID = local.PresetID
+			} else if tpl.PresetID != "" && validPresets[tpl.PresetID] && local.ID == tpl.PresetID {
+				tpl.PresetID = local.ID
+			} else {
+				tpl.PresetID = ""
+			}
 			s.data.Templates[idx] = tpl
 			sum.TemplatesUpdated++
 		} else {
@@ -232,19 +276,33 @@ func sanitizeShortcuts(in []models.CommandShortcut) []models.CommandShortcut {
 func sanitizeTemplates(in []models.BuiltinTemplate) []models.BuiltinTemplate {
 	validPresets := builtinPresetIDSet()
 	seenPreset := make(map[string]bool)
+	seenID := make(map[string]bool)
 	out := make([]models.BuiltinTemplate, 0, len(in))
 	for _, tpl := range in {
-		if strings.TrimSpace(tpl.Name) == "" || strings.TrimSpace(tpl.Command) == "" {
+		tpl.Name = strings.TrimSpace(tpl.Name)
+		tpl.Command = strings.TrimSpace(tpl.Command)
+		if tpl.Name == "" || tpl.Command == "" {
 			continue
 		}
-		tpl.ID = recordIDOrNew(tpl.ID)
+		tpl.ID = strings.TrimSpace(tpl.ID)
+		tpl.PresetID = strings.TrimSpace(tpl.PresetID)
 		if tpl.PresetID != "" {
-			if !validPresets[tpl.PresetID] || seenPreset[tpl.PresetID] {
+			// Accept a preset identity only if it matches a genuine built-in preset, is not duplicated,
+			// and its ID is either empty or matches that preset ID (prevents forging PresetID on custom IDs).
+			if !validPresets[tpl.PresetID] || seenPreset[tpl.PresetID] || (tpl.ID != "" && tpl.ID != tpl.PresetID) {
 				tpl.PresetID = ""
 			} else {
 				seenPreset[tpl.PresetID] = true
+				tpl.ID = tpl.PresetID
 			}
 		}
+		if tpl.PresetID == "" {
+			// Custom templates must never retain a built-in preset ID or duplicate another template's ID.
+			if tpl.ID == "" || validPresets[tpl.ID] || seenID[tpl.ID] {
+				tpl.ID = uuid.NewString()
+			}
+		}
+		seenID[tpl.ID] = true
 		out = append(out, tpl)
 	}
 	return out

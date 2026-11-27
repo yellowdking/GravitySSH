@@ -162,3 +162,75 @@ func TestSyncPreviewCacheAbortAndRetryApprove(t *testing.T) {
 		t.Fatal("expected beginSendApprove to fail after markSendApproved")
 	}
 }
+
+func TestSyncPreviewCacheClockSkewGrace(t *testing.T) {
+	cache := newSyncPreviewCache()
+	defer cache.close()
+
+	now := time.Now()
+	// Client clock leading relay by 119s (within allowed +-120s relay skew, under 135s grace):
+	// relay expiresAt appears 119s in the past locally, but sessions MUST NOT be pruned yet.
+	skewedExp := now.Add(-119 * time.Second)
+	cache.putSend(&pendingSyncSendSession{
+		sessionID:   "sess-skew-ok",
+		channelID:   "chan-skew",
+		senderToken: "tok-skew",
+		sendCode:    "ABCD2345",
+		relayURL:    "https://relay.example.com",
+		bundle:      sampleTestBundle(),
+		hasBundle:   true,
+		expiresAt:   skewedExp,
+	})
+	cache.putReceive(&pendingSyncReceiveSession{
+		waitID:    "wait-skew-ok",
+		channelID: "chan-skew",
+		sendCode:  "ABCD2345",
+		recvCode:  "WXYZ6789",
+		requestID: "req-skew",
+		relayURL:  "https://relay.example.com",
+		expiresAt: skewedExp,
+	})
+
+	if _, ok := cache.getSend("sess-skew-ok"); !ok {
+		t.Fatal("expected pending send within 135s clock-skew grace to remain cached")
+	}
+	if _, ok := cache.getReceive("wait-skew-ok"); !ok {
+		t.Fatal("expected pending receive within 135s clock-skew grace to remain cached")
+	}
+
+	// Past the 135s clock-skew grace window, both sessions MUST be pruned.
+	expiredPastGrace := now.Add(-(syncClockSkewGrace + 2*time.Second))
+	cache.putSend(&pendingSyncSendSession{
+		sessionID:   "sess-expired",
+		channelID:   "chan-exp",
+		senderToken: "tok-exp",
+		sendCode:    "EFGH2345",
+		relayURL:    "https://relay.example.com",
+		bundle:      sampleTestBundle(),
+		hasBundle:   true,
+		expiresAt:   expiredPastGrace,
+	})
+	cache.putReceive(&pendingSyncReceiveSession{
+		waitID:    "wait-expired",
+		channelID: "chan-exp",
+		sendCode:  "EFGH2345",
+		recvCode:  "JKLM6789",
+		requestID: "req-exp",
+		relayURL:  "https://relay.example.com",
+		expiresAt: expiredPastGrace,
+	})
+
+	if _, ok := cache.getSend("sess-expired"); ok {
+		t.Fatal("expected pending send past 135s skew grace to be pruned")
+	}
+	if _, ok := cache.getReceive("wait-expired"); ok {
+		t.Fatal("expected pending receive past 135s skew grace to be pruned")
+	}
+	// Earlier skewed sessions still within 135s grace remain intact.
+	if _, ok := cache.getSend("sess-skew-ok"); !ok {
+		t.Fatal("expected valid skewed send session to survive pruning of expired sessions")
+	}
+	if _, ok := cache.getReceive("wait-skew-ok"); !ok {
+		t.Fatal("expected valid skewed receive session to survive pruning of expired sessions")
+	}
+}

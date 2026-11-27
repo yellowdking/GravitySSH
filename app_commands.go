@@ -79,8 +79,103 @@ func (a *App) DeleteShortcut(id string) error {
 	return a.store.DeleteShortcut(id)
 }
 
-// RunShortcut sends single- or multi-line command scripts (35ms pacing for multi-line).
-func (a *App) RunShortcut(sessionID, shortcutID string, forceExecute bool) error {
+// stripBracketedPasteMarkers removes bracketed-paste start/end escape sequences
+// (both 7-bit CSI and 8-bit C1) repeatedly until stable so nested payloads cannot
+// reconstruct a breakout sequence.
+func stripBracketedPasteMarkers(s string) string {
+	replacer := strings.NewReplacer(
+		"\x1b[200~", "",
+		"\x1b[201~", "",
+		"\x9b200~", "",
+		"\x9b201~", "",
+	)
+	for {
+		next := replacer.Replace(s)
+		if next == s {
+			return s
+		}
+		s = next
+	}
+}
+
+// formatShortcutFillInput prepares a shortcut command for fill-only (non-executing)
+// terminal insertion: normalizes line endings, strips trailing newlines so it never
+// submits, and wraps multi-line payloads in sanitized bracketed-paste sequences so
+// lines 1..N-1 cannot silently execute.
+func formatShortcutFillInput(raw string) string {
+	norm := strings.ReplaceAll(strings.ReplaceAll(raw, "\r\n", "\n"), "\r", "\n")
+	norm = strings.TrimRight(norm, "\n")
+	if norm == "" {
+		return ""
+	}
+	if !strings.Contains(norm, "\n") {
+		return norm
+	}
+	safe := stripBracketedPasteMarkers(norm)
+	if safe == "" {
+		return ""
+	}
+	return "\x1b[200~" + safe + "\x1b[201~"
+}
+
+func runShortcutPayload(
+	ctxDone <-chan struct{},
+	getStopCh func() <-chan struct{},
+	command string,
+	execute bool,
+	writeInput func(string) error,
+) error {
+	if !execute {
+		fill := formatShortcutFillInput(command)
+		if fill == "" {
+			return nil
+		}
+		return writeInput(fill)
+	}
+
+	norm := strings.ReplaceAll(strings.ReplaceAll(command, "\r\n", "\n"), "\r", "\n")
+	var lines []string
+	for _, line := range strings.Split(norm, "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	if err := writeInput(lines[0] + "\r"); err != nil || len(lines) == 1 {
+		return err
+	}
+	var stopCh <-chan struct{}
+	if getStopCh != nil {
+		stopCh = getStopCh()
+	}
+	rest := lines[1:]
+	go func() {
+		timer := time.NewTimer(35 * time.Millisecond)
+		defer timer.Stop()
+		for i, line := range rest {
+			if i > 0 {
+				timer.Reset(35 * time.Millisecond)
+			}
+			select {
+			case <-ctxDone:
+				return
+			case <-stopCh:
+				return
+			case <-timer.C:
+			}
+			if err := writeInput(line + "\r"); err != nil {
+				return
+			}
+		}
+	}()
+	return nil
+}
+
+// RunShortcut fills or executes single- or multi-line command scripts (35ms pacing for multi-line).
+// Calling RunShortcut with execute=false NEVER executes, regardless of shortcut.AutoExecute.
+func (a *App) RunShortcut(sessionID, shortcutID string, execute bool) error {
 	if err := a.ensureUnlocked(); err != nil {
 		return err
 	}
@@ -97,50 +192,18 @@ func (a *App) RunShortcut(sessionID, shortcutID string, forceExecute bool) error
 	}
 	a.store.IncrementShortcutUse(shortcutID)
 
-	norm := strings.ReplaceAll(strings.ReplaceAll(target.Command, "\r\n", "\n"), "\r", "\n")
-	if !forceExecute && !target.AutoExecute {
-		return a.sshMgr.WriteInput(sessionID, norm)
-	}
-
-	var lines []string
-	for _, line := range strings.Split(norm, "\n") {
-		if strings.TrimSpace(line) != "" {
-			lines = append(lines, line)
-		}
-	}
-	if len(lines) == 0 {
-		return nil
-	}
-	if err := a.sshMgr.WriteInput(sessionID, lines[0]+"\r"); err != nil || len(lines) == 1 {
-		return err
-	}
-	ctx := a.ctx
+	shouldExec := execute
 	var ctxDone <-chan struct{}
-	if ctx != nil {
-		ctxDone = ctx.Done()
+	if a.ctx != nil {
+		ctxDone = a.ctx.Done()
 	}
-	stopCh := a.sshMgr.SessionStopCh(sessionID)
-	rest := lines[1:]
-	go func() {
-		timer := time.NewTimer(35 * time.Millisecond)
-		defer timer.Stop()
-		for i, line := range rest {
-			if i > 0 {
-				timer.Reset(35 * time.Millisecond)
-			}
-			select {
-			case <-ctxDone:
-				return
-			case <-stopCh:
-				return
-			case <-timer.C:
-			}
-			if err := a.sshMgr.WriteInput(sessionID, line+"\r"); err != nil {
-				return
-			}
-		}
-	}()
-	return nil
+	return runShortcutPayload(
+		ctxDone,
+		func() <-chan struct{} { return a.sshMgr.SessionStopCh(sessionID) },
+		target.Command,
+		shouldExec,
+		func(data string) error { return a.sshMgr.WriteInput(sessionID, data) },
+	)
 }
 
 func (a *App) SuggestCommandsForSession(input, serverID, sessionID string) ([]models.CompletionItem, error) {

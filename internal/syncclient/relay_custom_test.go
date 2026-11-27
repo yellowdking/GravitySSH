@@ -161,3 +161,32 @@ func TestSyncClientSafetyGuards(t *testing.T) {
 		t.Fatalf("expected 2 MiB payload pre-check error, got %v", err)
 	}
 }
+
+func TestSyncClientBlocksRedirects(t *testing.T) {
+	const gateKey = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
+	var targetHits int
+	downgradeTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits++
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer downgradeTarget.Close()
+
+	redirRelay := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, downgradeTarget.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	redirRelay.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
+	redirRelay.StartTLS()
+	defer redirRelay.Close()
+
+	cli, err := NewClientWithMode(redirRelay.URL, gateKey, "", RelayTLSModeSelfSignedIP)
+	if err != nil {
+		t.Fatalf("NewClientWithMode failed: %v", err)
+	}
+	if _, err := cli.Ping(context.Background()); err == nil || !strings.Contains(err.Error(), "307") {
+		t.Fatalf("expected HTTP 307 error without following redirect, got %v", err)
+	}
+	if targetHits != 0 {
+		t.Fatalf("sync client followed 307 redirect to %s (%d hits)", downgradeTarget.URL, targetHits)
+	}
+}

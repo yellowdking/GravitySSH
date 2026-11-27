@@ -28,14 +28,18 @@ lsmod | grep -i bbr || true`,
 			SafetyNote:  "已存在 /swapfile 时自动跳过，修改 /etc/fstab 前自动生成 .bak 备份",
 			Command: `(
 SWAP_SIZE="2G"
-if [ -f /swapfile ]; then echo "/swapfile 已存在，跳过创建"; swapon --show; exit 0; fi
-sudo fallocate -l "$SWAP_SIZE" /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress
-sudo chmod 600 /swapfile
-sudo mkswap /swapfile
-sudo swapon /swapfile
-sudo cp -a /etc/fstab /etc/fstab.bak.$(date +%s)
-grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
-free -h && swapon --show
+if [ -f /swapfile ]; then
+  echo "/swapfile 已存在，跳过创建"
+  swapon --show
+else
+  sudo fallocate -l "$SWAP_SIZE" /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress
+  sudo chmod 600 /swapfile
+  sudo mkswap /swapfile
+  sudo swapon /swapfile
+  sudo cp -a /etc/fstab /etc/fstab.bak.$(date +%s)
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+  free -h && swapon --show
+fi
 )`,
 		},
 		{
@@ -107,11 +111,11 @@ if ! sudo sshd -t; then
 fi
 command -v ufw >/dev/null 2>&1 && sudo ufw allow "${NEW_PORT}/tcp" >/dev/null 2>&1 || true
 command -v firewall-cmd >/dev/null 2>&1 && sudo firewall-cmd --permanent --add-port="${NEW_PORT}/tcp" >/dev/null 2>&1 && sudo firewall-cmd --reload >/dev/null 2>&1 || true
-sudo systemctl reload sshd 2>/dev/null || sudo systemctl reload ssh 2>/dev/null || sudo service ssh reload
+sudo systemctl reload sshd 2>/dev/null || sudo systemctl reload ssh 2>/dev/null || sudo service ssh reload 2>/dev/null || sudo service sshd reload
 echo "✓ 已同时监听旧端口 ${OLD_PORT} 与新端口 ${NEW_PORT}（备份: ${BAK}）"
-(sleep 600 && [ -f /tmp/.gssh_port_pending ] && sudo rm -f /etc/ssh/sshd_config.d/99-gravityssh-port.conf /tmp/.gssh_port_pending && (sudo systemctl reload sshd 2>/dev/null || sudo systemctl reload ssh 2>/dev/null || true)) >/dev/null 2>&1 &
-touch /tmp/.gssh_port_pending
-echo ">>> 请立即新建会话测试新端口 ${NEW_PORT}！确认可连上后执行: rm -f /tmp/.gssh_port_pending"
+sudo sh -c 'mkdir -p /run && umask 077 && rm -f /run/gssh_port_pending && : > /run/gssh_port_pending'
+sudo nohup sh -c 'sleep 600; if [ -f /run/gssh_port_pending ]; then rm -f /etc/ssh/sshd_config.d/99-gravityssh-port.conf /run/gssh_port_pending; systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || service ssh reload 2>/dev/null || service sshd reload 2>/dev/null || true; fi' </dev/null >/dev/null 2>&1 &
+echo ">>> 请立即新建会话测试新端口 ${NEW_PORT}！确认可连上后执行: sudo rm -f /run/gssh_port_pending"
 echo ">>> 10 分钟内未确认将自动回滚至旧端口 ${OLD_PORT}。"
 )`,
 		},

@@ -79,8 +79,14 @@ func NewClientWithMode(relayURL, appGateKey, spkiSHA256 string, mode RelayTLSMod
 	return &Client{
 		relayURL:   strings.TrimRight(relayURL, "/"),
 		appGateKey: appGateKey,
-		httpClient: &http.Client{Transport: tr, Timeout: 20 * time.Second},
-		nowFn:      time.Now,
+		httpClient: &http.Client{
+			Transport: tr,
+			Timeout:   20 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		nowFn: time.Now,
 	}, nil
 }
 

@@ -36,6 +36,9 @@ func (s *Store) IsLocked() bool {
 func (s *Store) Unlock(password string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return errVaultClosed
+	}
 	if !s.locked {
 		return nil
 	}
@@ -68,7 +71,7 @@ func (s *Store) Unlock(password string) error {
 	s.data = loaded
 	s.pwSalt = pwSalt
 	s.pwKey = pwKey
-	s.hasPassword = true
+	s.hasPassword = len(pwSalt) > 0 && len(pwKey) > 0
 	s.locked = false
 	return nil
 }
@@ -77,6 +80,9 @@ func (s *Store) Unlock(password string) error {
 func (s *Store) SetPassword(currentPassword, newPassword string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return errVaultClosed
+	}
 	if s.locked {
 		return errors.New("请先解锁配置文件后再修改密码")
 	}
