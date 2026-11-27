@@ -1,24 +1,24 @@
 import type { SFTPFileEntry } from '../types'
 import { api } from '../wailsApi'
+import { errMsg } from '../utils/errors'
+import type { ConfirmOptions, PromptOptions } from './useActionDialogs'
 
 interface SftpActionDeps {
   sessionId: string
   getCurrentPath: () => string
-  editingFile: { path: string; content: string } | null
+  getEditingFile: () => { path: string; content: string } | null
   addBusyPath: (p: string) => void
   removeBusyPath: (p: string) => void
   removeEntryLocally: (p: string) => void
   setEditingFile: (f: { path: string; content: string } | null) => void
   setSavingFile: (v: boolean) => void
   loadDir: (path: string, syncCwd?: boolean) => Promise<void>
+  confirm: (opts: ConfirmOptions) => Promise<boolean>
+  prompt: (opts: PromptOptions) => Promise<string | null>
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
 
 const inFlightPaths = new Set<string>()
-
-function errMsg(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}
 
 export function createSftpActions(d: SftpActionDeps) {
   const lockKey = (path: string) => `${d.sessionId}\0${path}`
@@ -59,20 +59,36 @@ export function createSftpActions(d: SftpActionDeps) {
       } catch (err) { d.onToast(errMsg(err), 'error') }
     }),
     handleSaveFile: async (content: string) => {
-      if (!d.editingFile) return
+      const currentFile = d.getEditingFile()
+      if (!currentFile) return
       d.setSavingFile(true)
       try {
-        await api.sftpWriteTextFile(d.sessionId, d.editingFile.path, content)
-        d.setEditingFile({ path: d.editingFile.path, content })
-        d.onToast(`已保存并回传 ${d.editingFile.path}`)
+        await api.sftpWriteTextFile(d.sessionId, currentFile.path, content)
+        d.setEditingFile({ path: currentFile.path, content })
+        d.onToast(`已保存并回传 ${currentFile.path}`)
         void reload()
       } catch (err) { fail('保存失败', err) }
       finally { d.setSavingFile(false) }
     },
     handleCompress: async (entry: SFTPFileEntry) => {
-      const choice = window.prompt(`压缩 "${entry.name}"，输入格式：tar.gz 或 zip`, 'tar.gz')
+      const choice = await d.prompt({
+        title: `压缩 "${entry.name}"`,
+        message: '选择或输入压缩归档格式（仅支持 tar.gz 或 zip）：',
+        defaultValue: 'tar.gz',
+        placeholder: 'tar.gz 或 zip',
+        presets: ['tar.gz', 'zip'],
+        confirmLabel: '开始压缩',
+        validate: (v) => {
+          const fmt = v.trim().toLowerCase()
+          return fmt === 'tar.gz' || fmt === 'zip' ? null : '压缩格式无效，仅支持 tar.gz 或 zip'
+        },
+      })
       if (!choice) return
-      const fmt = choice.trim().toLowerCase() === 'zip' ? 'zip' : 'tar.gz'
+      const fmt = choice.trim().toLowerCase()
+      if (fmt !== 'tar.gz' && fmt !== 'zip') {
+        d.onToast(`不支持的压缩格式: ${choice}`, 'error')
+        return
+      }
       const dir = d.getCurrentPath()
       await withBusy(entry.path, async () => {
         try {
@@ -98,7 +114,18 @@ export function createSftpActions(d: SftpActionDeps) {
       } catch (err) { fail('解压失败', err) }
     }),
     handleMkdir: async () => {
-      const name = window.prompt('请输入新建文件夹名称：')
+      const name = await d.prompt({
+        title: '新建远程文件夹',
+        message: '请输入新建文件夹名称：',
+        placeholder: '例如：logs',
+        confirmLabel: '创建',
+        validate: (v) => {
+          const t = v.trim()
+          if (!t) return '文件夹名称不能为空'
+          if (t.includes('/')) return '名称不能包含 "/"'
+          return null
+        },
+      })
       if (!name?.trim()) return
       const cur = d.getCurrentPath()
       const full = cur === '/' ? `/${name.trim()}` : `${cur}/${name.trim()}`
@@ -107,7 +134,18 @@ export function createSftpActions(d: SftpActionDeps) {
     },
     handleRename: async (entry: SFTPFileEntry) => {
       if (inFlightPaths.has(lockKey(entry.path))) return
-      const nextName = window.prompt('重命名为：', entry.name)
+      const nextName = await d.prompt({
+        title: '重命名',
+        message: `将 "${entry.name}" 重命名为：`,
+        defaultValue: entry.name,
+        confirmLabel: '重命名',
+        validate: (v) => {
+          const t = v.trim()
+          if (!t) return '名称不能为空'
+          if (t.includes('/')) return '名称不能包含 "/"'
+          return null
+        },
+      })
       const trimmed = nextName?.trim()
       if (!trimmed || trimmed === entry.name) return
       if (trimmed.includes('/')) { d.onToast('重命名失败: 名称不能包含 "/"', 'error'); return }
@@ -125,7 +163,12 @@ export function createSftpActions(d: SftpActionDeps) {
     handleDelete: async (entry: SFTPFileEntry) => {
       if (inFlightPaths.has(lockKey(entry.path))) return
       const tip = entry.isDir ? `目录 "${entry.name}" 及其所有内容` : `文件 "${entry.name}"`
-      if (!window.confirm(`确定要永久删除远程 ${tip} 吗？`)) return
+      const ok = await d.confirm({
+        title: '删除远程文件',
+        message: `确定要永久删除远程 ${tip} 吗？`,
+        confirmLabel: '永久删除',
+      })
+      if (!ok) return
       await withBusy(entry.path, async () => {
         try {
           await api.sftpDelete(d.sessionId, entry.path)

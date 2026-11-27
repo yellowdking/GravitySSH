@@ -29,6 +29,6 @@ export const TerminalSearchBar: React.FC<Props> = ({ value, onChange, onPrev, on
     />
     <button onClick={onPrev} className="px-2 py-0.5 rounded bg-ag-elevated hover:bg-ag-hover text-ag-muted">上一个</button>
     <button onClick={onNext} className="px-2 py-0.5 rounded bg-ag-elevated hover:bg-ag-hover text-ag-muted">下一个</button>
-    <button onClick={onClose} className="p-1 text-ag-muted hover:text-ag-text"><X className="w-3.5 h-3.5" /></button>
+    <button type="button" onClick={onClose} aria-label="关闭搜索" className="p-1 text-ag-muted hover:text-ag-text"><X className="w-3.5 h-3.5" /></button>
   </div>
 )

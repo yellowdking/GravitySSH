@@ -11,7 +11,17 @@ import type {
   VaultSecurityInfo,
 } from '../types'
 import { api } from '../wailsApi'
+import { errMsg } from '../utils/errors'
 import { DEFAULT_TERMINAL_FONT } from '../components/terminalTheme'
+
+function sameSettings(a: AppSettings, b: AppSettings): boolean {
+  const keys = Object.keys(a) as Array<keyof AppSettings>
+  if (keys.length !== Object.keys(b).length) return false
+  for (const k of keys) {
+    if (a[k] !== b[k]) return false
+  }
+  return true
+}
 
 const DEFAULT_SETTINGS: AppSettings = {
   autocompleteEnabled: true,
@@ -39,7 +49,7 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
   const [securityInfo, setSecurityInfo] = useState<VaultSecurityInfo | null>(null)
   const [lockState, setLockState] = useState<VaultLockState | null>(null)
-  const [appVersion, setAppVersion] = useState('1.3.5')
+  const [appVersion, setAppVersion] = useState('1.3.6')
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null)
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
@@ -47,6 +57,26 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
 
   const autoOpenSftpRef = useRef(settings.autoOpenSftp)
   autoOpenSftpRef.current = settings.autoOpenSftp
+
+  const reloadServers = useCallback(async () => {
+    try { setServers((await api.listServers()) || []) }
+    catch (err) { showToast(`加载服务器列表失败: ${errMsg(err)}`, 'error') }
+  }, [showToast])
+
+  const reloadKeys = useCallback(async () => {
+    try { setSshKeys((await api.listSSHKeys()) || []) }
+    catch (err) { showToast(`加载密钥列表失败: ${errMsg(err)}`, 'error') }
+  }, [showToast])
+
+  const reloadShortcuts = useCallback(async () => {
+    try { setShortcuts((await api.listShortcuts()) || []) }
+    catch (err) { showToast(`加载快捷命令失败: ${errMsg(err)}`, 'error') }
+  }, [showToast])
+
+  const reloadHistory = useCallback(async () => {
+    try { setHistory((await api.listCommandHistory('', 400)) || []) }
+    catch (err) { showToast(`加载命令历史失败: ${errMsg(err)}`, 'error') }
+  }, [showToast])
 
   const loadAll = useCallback(async () => {
     try {
@@ -71,10 +101,13 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
       setSshKeys(keys || [])
       setShortcuts(scs || [])
       setHistory(hist || [])
-      if (cfg) setSettings({ ...DEFAULT_SETTINGS, ...cfg })
+      if (cfg) {
+        const merged = { ...DEFAULT_SETTINGS, ...cfg }
+        setSettings((prev) => (sameSettings(prev, merged) ? prev : merged))
+      }
       if (sec) setSecurityInfo(sec)
     } catch (err) {
-      showToast(`加载配置失败: ${err}`, 'error')
+      showToast(`加载配置失败: ${errMsg(err)}`, 'error')
     }
   }, [showToast])
 
@@ -113,6 +146,7 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
     servers, sshKeys, shortcuts, setShortcuts, history, settings, setSettings,
     securityInfo, lockState, appVersion, updateInfo, setUpdateInfo,
     sessions, setSessions, activeSessionId, setActiveSessionId,
-    sftpOpenBySession, setSftpOpenBySession, loadAll,
+    sftpOpenBySession, setSftpOpenBySession,
+    loadAll, reloadServers, reloadKeys, reloadShortcuts, reloadHistory,
   }
 }

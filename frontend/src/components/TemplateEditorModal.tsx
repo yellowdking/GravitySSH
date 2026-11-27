@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Save, Sparkles, X } from 'lucide-react'
 import type { BuiltinTemplate } from '../types'
+import { insertTabIndent } from '../utils/errors'
 import { ModalShell } from './ModalShell'
 
 interface Props {
@@ -27,8 +28,6 @@ export const TemplateEditorModal: React.FC<Props> = ({ open, initial, saving, on
     setCommand(initial?.command || '')
   }, [open, initial])
 
-  if (!open) return null
-
   const lineCount = command === '' ? 0 : command.replace(/\r\n/g, '\n').split('\n').length
   const isEdit = !!initial?.id
 
@@ -54,7 +53,7 @@ export const TemplateEditorModal: React.FC<Props> = ({ open, initial, saving, on
             <Sparkles className="w-4 h-4 text-violet-400" />
             <h3 className="text-sm font-semibold text-ag-text">{isEdit ? '编辑运维模板' : '新建运维模板'}</h3>
           </div>
-          <button type="button" onClick={onClose} className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text">
+          <button type="button" onClick={onClose} aria-label="关闭模板编辑器" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -93,16 +92,7 @@ export const TemplateEditorModal: React.FC<Props> = ({ open, initial, saving, on
               spellCheck={false}
               value={command}
               onChange={(e) => setCommand(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Tab') {
-                  e.preventDefault()
-                  const t = e.currentTarget
-                  const start = t.selectionStart
-                  const end = t.selectionEnd
-                  setCommand(command.slice(0, start) + '  ' + command.slice(end))
-                  requestAnimationFrame(() => { t.selectionStart = t.selectionEnd = start + 2 })
-                }
-              }}
+              onKeyDown={(e) => { insertTabIndent(e, command, setCommand) }}
               placeholder="输入要执行的 Shell 脚本，可包含多条或数十条命令..."
               className="ag-input font-mono text-xs leading-relaxed resize-y"
             />

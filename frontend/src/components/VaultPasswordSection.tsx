@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { AlertCircle, FolderLock, KeyRound, Loader2, Lock, Unlock } from 'lucide-react'
 import type { VaultLockState, VaultSecurityInfo } from '../types'
 import { api } from '../wailsApi'
+import { errMsg } from '../utils/errors'
 
 interface Props {
   securityInfo: VaultSecurityInfo | null
@@ -57,7 +58,7 @@ export const VaultPasswordSection: React.FC<Props> = ({
       else onToast('已移除自定义密码，恢复默认自动加密')
       reset()
     } catch (err) {
-      setError(String(err).replace(/^Error:\s*/i, ''))
+      setError(errMsg(err))
     } finally {
       setBusy(false)
     }

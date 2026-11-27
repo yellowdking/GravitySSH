@@ -5,6 +5,7 @@ import { SearchAddon } from '@xterm/addon-search'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import type { AppSettings, CompletionItem } from '../types'
 import { api } from '../wailsApi'
+import { copyToClipboard, readFromClipboard } from '../utils/errors'
 import { ANTIGRAVITY_TERM_THEME, DEFAULT_TERMINAL_FONT } from '../components/terminalTheme'
 
 export function createConfiguredTerminal(el: HTMLDivElement, settings: AppSettings) {
@@ -72,12 +73,12 @@ export function attachTerminalInputHandlers(d: HandlerDeps) {
     if (ev.ctrlKey && ev.shiftKey && k === 'c') {
       ev.preventDefault()
       const s = d.term.getSelection()
-      if (s) void navigator.clipboard.writeText(s)
+      if (s) void copyToClipboard(s)
       return false
     }
     if (ev.ctrlKey && ev.shiftKey && k === 'v') {
       ev.preventDefault()
-      void navigator.clipboard.readText().then((t) => { if (t) d.pasteText(t) })
+      void readFromClipboard().then((t) => { if (t) d.pasteText(t) })
       return false
     }
     if (d.term.buffer.active.type === 'normal' && d.suggestionsRef.current.length > 0) {
@@ -104,7 +105,7 @@ export function syncTerminalImeAttrs(term: Terminal | null, enabled: boolean) {
   }
 }
 
-export interface TerminalImeGuard {
+interface TerminalImeGuard {
   trigger: (force?: boolean) => void
   detach: () => void
 }

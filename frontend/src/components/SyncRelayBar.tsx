@@ -1,7 +1,9 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useState } from 'react'
 import { Check, ChevronDown, ChevronRight, Copy, Loader2, RotateCcw, Save, Server, Wifi } from 'lucide-react'
 import type { AppSettings } from '../types'
 import { api } from '../wailsApi'
+import { errMsg } from '../utils/errors'
+import { useCopyFeedback } from '../hooks/useCopyFeedback'
 
 interface Props {
   settings: AppSettings
@@ -21,17 +23,7 @@ export const SyncRelayBar: React.FC<Props> = ({
   const [testing, setTesting] = useState(false)
   const [testRes, setTestRes] = useState<{ ok: boolean; text: string } | null>(null)
   const [showDocker, setShowDocker] = useState(false)
-  const [copiedCmd, setCopiedCmd] = useState(false)
-  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  useEffect(() => {
-    return () => {
-      if (copyTimerRef.current !== null) {
-        clearTimeout(copyTimerRef.current)
-        copyTimerRef.current = null
-      }
-    }
-  }, [])
+  const { copied: copiedCmd, copy } = useCopyFeedback()
 
   const trimmed = relayInput.trim()
   const isCustom = trimmed !== '' && trimmed !== defaultRelay
@@ -44,7 +36,7 @@ export const SyncRelayBar: React.FC<Props> = ({
       onRelayInputChange(saved.syncRelayUrl || '')
       onToast(msg)
     } catch (err) {
-      onToast(String(err), 'error')
+      onToast(errMsg(err), 'error')
     } finally {
       setSaving(false)
     }
@@ -57,7 +49,7 @@ export const SyncRelayBar: React.FC<Props> = ({
       const ms = await api.testSyncRelay(trimmed)
       setTestRes({ ok: true, text: `✓ 已连通 (${ms}ms)` })
     } catch (err) {
-      setTestRes({ ok: false, text: String(err).replace(/^Error:\s*/i, '') })
+      setTestRes({ ok: false, text: errMsg(err) })
     } finally {
       setTesting(false)
     }
@@ -70,18 +62,9 @@ export const SyncRelayBar: React.FC<Props> = ({
   }
 
   const copyDocker = async () => {
-    try {
-      await navigator.clipboard.writeText(DOCKER_CMD)
-      setCopiedCmd(true)
-      onToast('Docker 部署命令已复制')
-      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current)
-      copyTimerRef.current = setTimeout(() => {
-        copyTimerRef.current = null
-        setCopiedCmd(false)
-      }, 1800)
-    } catch {
-      onToast('复制失败，请手动复制', 'error')
-    }
+    const ok = await copy(DOCKER_CMD)
+    if (ok) onToast('Docker 部署命令已复制')
+    else onToast('复制失败，请手动复制', 'error')
   }
 
   return (

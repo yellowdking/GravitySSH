@@ -5,6 +5,10 @@ import {
 } from 'lucide-react'
 import type { SyncSendPollResult, SyncSendSession } from '../syncTypes'
 import { api } from '../wailsApi'
+import { errMsg } from '../utils/errors'
+import { useCopyFeedback } from '../hooks/useCopyFeedback'
+import { fmtSec, useSyncCountdown } from '../hooks/useSyncCountdown'
+import { useSyncPolling } from '../hooks/useSyncPolling'
 import { QrCodeSvg } from './QrCodeSvg'
 
 interface Props {
@@ -14,8 +18,8 @@ interface Props {
 
 type SendStage = 'waiting' | 'requested' | 'approved' | 'consumed' | 'rejected' | 'expired' | 'error'
 
-const fmtSec = (n: number) =>
-  `${String(Math.floor(Math.max(0, n) / 60)).padStart(2, '0')}:${String(Math.max(0, n) % 60).padStart(2, '0')}`
+const isActiveStage = (stage: SendStage) =>
+  stage === 'waiting' || stage === 'requested' || stage === 'approved'
 
 export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
   const [sess, setSess] = useState<SyncSendSession | null>(null)
@@ -25,103 +29,72 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
   const [busy, setBusy] = useState(false)
   const [decisionBusy, setDecisionBusy] = useState(false)
   const [revoking, setRevoking] = useState(false)
-  const [copied, setCopied] = useState(false)
-  const [left, setLeft] = useState(0)
-  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const left = useSyncCountdown(sess?.expiresAt)
+  const { copied, copy, reset: resetCopy } = useCopyFeedback()
+
+  const sessRef = useRef<SyncSendSession | null>(null)
+  sessRef.current = sess
+  const stageRef = useRef<SendStage>(stage)
+  stageRef.current = stage
+  const relayRef = useRef(relayUrl)
+  relayRef.current = relayUrl
 
   useEffect(() => {
     return () => {
-      if (copyTimerRef.current !== null) {
-        clearTimeout(copyTimerRef.current)
-        copyTimerRef.current = null
+      const s = sessRef.current
+      if (s && isActiveStage(stageRef.current)) {
+        void api.cancelSyncSend(s.sessionId, s.relayUrl || relayRef.current).catch(() => {})
       }
     }
   }, [])
 
-  useEffect(() => {
-    if (!sess) { setLeft(0); return }
-    const expiresMs = new Date(sess.expiresAt).getTime()
-    let id: ReturnType<typeof setInterval> | null = null
-    const tick = () => {
-      const rem = Math.max(0, Math.floor((expiresMs - Date.now()) / 1000))
-      setLeft(rem)
-      if (rem <= 0 && id !== null) {
-        clearInterval(id)
-        id = null
+  useSyncPolling({
+    enabled: Boolean(sess && (stage === 'waiting' || stage === 'approved') && left > 0),
+    intervalMs: 1500,
+    poll: async () => {
+      const current = sessRef.current
+      if (!current) return false
+      const res = await api.pollSyncSend(current.sessionId)
+      if (sessRef.current?.sessionId !== current.sessionId) return false
+      switch (res.status) {
+        case 'waiting':
+          return true
+        case 'requested':
+          setPendingReq(res)
+          setStage('requested')
+          return false
+        case 'approved':
+          setStage('approved')
+          return true
+        case 'consumed':
+          setStage('consumed')
+          setStatusMessage(res.message || '对方已成功接收配置，中继密文已焚毁')
+          onToast('对方已成功接收配置，中继密文已焚毁')
+          return false
+        case 'rejected':
+          setStage('rejected')
+          setStatusMessage(res.message || '已拒绝该同步请求')
+          return false
+        case 'expired':
+          setStage('expired')
+          setStatusMessage(res.message || '同步码已过期，请重新生成')
+          return false
+        case 'error':
+          setStage('error')
+          setStatusMessage(res.message || '配对验证失败')
+          onToast(res.message || '配对验证失败', 'error')
+          return false
+        default:
+          return true
       }
-      return rem
-    }
-    if (tick() > 0) {
-      id = setInterval(tick, 1000)
-    }
-    return () => {
-      if (id !== null) clearInterval(id)
-    }
-  }, [sess])
-
-  useEffect(() => {
-    if (!sess || (stage !== 'waiting' && stage !== 'approved')) return
-    let cancelled = false
-    let timer: ReturnType<typeof setTimeout> | null = null
-
-    const pollOnce = async () => {
-      try {
-        const res = await api.pollSyncSend(sess.sessionId)
-        if (cancelled) return
-        switch (res.status) {
-          case 'waiting':
-            timer = setTimeout(() => { void pollOnce() }, 1500)
-            return
-          case 'requested':
-            setPendingReq(res)
-            setStage('requested')
-            return
-          case 'approved':
-            setStage('approved')
-            timer = setTimeout(() => { void pollOnce() }, 1500)
-            return
-          case 'consumed':
-            setStage('consumed')
-            setStatusMessage(res.message || '对方已成功接收配置，中继密文已焚毁')
-            onToast('对方已成功接收配置，中继密文已焚毁')
-            return
-          case 'rejected':
-            setStage('rejected')
-            setStatusMessage(res.message || '已拒绝该同步请求')
-            return
-          case 'expired':
-            setStage('expired')
-            setStatusMessage(res.message || '同步码已过期，请重新生成')
-            return
-          case 'error':
-            setStage('error')
-            setStatusMessage(res.message || '配对验证失败')
-            onToast(res.message || '配对验证失败', 'error')
-            return
-          default:
-            timer = setTimeout(() => { void pollOnce() }, 1500)
-        }
-      } catch {
-        if (!cancelled) {
-          timer = setTimeout(() => { void pollOnce() }, 1500)
-        }
-      }
-    }
-
-    timer = setTimeout(() => { void pollOnce() }, 1500)
-    return () => {
-      cancelled = true
-      if (timer !== null) {
-        clearTimeout(timer)
-        timer = null
-      }
-    }
-  }, [sess, stage, onToast])
+    },
+  })
 
   const gen = async () => {
     setBusy(true)
     try {
-      if (sess && stage !== 'consumed' && stage !== 'expired' && stage !== 'rejected' && stage !== 'error') {
+      if (sess && isActiveStage(stage)) {
         await api.cancelSyncSend(sess.sessionId, sess.relayUrl || relayUrl).catch(() => {})
       }
       const next = await api.startSyncSend(relayUrl)
@@ -129,10 +102,10 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
       setStage('waiting')
       setPendingReq(null)
       setStatusMessage('')
-      setCopied(false)
+      resetCopy()
       onToast('同步码已生成，等待接收端确认后才会加密上传')
     } catch (e) {
-      onToast(String(e), 'error')
+      onToast(errMsg(e), 'error')
     } finally {
       setBusy(false)
     }
@@ -149,7 +122,7 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
       setStatusMessage('')
       onToast('已撤销同步码')
     } catch (e) {
-      onToast(String(e), 'error')
+      onToast(errMsg(e), 'error')
     } finally {
       setRevoking(false)
     }
@@ -164,7 +137,7 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
       setStatusMessage('已同意并上传加密数据，等待接收端拉取...')
       onToast('已同意并上传双向加密数据')
     } catch (e) {
-      onToast(String(e), 'error')
+      onToast(errMsg(e), 'error')
     } finally {
       setDecisionBusy(false)
     }
@@ -180,26 +153,17 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
       setStatusMessage('已拒绝该接收端请求，未上传任何保险库数据')
       onToast('已拒绝不一致的同步请求')
     } catch (e) {
-      onToast(String(e), 'error')
+      onToast(errMsg(e), 'error')
     } finally {
       setDecisionBusy(false)
     }
   }
 
-  const copy = async () => {
+  const handleCopyCode = async () => {
     if (!sess) return
-    try {
-      await navigator.clipboard.writeText(sess.code)
-      setCopied(true)
-      onToast('同步码已复制')
-      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current)
-      copyTimerRef.current = setTimeout(() => {
-        copyTimerRef.current = null
-        setCopied(false)
-      }, 1800)
-    } catch {
-      onToast('复制失败，请手动记录', 'error')
-    }
+    const ok = await copy(sess.code)
+    if (ok) onToast('同步码已复制')
+    else onToast('复制失败，请手动记录', 'error')
   }
 
   if (!sess) {
@@ -253,7 +217,7 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
           <div className="text-[11px] text-ag-muted">发送端同步码（在接收端输入或扫码发起验证）</div>
           <div className="flex items-center justify-center sm:justify-start gap-2">
             <span className="font-mono text-2xl font-bold tracking-[0.18em] text-indigo-200 bg-ag-elevated px-3.5 py-2 rounded-xl border border-indigo-500/35 select-all">{sess.code}</span>
-            <button onClick={() => void copy()} title="复制" className="p-2.5 rounded-xl bg-ag-elevated hover:bg-ag-hover border border-ag-border text-ag-text">
+            <button onClick={() => void handleCopyCode()} title="复制" aria-label="复制同步码" className="p-2.5 rounded-xl bg-ag-elevated hover:bg-ag-hover border border-ag-border text-ag-text">
               {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
             </button>
           </div>

@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { ArrowUpCircle, CheckCircle2, ExternalLink, Loader2, RefreshCw } from 'lucide-react'
 import type { UpdateCheckResult } from '../types'
 import { api } from '../wailsApi'
+import { errMsg } from '../utils/errors'
 
 interface Props {
   appVersion: string
@@ -30,7 +31,7 @@ export const UpdateCheckSection: React.FC<Props> = ({
       if (res.hasUpdate) onToast(`发现新版本 v${res.latestVersion}`)
       else onToast(`当前 v${res.currentVersion} 已是最新版本`)
     } catch (err) {
-      onToast(String(err), 'error')
+      onToast(errMsg(err), 'error')
     } finally {
       setChecking(false)
     }

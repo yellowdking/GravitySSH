@@ -3,6 +3,7 @@ import type { AppSettings, SessionInfo } from '../types'
 import type { PasteInspection } from '../utils/pasteGuard'
 import { useAutocomplete } from '../hooks/useAutocomplete'
 import { useTerminalInstance } from '../hooks/useTerminalInstance'
+import { copyToClipboard, readFromClipboard } from '../utils/errors'
 import { TerminalToolbar } from './TerminalToolbar'
 import { TerminalSearchBar } from './TerminalSearchBar'
 import { AutocompletePopup } from './AutocompletePopup'
@@ -112,10 +113,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = React.memo(({
             e.preventDefault()
             const sel = termRef.current?.getSelection()
             if (sel) {
-              void navigator.clipboard.writeText(sel)
+              void copyToClipboard(sel)
               termRef.current?.clearSelection()
             } else {
-              void navigator.clipboard.readText().then((t) => { if (t) pasteText(t) })
+              void readFromClipboard().then((t) => { if (t) pasteText(t) })
             }
           }}
         />
