@@ -19,11 +19,12 @@ import (
 )
 
 const (
-	PBKDF2Iterations  = 200000
-	SaltLength        = 16
-	NonceLength       = 12
-	AESKeyLength      = 32
-	MaxPlaintextBytes = 16 * 1024 * 1024
+	PBKDF2Iterations         = 200000
+	SaltLength               = 16
+	NonceLength              = 12
+	AESKeyLength             = 32
+	MaxPlaintextBytes        = 16 * 1024 * 1024
+	MaxPairRequestPlainBytes = 64 * 1024
 )
 
 // EncryptedPayload is the zero-knowledge wire envelope stored in relay RAM.
@@ -93,7 +94,10 @@ func sealGzipAESGCM(secret, aad, channelID string, rawJSON, salt, nonce []byte) 
 	}, nil
 }
 
-func openAESGCMGunzip(secret, aad string, payload EncryptedPayload, badTagMsg string) ([]byte, error) {
+func openAESGCMGunzip(secret, aad string, payload EncryptedPayload, maxPlainBytes int64, badTagMsg string) ([]byte, error) {
+	if maxPlainBytes <= 0 {
+		maxPlainBytes = MaxPlaintextBytes
+	}
 	salt, err := base64.StdEncoding.DecodeString(strings.TrimSpace(payload.Salt))
 	if err != nil || len(salt) != SaltLength {
 		return nil, errors.New("同步数据 salt 无效")
@@ -125,11 +129,12 @@ func openAESGCMGunzip(secret, aad string, payload EncryptedPayload, badTagMsg st
 		return nil, errors.New("同步数据解压失败")
 	}
 	defer gzr.Close()
-	plainJSON, err := io.ReadAll(io.LimitReader(gzr, MaxPlaintextBytes+1))
+	plainJSON, err := io.ReadAll(io.LimitReader(gzr, maxPlainBytes+1))
 	if err != nil {
 		return nil, errors.New("读取解压同步数据失败")
 	}
-	if len(plainJSON) > MaxPlaintextBytes {
+	if int64(len(plainJSON)) > maxPlainBytes {
+		clear(plainJSON)
 		return nil, errors.New("同步数据包体积超出安全上限")
 	}
 	return plainJSON, nil
@@ -169,7 +174,7 @@ func DecryptPairRequest(sendCode string, payload EncryptedPayload) (PairRequestP
 		return PairRequestPayload{}, err
 	}
 	channelID := DeriveChannelID(canonicalSend)
-	plainJSON, err := openAESGCMGunzip(canonicalSend, channelID, payload, "配对验证请求解密或完整性校验失败")
+	plainJSON, err := openAESGCMGunzip(canonicalSend, channelID, payload, MaxPairRequestPlainBytes, "配对验证请求解密或完整性校验失败")
 	if err != nil {
 		return PairRequestPayload{}, err
 	}
@@ -231,7 +236,7 @@ func DecryptBundleDual(sendCode, recvCode, requestID string, payload EncryptedPa
 	if err != nil {
 		return models.SyncBundle{}, err
 	}
-	plainJSON, err := openAESGCMGunzip(dualSecret, dualAAD, payload, "双向密钥解密或完整性校验失败，请确认双方同步码与确认码一致")
+	plainJSON, err := openAESGCMGunzip(dualSecret, dualAAD, payload, MaxPlaintextBytes, "双向密钥解密或完整性校验失败，请确认双方同步码与确认码一致")
 	if err != nil {
 		return models.SyncBundle{}, err
 	}
@@ -240,7 +245,7 @@ func DecryptBundleDual(sendCode, recvCode, requestID string, payload EncryptedPa
 	if err := json.Unmarshal(plainJSON, &bundle); err != nil {
 		return models.SyncBundle{}, fmt.Errorf("解析同步数据失败: %w", err)
 	}
-	if bundle.SchemaVersion != ProtocolVersion {
+	if bundle.SchemaVersion < MinBundleSchemaVersion || bundle.SchemaVersion > MaxBundleSchemaVersion {
 		return models.SyncBundle{}, fmt.Errorf("不支持的同步协议版本: %d", bundle.SchemaVersion)
 	}
 	return bundle, nil

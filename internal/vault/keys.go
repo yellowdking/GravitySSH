@@ -79,10 +79,10 @@ func (s *Store) ImportSSHKey(name, pemContent, passphrase, comment string) (mode
 	if s.locked {
 		return models.SSHKeyMeta{}, errVaultLocked
 	}
-	snapshot := cloneVaultData(s.data)
+	prevKeys := cloneSSHKeys(s.data.SSHKeys)
 	s.data.SSHKeys = append(s.data.SSHKeys, rec)
 	if err := s.saveLocked(); err != nil {
-		s.data = snapshot
+		s.data.SSHKeys = prevKeys
 		return models.SSHKeyMeta{}, err
 	}
 	return keyMetaFromRecord(rec, 0), nil
@@ -129,10 +129,10 @@ func (s *Store) GenerateSSHKey(name, algorithm, passphrase, comment string) (mod
 	if s.locked {
 		return models.SSHKeyMeta{}, errVaultLocked
 	}
-	snapshot := cloneVaultData(s.data)
+	prevKeys := cloneSSHKeys(s.data.SSHKeys)
 	s.data.SSHKeys = append(s.data.SSHKeys, rec)
 	if err := s.saveLocked(); err != nil {
-		s.data = snapshot
+		s.data.SSHKeys = prevKeys
 		return models.SSHKeyMeta{}, err
 	}
 	return keyMetaFromRecord(rec, 0), nil
@@ -163,7 +163,8 @@ func (s *Store) DeleteSSHKey(id string) error {
 	}
 	for i, k := range s.data.SSHKeys {
 		if k.ID == id {
-			snapshot := cloneVaultData(s.data)
+			prevKeys := cloneSSHKeys(s.data.SSHKeys)
+			prevServers := cloneServers(s.data.Servers)
 			s.data.SSHKeys = append(s.data.SSHKeys[:i], s.data.SSHKeys[i+1:]...)
 			for j := range s.data.Servers {
 				if s.data.Servers[j].SSHKeyID == id {
@@ -174,7 +175,8 @@ func (s *Store) DeleteSSHKey(id string) error {
 				}
 			}
 			if err := s.saveLocked(); err != nil {
-				s.data = snapshot
+				s.data.SSHKeys = prevKeys
+				s.data.Servers = prevServers
 				return err
 			}
 			return nil

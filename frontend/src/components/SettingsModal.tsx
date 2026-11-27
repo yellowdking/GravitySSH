@@ -109,7 +109,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <SettingsToggles draft={draft} patch={patch} />
           <UpdateCheckSection appVersion={appVersion} updateInfo={updateInfo} checkOnStartup={draft.checkUpdatesOnStartup} onToggleCheckOnStartup={(v) => patch({ checkUpdatesOnStartup: v })} onUpdateFound={onUpdateFound} onToast={onToast} />
           <SshCacheSection onToast={onToast} />
-          <VaultPasswordSection securityInfo={securityInfo} lockState={lockState} onLockStateChanged={onLockStateChanged} onBusyChange={handleVaultBusyChange} onToast={onToast} />
+          <VaultPasswordSection
+            securityInfo={securityInfo}
+            lockState={lockState}
+            onLockStateChanged={onLockStateChanged}
+            onLocked={() => { onClose(); onLockStateChanged() }}
+            onBusyChange={handleVaultBusyChange}
+            onToast={onToast}
+          />
         </div>
 
         <div className="px-5 py-3.5 border-t border-ag-border flex justify-end gap-2 bg-[#11151f]">

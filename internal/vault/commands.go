@@ -17,6 +17,17 @@ func (s *Store) ListShortcuts() []models.CommandShortcut {
 	return out
 }
 
+func (s *Store) GetShortcut(id string) (models.CommandShortcut, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, sc := range s.data.Shortcuts {
+		if sc.ID == id {
+			return sc, true
+		}
+	}
+	return models.CommandShortcut{}, false
+}
+
 func (s *Store) SaveShortcut(sc models.CommandShortcut) (models.CommandShortcut, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -46,7 +57,7 @@ func (s *Store) SaveShortcut(sc models.CommandShortcut) (models.CommandShortcut,
 
 	now := time.Now()
 	sc.UpdatedAt = now
-	snapshot := cloneVaultData(s.data)
+	prevShortcuts := cloneShortcuts(s.data.Shortcuts)
 
 	for i, existing := range s.data.Shortcuts {
 		if sc.ID != "" && existing.ID == sc.ID {
@@ -54,7 +65,7 @@ func (s *Store) SaveShortcut(sc models.CommandShortcut) (models.CommandShortcut,
 			sc.UseCount = existing.UseCount
 			s.data.Shortcuts[i] = sc
 			if err := s.saveLocked(); err != nil {
-				s.data = snapshot
+				s.data.Shortcuts = prevShortcuts
 				return models.CommandShortcut{}, err
 			}
 			return sc, nil
@@ -65,7 +76,7 @@ func (s *Store) SaveShortcut(sc models.CommandShortcut) (models.CommandShortcut,
 	sc.CreatedAt = now
 	s.data.Shortcuts = append([]models.CommandShortcut{sc}, s.data.Shortcuts...)
 	if err := s.saveLocked(); err != nil {
-		s.data = snapshot
+		s.data.Shortcuts = prevShortcuts
 		return models.CommandShortcut{}, err
 	}
 	return sc, nil
@@ -82,10 +93,10 @@ func (s *Store) DeleteShortcut(id string) error {
 	}
 	for i, sc := range s.data.Shortcuts {
 		if sc.ID == id {
-			snapshot := cloneVaultData(s.data)
+			prevShortcuts := cloneShortcuts(s.data.Shortcuts)
 			s.data.Shortcuts = append(s.data.Shortcuts[:i], s.data.Shortcuts[i+1:]...)
 			if err := s.saveLocked(); err != nil {
-				s.data = snapshot
+				s.data.Shortcuts = prevShortcuts
 				return err
 			}
 			return nil
@@ -136,13 +147,22 @@ func (s *Store) RecordCommand(serverID, serverName, sessionID, command string) (
 		ExecutedAt: time.Now(),
 	}
 
-	s.data.History = append([]models.CommandRecord{rec}, s.data.History...)
+	// Tail-append in chronological order so recording is amortized O(1) without
+	// copying all existing history entries or unrelated vault slices.
+	s.data.History = append(s.data.History, rec)
 	maxEntries := s.data.Settings.MaxHistoryEntries
 	if maxEntries <= 0 {
 		maxEntries = 2000
 	}
 	if len(s.data.History) > maxEntries {
-		s.data.History = s.data.History[:maxEntries]
+		excess := len(s.data.History) - maxEntries
+		clear(s.data.History[:excess])
+		s.data.History = s.data.History[excess:]
+		if cap(s.data.History) > maxEntries*2 {
+			compacted := make([]models.CommandRecord, len(s.data.History), maxEntries)
+			copy(compacted, s.data.History)
+			s.data.History = compacted
+		}
 	}
 
 	s.scheduleFlushLocked()
@@ -156,7 +176,8 @@ func (s *Store) ListHistory(serverID string, limit int) []models.CommandRecord {
 		limit = 300
 	}
 	out := make([]models.CommandRecord, 0, min(limit, len(s.data.History)))
-	for _, rec := range s.data.History {
+	for i := len(s.data.History) - 1; i >= 0; i-- {
+		rec := s.data.History[i]
 		if serverID != "" && rec.ServerID != serverID {
 			continue
 		}
@@ -179,10 +200,10 @@ func (s *Store) DeleteHistoryEntry(id string) error {
 	}
 	for i, h := range s.data.History {
 		if h.ID == id {
-			snapshot := cloneVaultData(s.data)
+			prevHistory := cloneHistory(s.data.History)
 			s.data.History = append(s.data.History[:i], s.data.History[i+1:]...)
 			if err := s.saveLocked(); err != nil {
-				s.data = snapshot
+				s.data.History = prevHistory
 				return err
 			}
 			return nil
@@ -200,7 +221,7 @@ func (s *Store) ClearHistory(serverID string) error {
 	if s.locked {
 		return errVaultLocked
 	}
-	snapshot := cloneVaultData(s.data)
+	prevHistory := cloneHistory(s.data.History)
 	if serverID == "" {
 		s.data.History = []models.CommandRecord{}
 	} else {
@@ -213,7 +234,7 @@ func (s *Store) ClearHistory(serverID string) error {
 		s.data.History = kept
 	}
 	if err := s.saveLocked(); err != nil {
-		s.data = snapshot
+		s.data.History = prevHistory
 		return err
 	}
 	return nil
