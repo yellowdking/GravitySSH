@@ -169,6 +169,7 @@ MemAvailable: 2097152
 func TestBuildLinuxMetricsCmdExcludesSnapLoopAndSupportsAlpineFallback(t *testing.T) {
 	cmd := buildLinuxMetricsCmd(false, true, false)
 	for _, want := range []string{
+		"env LC_ALL=C sh -c '",
 		"(df -Pkl -x squashfs -x tmpfs -x devtmpfs -x overlay 2>/dev/null || df -Pk 2>/dev/null)",
 		`\$1 !~ /^\/dev\/loop/`,
 		`\$6 !~ /^\/snap(\/|\$)/`,

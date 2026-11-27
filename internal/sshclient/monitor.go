@@ -17,7 +17,7 @@ var (
 
 const (
 
-	linuxMetricsHead = `LC_ALL=C sh -c '
+	linuxMetricsHead = `env LC_ALL=C sh -c '
 [ -r /proc/stat ] || { echo "UNSUPPORTED"; exit 0; }
 echo "---CPU---"; head -n1 /proc/stat
 echo "---MEM---"; awk "/^(MemTotal|MemAvailable|MemFree|Buffers|Cached):/{print \$1,\$2}" /proc/meminfo

@@ -78,15 +78,18 @@ func sendKeepAliveProbe(client *ssh.Client, stopCh <-chan struct{}, timeout time
 // so blackholed links reliably trip maxKeepAliveFailures without prematurely killing
 // high-latency links on a single transient failure.
 func (m *Manager) keepAliveLoop(sess *sessionState, stopCh chan struct{}, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	if interval <= 0 {
+		return
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 
 	failures := 0
 	for {
 		select {
 		case <-stopCh:
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			sess.mu.Lock()
 			var client *ssh.Client
 			if sess.dialRes != nil {
@@ -110,6 +113,7 @@ func (m *Manager) keepAliveLoop(sess *sessionState, stopCh chan struct{}, interv
 			} else {
 				failures = 0
 			}
+			timer.Reset(interval)
 		}
 	}
 }

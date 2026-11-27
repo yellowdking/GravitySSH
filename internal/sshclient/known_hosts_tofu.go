@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -112,6 +111,35 @@ func findHostFieldSpan(line string) (int, int, bool) {
 	return i, j, true
 }
 
+// matchWildcard implements OpenSSH known_hosts '*' and '?' wildcard matching
+// without treating '['/']' as character classes (so [host]:port patterns work).
+func matchWildcard(pattern, s string) bool {
+	p := []rune(pattern)
+	t := []rune(s)
+	pi, ti := 0, 0
+	starIdx, matchIdx := -1, 0
+	for ti < len(t) {
+		if pi < len(p) && (p[pi] == '?' || p[pi] == t[ti]) {
+			pi++
+			ti++
+		} else if pi < len(p) && p[pi] == '*' {
+			starIdx = pi
+			matchIdx = ti
+			pi++
+		} else if starIdx != -1 {
+			pi = starIdx + 1
+			matchIdx++
+			ti = matchIdx
+		} else {
+			return false
+		}
+	}
+	for pi < len(p) && p[pi] == '*' {
+		pi++
+	}
+	return pi == len(p)
+}
+
 func matchesHostKeyPattern(pat string, targets []string) bool {
 	p := strings.TrimSpace(pat)
 	if p == "" {
@@ -123,7 +151,7 @@ func matchesHostKeyPattern(pat string, targets []string) bool {
 	lp := strings.ToLower(p)
 	if strings.ContainsAny(lp, "*?") {
 		for _, t := range targets {
-			if ok, err := path.Match(lp, t); err == nil && ok {
+			if matchWildcard(lp, t) {
 				return true
 			}
 		}
