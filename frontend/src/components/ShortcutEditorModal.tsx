@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { BookmarkPlus, Loader2, X } from 'lucide-react'
 import type { CommandShortcut } from '../types'
+import { insertTabIndent } from '../utils/errors'
 import { ModalShell } from './ModalShell'
 
 interface Props {
@@ -101,6 +102,7 @@ export const ShortcutEditorModal: React.FC<Props> = ({ open, initial, title, onC
             className="ag-input font-mono text-xs leading-relaxed min-h-[220px] resize-y"
             value={rawCommand}
             onChange={(e) => setDraft({ ...draft, command: e.target.value })}
+            onKeyDown={(e) => insertTabIndent(e, rawCommand, (next) => setDraft((prev) => ({ ...prev, command: next })))}
           />
         </div>
 

@@ -5,13 +5,13 @@ import type { CommandShortcut } from '../types'
 interface Props {
   sc: CommandShortcut
   hasActiveSession: boolean
-  onTogglePin: () => void
-  onEdit: () => void
-  onDelete: () => void
-  onRun: (execute: boolean) => void
+  onTogglePin: (sc: CommandShortcut) => void
+  onEdit: (sc: CommandShortcut) => void
+  onDelete: (sc: CommandShortcut) => void
+  onRun: (sc: CommandShortcut, execute: boolean) => void
 }
 
-export const ShortcutCard: React.FC<Props> = ({ sc, hasActiveSession, onTogglePin, onEdit, onDelete, onRun }) => {
+export const ShortcutCard: React.FC<Props> = React.memo(({ sc, hasActiveSession, onTogglePin, onEdit, onDelete, onRun }) => {
   const lines = sc.command.replace(/\r\n/g, '\n').trimEnd().split('\n')
   const nonEmptyCount = lines.filter((l) => l.trim().length > 0).length
   const lineCount = nonEmptyCount || lines.length
@@ -31,13 +31,13 @@ export const ShortcutCard: React.FC<Props> = ({ sc, hasActiveSession, onTogglePi
             )}
           </div>
           <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition shrink-0">
-            <button type="button" onClick={onTogglePin} title="置顶" aria-label="置顶快捷命令" className="p-1 rounded hover:bg-ag-hover text-ag-muted hover:text-amber-300">
+            <button type="button" onClick={() => onTogglePin(sc)} title="置顶" aria-label="置顶快捷命令" className="p-1 rounded hover:bg-ag-hover text-ag-muted hover:text-amber-300">
               <Pin className="w-3 h-3" />
             </button>
-            <button type="button" onClick={onEdit} title="编辑" aria-label="编辑快捷命令" className="p-1 rounded hover:bg-ag-hover text-ag-muted hover:text-ag-text">
+            <button type="button" onClick={() => onEdit(sc)} title="编辑" aria-label="编辑快捷命令" className="p-1 rounded hover:bg-ag-hover text-ag-muted hover:text-ag-text">
               <Edit3 className="w-3 h-3" />
             </button>
-            <button type="button" onClick={onDelete} title="删除" aria-label="删除快捷命令" className="p-1 rounded hover:bg-rose-500/20 text-ag-muted hover:text-rose-400">
+            <button type="button" onClick={() => onDelete(sc)} title="删除" aria-label="删除快捷命令" className="p-1 rounded hover:bg-rose-500/20 text-ag-muted hover:text-rose-400">
               <Trash2 className="w-3 h-3" />
             </button>
           </div>
@@ -54,7 +54,7 @@ export const ShortcutCard: React.FC<Props> = ({ sc, hasActiveSession, onTogglePi
             type="button"
             disabled={!hasActiveSession}
             title="仅填入终端（不自动执行）"
-            onClick={() => onRun(false)}
+            onClick={() => onRun(sc, false)}
             className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-ag-elevated hover:bg-ag-hover border border-ag-border text-[11px] text-ag-text transition disabled:opacity-40"
           >
             <Terminal className="w-3 h-3 text-sky-400" />填入
@@ -63,7 +63,7 @@ export const ShortcutCard: React.FC<Props> = ({ sc, hasActiveSession, onTogglePi
             type="button"
             disabled={!hasActiveSession}
             title="立即在终端执行"
-            onClick={() => onRun(true)}
+            onClick={() => onRun(sc, true)}
             className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-indigo-500 hover:bg-indigo-400 text-[11px] text-white font-medium transition disabled:opacity-40"
           >
             <Play className="w-3 h-3" />执行
@@ -72,4 +72,4 @@ export const ShortcutCard: React.FC<Props> = ({ sc, hasActiveSession, onTogglePi
       </div>
     </div>
   )
-}
+})

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Bookmark, KeyRound, PanelLeftClose, Plus, Search } from 'lucide-react'
 import type { ServerView, SessionInfo } from '../types'
 import { SidebarRail } from './SidebarRail'
@@ -12,7 +12,6 @@ interface SidebarProps {
   collapsed: boolean
   width: number
   onToggleCollapse: () => void
-  onWidthChange: (nextWidth: number) => void
   onWidthCommit: (finalWidth: number) => void
   onSelectNav: (tab: SidebarTab) => void
   servers: ServerView[]
@@ -27,12 +26,26 @@ interface SidebarProps {
   onOpenSettings: () => void
 }
 
-export const Sidebar: React.FC<SidebarProps> = ({
-  activeNav, collapsed, width, onToggleCollapse, onWidthChange, onWidthCommit,
+export const Sidebar: React.FC<SidebarProps> = React.memo(({
+  activeNav, collapsed, width, onToggleCollapse, onWidthCommit,
   onSelectNav, servers, sessions, keyCount, shortcutCount,
   onAddServer, onEditServer, onDeleteServer, onConnectServer, onOpenSync, onOpenSettings,
 }) => {
   const [search, setSearch] = useState('')
+  const panelRef = useRef<HTMLDivElement | null>(null)
+
+  useLayoutEffect(() => {
+    if (panelRef.current) panelRef.current.style.width = `${width}px`
+  }, [width, collapsed])
+
+  const handleWidthPreview = useCallback((nextWidth: number) => {
+    if (panelRef.current) panelRef.current.style.width = `${nextWidth}px`
+  }, [])
+
+  const handleWidthCommit = useCallback((finalWidth: number) => {
+    if (panelRef.current) panelRef.current.style.width = `${finalWidth}px`
+    onWidthCommit(finalWidth)
+  }, [onWidthCommit])
 
   const connectedServerIds = useMemo(() => {
     const set = new Set<string>()
@@ -60,7 +73,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {!collapsed && (
         <>
-          <div style={{ width }} className="bg-ag-sidebar border-r border-ag-border flex flex-col min-w-0 shrink-0">
+          <div ref={panelRef} className="bg-ag-sidebar border-r border-ag-border flex flex-col min-w-0 shrink-0">
             <div className="px-3 pt-3 pb-2.5 border-b border-ag-border/80">
               <div className="flex items-center justify-between gap-1.5 mb-2.5">
                 <span className="text-[13px] font-semibold tracking-wide text-ag-text truncate">GravitySSH</span>
@@ -100,9 +113,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </button>
             </div>
           </div>
-          <ResizeHandle width={width} min={180} max={440} direction="right" onChange={onWidthChange} onCommit={onWidthCommit} title="拖动调整侧边栏宽度" />
+          <ResizeHandle width={width} min={180} max={440} direction="right" onChange={handleWidthPreview} onCommit={handleWidthCommit} title="拖动调整侧边栏宽度" />
         </>
       )}
     </div>
   )
-}
+})

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import type { BuiltinTemplate, CommandShortcut } from '../types'
 import { api } from '../wailsApi'
 import { errMsg } from '../utils/errors'
@@ -18,7 +18,7 @@ interface ShortcutsPanelProps {
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
 
-export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
+export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = React.memo(({
   shortcuts, activeSessionId, compact = false, onRunShortcut, onRunCommand, onChanged, onToast,
 }) => {
   const [search, setSearch] = useState('')
@@ -93,16 +93,20 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
     }
   }
 
-  const handleTogglePin = async (sc: CommandShortcut) => {
+  const handleTogglePin = useCallback(async (sc: CommandShortcut) => {
     try {
       await api.saveShortcut({ ...sc, pinned: !sc.pinned })
       onChanged()
     } catch (err) {
       onToast(errMsg(err), 'error')
     }
-  }
+  }, [onChanged, onToast])
 
-  const handleDeleteShortcut = async (sc: CommandShortcut) => {
+  const handleEditShortcut = useCallback((sc: CommandShortcut) => {
+    setEditing(sc)
+  }, [])
+
+  const handleDeleteShortcut = useCallback(async (sc: CommandShortcut) => {
     const ok = await confirm({
       title: '删除快捷命令',
       message: `确定删除快捷命令 "${sc.name}" 吗？`,
@@ -116,7 +120,10 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
     } catch (err) {
       onToast(errMsg(err), 'error')
     }
-  }
+  }, [confirm, onChanged, onToast])
+
+  const handleTogglePinCb = useCallback((sc: CommandShortcut) => { void handleTogglePin(sc) }, [handleTogglePin])
+  const handleDeleteCb = useCallback((sc: CommandShortcut) => { void handleDeleteShortcut(sc) }, [handleDeleteShortcut])
 
   return (
     <div className={`flex flex-col h-full min-w-0 ${compact ? 'w-full bg-ag-sidebar' : 'flex-1 bg-ag-bg'}`}>
@@ -141,10 +148,10 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
               key={sc.id}
               sc={sc}
               hasActiveSession={!!activeSessionId}
-              onTogglePin={() => { void handleTogglePin(sc) }}
-              onEdit={() => setEditing(sc)}
-              onDelete={() => { void handleDeleteShortcut(sc) }}
-              onRun={(exec) => onRunShortcut(sc, exec)}
+              onTogglePin={handleTogglePinCb}
+              onEdit={handleEditShortcut}
+              onDelete={handleDeleteCb}
+              onRun={onRunShortcut}
             />
           ))
         )}
@@ -155,4 +162,4 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
       {dialogNode}
     </div>
   )
-}
+})
