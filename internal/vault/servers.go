@@ -291,7 +291,7 @@ func (s *Store) SaveServer(req models.ServerSaveRequest) (models.ServerView, err
 	}
 	normalizeServerConfig(&cfg, s.data.Settings.DefaultKeepAliveSeconds)
 
-	snapshot := cloneVaultData(s.data)
+	prevServers := cloneServers(s.data.Servers)
 	if idx >= 0 {
 		cfg.CreatedAt = existing.CreatedAt
 		cfg.LastConnectedAt = existing.LastConnectedAt
@@ -303,7 +303,7 @@ func (s *Store) SaveServer(req models.ServerSaveRequest) (models.ServerView, err
 	}
 
 	if err := s.saveLocked(); err != nil {
-		s.data = snapshot
+		s.data.Servers = prevServers
 		return models.ServerView{}, err
 	}
 	return toServerView(cfg), nil
@@ -320,7 +320,7 @@ func (s *Store) DeleteServer(id string) error {
 	}
 	for i, srv := range s.data.Servers {
 		if srv.ID == id {
-			snapshot := cloneVaultData(s.data)
+			prevServers := cloneServers(s.data.Servers)
 			s.data.Servers = append(s.data.Servers[:i], s.data.Servers[i+1:]...)
 			for j := range s.data.Servers {
 				if s.data.Servers[j].JumpHost.Mode == models.JumpServer && s.data.Servers[j].JumpHost.ServerID == id {
@@ -329,7 +329,7 @@ func (s *Store) DeleteServer(id string) error {
 				}
 			}
 			if err := s.saveLocked(); err != nil {
-				s.data = snapshot
+				s.data.Servers = prevServers
 				return err
 			}
 			return nil

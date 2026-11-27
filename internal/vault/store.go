@@ -178,6 +178,11 @@ func normalizeVault(v *models.VaultData) {
 	}
 	if v.History == nil {
 		v.History = []models.CommandRecord{}
+	} else if len(v.History) >= 2 && v.History[0].ExecutedAt.After(v.History[len(v.History)-1].ExecutedAt) {
+		// Migrate legacy newest-first history to chronological tail-append order.
+		for i, j := 0, len(v.History)-1; i < j; i, j = i+1, j-1 {
+			v.History[i], v.History[j] = v.History[j], v.History[i]
+		}
 	}
 	d := models.DefaultSettings()
 	if v.Settings.TerminalFontFamily == "" {
@@ -194,34 +199,80 @@ func normalizeVault(v *models.VaultData) {
 	}
 }
 
+func cloneServers(src []models.ServerConfig) []models.ServerConfig {
+	if src == nil {
+		return nil
+	}
+	out := make([]models.ServerConfig, len(src))
+	for i, srv := range src {
+		if srv.LastConnectedAt != nil {
+			t := *srv.LastConnectedAt
+			srv.LastConnectedAt = &t
+		}
+		out[i] = srv
+	}
+	return out
+}
+
+func cloneSSHKeys(src []models.SSHKeyRecord) []models.SSHKeyRecord {
+	if src == nil {
+		return nil
+	}
+	out := make([]models.SSHKeyRecord, len(src))
+	copy(out, src)
+	return out
+}
+
+func cloneShortcuts(src []models.CommandShortcut) []models.CommandShortcut {
+	if src == nil {
+		return nil
+	}
+	out := make([]models.CommandShortcut, len(src))
+	copy(out, src)
+	return out
+}
+
+func cloneTemplates(src []models.BuiltinTemplate) []models.BuiltinTemplate {
+	if src == nil {
+		return nil
+	}
+	out := make([]models.BuiltinTemplate, len(src))
+	copy(out, src)
+	return out
+}
+
+func cloneHistory(src []models.CommandRecord) []models.CommandRecord {
+	if src == nil {
+		return nil
+	}
+	out := make([]models.CommandRecord, len(src))
+	copy(out, src)
+	return out
+}
+
+func clearVaultDataSecrets(d *models.VaultData) {
+	if d == nil {
+		return
+	}
+	clear(d.Servers)
+	clear(d.SSHKeys)
+	clear(d.Shortcuts)
+	clear(d.Templates)
+	clear(d.History)
+	d.Servers = []models.ServerConfig{}
+	d.SSHKeys = []models.SSHKeyRecord{}
+	d.Shortcuts = []models.CommandShortcut{}
+	d.Templates = []models.BuiltinTemplate{}
+	d.History = []models.CommandRecord{}
+}
+
 func cloneVaultData(d models.VaultData) models.VaultData {
 	out := d
-	if d.Servers != nil {
-		out.Servers = make([]models.ServerConfig, len(d.Servers))
-		for i, srv := range d.Servers {
-			if srv.LastConnectedAt != nil {
-				t := *srv.LastConnectedAt
-				srv.LastConnectedAt = &t
-			}
-			out.Servers[i] = srv
-		}
-	}
-	if d.SSHKeys != nil {
-		out.SSHKeys = make([]models.SSHKeyRecord, len(d.SSHKeys))
-		copy(out.SSHKeys, d.SSHKeys)
-	}
-	if d.Shortcuts != nil {
-		out.Shortcuts = make([]models.CommandShortcut, len(d.Shortcuts))
-		copy(out.Shortcuts, d.Shortcuts)
-	}
-	if d.Templates != nil {
-		out.Templates = make([]models.BuiltinTemplate, len(d.Templates))
-		copy(out.Templates, d.Templates)
-	}
-	if d.History != nil {
-		out.History = make([]models.CommandRecord, len(d.History))
-		copy(out.History, d.History)
-	}
+	out.Servers = cloneServers(d.Servers)
+	out.SSHKeys = cloneSSHKeys(d.SSHKeys)
+	out.Shortcuts = cloneShortcuts(d.Shortcuts)
+	out.Templates = cloneTemplates(d.Templates)
+	out.History = cloneHistory(d.History)
 	return out
 }
 
@@ -480,6 +531,7 @@ func (s *Store) Close() error {
 	clear(s.pwSalt)
 	s.pwKey = nil
 	s.pwSalt = nil
+	clearVaultDataSecrets(&s.data)
 	return err
 }
 
