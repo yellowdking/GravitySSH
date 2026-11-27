@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Save, Sparkles, X } from 'lucide-react'
 import type { BuiltinTemplate } from '../types'
 import { insertTabIndent } from '../utils/errors'
@@ -18,9 +18,14 @@ export const TemplateEditorModal: React.FC<Props> = ({ open, initial, saving, on
   const [description, setDescription] = useState('')
   const [safetyNote, setSafetyNote] = useState('')
   const [command, setCommand] = useState('')
+  const submittingRef = useRef(false)
 
   useEffect(() => {
-    if (!open) return
+    if (!open) {
+      submittingRef.current = false
+      return
+    }
+    submittingRef.current = false
     setName(initial?.name || '')
     setCategory(initial?.category || '自定义')
     setDescription(initial?.description || '')
@@ -31,29 +36,40 @@ export const TemplateEditorModal: React.FC<Props> = ({ open, initial, saving, on
   const lineCount = command === '' ? 0 : command.replace(/\r\n/g, '\n').split('\n').length
   const isEdit = !!initial?.id
 
+  const handleClose = () => {
+    if (saving || submittingRef.current) return
+    onClose()
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (saving || submittingRef.current) return
     if (!name.trim() || !command.trim()) return
-    await onSubmit({
-      id: initial?.id || '',
-      presetId: initial?.presetId || '',
-      name: name.trim(),
-      category: category.trim() || '自定义',
-      description: description.trim(),
-      safetyNote: safetyNote.trim(),
-      command,
-    })
+    submittingRef.current = true
+    try {
+      await onSubmit({
+        id: initial?.id || '',
+        presetId: initial?.presetId || '',
+        name: name.trim(),
+        category: category.trim() || '自定义',
+        description: description.trim(),
+        safetyNote: safetyNote.trim(),
+        command,
+      })
+    } finally {
+      submittingRef.current = false
+    }
   }
 
   return (
-    <ModalShell open={open} onClose={onClose} zIndexClass="z-[60]" backdropClassName="bg-black/75">
+    <ModalShell open={open} onClose={handleClose} zIndexClass="z-[60]" backdropClassName="bg-black/75">
       <div className="w-full max-w-2xl rounded-2xl bg-ag-panel border border-ag-borderStrong shadow-ag overflow-hidden flex flex-col max-h-[88vh]">
         <div className="px-5 py-3.5 border-b border-ag-border bg-[#11151f] flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-violet-400" />
             <h3 className="text-sm font-semibold text-ag-text">{isEdit ? '编辑运维模板' : '新建运维模板'}</h3>
           </div>
-          <button type="button" onClick={onClose} aria-label="关闭模板编辑器" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text">
+          <button type="button" disabled={saving} onClick={handleClose} aria-label="关闭模板编辑器" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text disabled:opacity-40 disabled:cursor-not-allowed">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -62,22 +78,22 @@ export const TemplateEditorModal: React.FC<Props> = ({ open, initial, saving, on
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="sm:col-span-2">
               <label className="block text-xs text-ag-muted mb-1">模板名称 *</label>
-              <input value={name} onChange={(e) => setName(e.target.value)} required placeholder="例如：清理系统日志 / 配置 Nginx" className="ag-input" />
+              <input disabled={saving} value={name} onChange={(e) => setName(e.target.value)} required placeholder="例如：清理系统日志 / 配置 Nginx" className="ag-input disabled:opacity-60" />
             </div>
             <div>
               <label className="block text-xs text-ag-muted mb-1">分类</label>
-              <input value={category} onChange={(e) => setCategory(e.target.value)} placeholder="网络优化 / 安全加固 / 自定义" className="ag-input" />
+              <input disabled={saving} value={category} onChange={(e) => setCategory(e.target.value)} placeholder="网络优化 / 安全加固 / 自定义" className="ag-input disabled:opacity-60" />
             </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-xs text-ag-muted mb-1">功能说明（可选）</label>
-              <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="简要说明脚本用途" className="ag-input" />
+              <input disabled={saving} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="简要说明脚本用途" className="ag-input disabled:opacity-60" />
             </div>
             <div>
               <label className="block text-xs text-ag-muted mb-1">安全提示（可选）</label>
-              <input value={safetyNote} onChange={(e) => setSafetyNote(e.target.value)} placeholder="例如：执行前会自动备份原配置" className="ag-input" />
+              <input disabled={saving} value={safetyNote} onChange={(e) => setSafetyNote(e.target.value)} placeholder="例如：执行前会自动备份原配置" className="ag-input disabled:opacity-60" />
             </div>
           </div>
 
@@ -89,17 +105,18 @@ export const TemplateEditorModal: React.FC<Props> = ({ open, initial, saving, on
             <textarea
               rows={11}
               required
+              disabled={saving}
               spellCheck={false}
               value={command}
               onChange={(e) => setCommand(e.target.value)}
               onKeyDown={(e) => { insertTabIndent(e, command, setCommand) }}
               placeholder="输入要执行的 Shell 脚本，可包含多条或数十条命令..."
-              className="ag-input font-mono text-xs leading-relaxed resize-y"
+              className="ag-input font-mono text-xs leading-relaxed resize-y disabled:opacity-60"
             />
           </div>
 
           <div className="pt-2 flex justify-end gap-2">
-            <button type="button" onClick={onClose} className="ag-btn-ghost">取消</button>
+            <button type="button" disabled={saving} onClick={handleClose} className="ag-btn-ghost">取消</button>
             <button type="submit" disabled={saving || !name.trim() || !command.trim()} className="ag-btn-primary">
               <Save className="w-3.5 h-3.5" />{saving ? '保存中...' : '保存模板'}
             </button>

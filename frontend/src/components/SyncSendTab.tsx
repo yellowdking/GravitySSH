@@ -13,19 +13,27 @@ import { QrCodeSvg } from './QrCodeSvg'
 
 interface Props {
   relayUrl: string
+  onBusyChange?: (busy: boolean) => void
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
 
 type SendStage = 'waiting' | 'requested' | 'approved' | 'consumed' | 'rejected' | 'expired' | 'error'
 
+const OFFLINE_EXPIRY_GRACE_MS = 30_000
+const MAX_CONSECUTIVE_POLL_ERRORS_NO_EXPIRY = 20
+
 const isActiveStage = (stage: SendStage) =>
   stage === 'waiting' || stage === 'requested' || stage === 'approved'
 
-export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
+const isAutoCancelStage = (stage: SendStage) =>
+  stage === 'waiting' || stage === 'requested'
+
+export const SyncSendTab: React.FC<Props> = ({ relayUrl, onBusyChange, onToast }) => {
   const [sess, setSess] = useState<SyncSendSession | null>(null)
   const [stage, setStage] = useState<SendStage>('waiting')
   const [pendingReq, setPendingReq] = useState<SyncSendPollResult | null>(null)
   const [statusMessage, setStatusMessage] = useState('')
+  const [pollError, setPollError] = useState('')
   const [busy, setBusy] = useState(false)
   const [decisionBusy, setDecisionBusy] = useState(false)
   const [revoking, setRevoking] = useState(false)
@@ -36,6 +44,7 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
   const mountedRef = useRef(true)
   const actionBusyRef = useRef(false)
   const pollGenRef = useRef(0)
+  const pollErrorCountRef = useRef(0)
   const sessRef = useRef<SyncSendSession | null>(null)
   sessRef.current = sess
   const stageRef = useRef<SendStage>(stage)
@@ -43,12 +52,21 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
   const relayRef = useRef(relayUrl)
   relayRef.current = relayUrl
 
+  const actionBusy = busy || decisionBusy || revoking
+
+  useEffect(() => {
+    onBusyChange?.(actionBusy)
+    return () => {
+      onBusyChange?.(false)
+    }
+  }, [actionBusy, onBusyChange])
+
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
       const s = sessRef.current
-      if (s && isActiveStage(stageRef.current)) {
+      if (s && isAutoCancelStage(stageRef.current)) {
         void api.cancelSyncSend(s.sessionId, s.relayUrl || relayRef.current).catch(() => {})
       }
     }
@@ -62,53 +80,83 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
       const current = sessRef.current
       if (!current || !mountedRef.current || !isActiveStage(stageRef.current)) return false
       const pollGen = pollGenRef.current
-      const res = await api.pollSyncSend(current.sessionId)
-      if (!mountedRef.current || sessRef.current?.sessionId !== current.sessionId) return false
-      if (pollGen !== pollGenRef.current) {
-        return isActiveStage(stageRef.current)
-      }
-      const curStage = stageRef.current
-      if (!isActiveStage(curStage)) return false
-      switch (res.status) {
-        case 'waiting':
-          return true
-        case 'requested':
-          if (curStage === 'approved') return true
-          setPendingReq((prev) =>
-            prev?.requestId === res.requestId && prev?.receiverCode === res.receiverCode ? prev : res
-          )
-          stageRef.current = 'requested'
-          setStage('requested')
-          return true
-        case 'approved':
-          stageRef.current = 'approved'
-          setStage('approved')
-          return true
-        case 'consumed':
-          stageRef.current = 'consumed'
-          setStage('consumed')
-          setStatusMessage(res.message || '对方已成功接收配置，中继密文已焚毁')
-          onToast('对方已成功接收配置，中继密文已焚毁')
-          return false
-        case 'rejected':
-          if (curStage === 'approved') return true
-          stageRef.current = 'rejected'
-          setStage('rejected')
-          setStatusMessage(res.message || '已拒绝该同步请求')
-          return false
-        case 'expired':
+      try {
+        const res = await api.pollSyncSend(current.sessionId)
+        if (!mountedRef.current || sessRef.current?.sessionId !== current.sessionId) return false
+        if (pollGen !== pollGenRef.current) {
+          return isActiveStage(stageRef.current)
+        }
+        if (pollErrorCountRef.current > 0) {
+          pollErrorCountRef.current = 0
+          setPollError('')
+        }
+        const curStage = stageRef.current
+        if (!isActiveStage(curStage)) return false
+        switch (res.status) {
+          case 'waiting':
+            return true
+          case 'requested':
+            if (curStage === 'approved') return true
+            setPendingReq((prev) =>
+              prev?.requestId === res.requestId && prev?.receiverCode === res.receiverCode ? prev : res
+            )
+            stageRef.current = 'requested'
+            setStage('requested')
+            return true
+          case 'approved':
+            stageRef.current = 'approved'
+            setStage('approved')
+            return true
+          case 'consumed':
+            stageRef.current = 'consumed'
+            setStage('consumed')
+            setStatusMessage(res.message || '对方已成功接收配置，中继密文已焚毁')
+            onToast('对方已成功接收配置，中继密文已焚毁')
+            return false
+          case 'rejected':
+            if (curStage === 'approved') return true
+            stageRef.current = 'rejected'
+            setStage('rejected')
+            setStatusMessage(res.message || '已拒绝该同步请求')
+            return false
+          case 'expired':
+            stageRef.current = 'expired'
+            setStage('expired')
+            setStatusMessage(res.message || '同步码已过期，请重新生成')
+            return false
+          case 'error':
+            stageRef.current = 'error'
+            setStage('error')
+            setStatusMessage(res.message || '配对验证失败')
+            onToast(res.message || '配对验证失败', 'error')
+            return false
+          default:
+            return true
+        }
+      } catch (err) {
+        if (!mountedRef.current || sessRef.current?.sessionId !== current.sessionId) return false
+        if (pollGen !== pollGenRef.current) return isActiveStage(stageRef.current)
+        if (!isActiveStage(stageRef.current)) return false
+        const cnt = ++pollErrorCountRef.current
+        const msg = errMsg(err)
+        const expiresMs = current.expiresAt ? new Date(current.expiresAt).getTime() : Number.NaN
+        const expiredPastGrace = Number.isFinite(expiresMs)
+          ? Date.now() >= expiresMs + OFFLINE_EXPIRY_GRACE_MS
+          : cnt >= MAX_CONSECUTIVE_POLL_ERRORS_NO_EXPIRY
+        if (expiredPastGrace) {
+          pollErrorCountRef.current = 0
+          setPollError('')
           stageRef.current = 'expired'
           setStage('expired')
-          setStatusMessage(res.message || '同步码已过期，请重新生成')
+          const expiredText = '连接中继失败且同步码已超过有效期，请检查网络后重新生成'
+          setStatusMessage(expiredText)
+          onToast(expiredText, 'error')
           return false
-        case 'error':
-          stageRef.current = 'error'
-          setStage('error')
-          setStatusMessage(res.message || '配对验证失败')
-          onToast(res.message || '配对验证失败', 'error')
-          return false
-        default:
-          return true
+        }
+        if (cnt >= 2) {
+          setPollError(`轮询中继失败（连续 ${cnt} 次）：${msg}`)
+        }
+        return true
       }
     },
   })
@@ -117,6 +165,8 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
     if (actionBusyRef.current) return
     actionBusyRef.current = true
     pollGenRef.current++
+    pollErrorCountRef.current = 0
+    setPollError('')
     setBusy(true)
     const prevSess = sessRef.current
     const prevStage = stageRef.current
@@ -132,12 +182,14 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
         return
       }
       pollGenRef.current++
+      pollErrorCountRef.current = 0
       sessRef.current = next
       stageRef.current = 'waiting'
       setSess(next)
       setStage('waiting')
       setPendingReq(null)
       setStatusMessage('')
+      setPollError('')
       resetCopy()
       onToast('同步码已生成，等待接收端确认后才会加密上传')
     } catch (e) {
@@ -159,12 +211,14 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
       await api.cancelSyncSend(currentId, current.relayUrl || relayUrl)
       if (!mountedRef.current || sessRef.current?.sessionId !== currentId) return
       pollGenRef.current++
+      pollErrorCountRef.current = 0
       sessRef.current = null
       stageRef.current = 'waiting'
       setSess(null)
       setPendingReq(null)
       setStage('waiting')
       setStatusMessage('')
+      setPollError('')
       onToast('已撤销同步码')
     } catch (e) {
       if (mountedRef.current && sessRef.current?.sessionId === currentId) onToast(errMsg(e), 'error')
@@ -185,8 +239,10 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
       await api.approveSyncSend(currentId, pendingReq.requestId, pendingReq.receiverCode)
       if (!mountedRef.current || sessRef.current?.sessionId !== currentId) return
       pollGenRef.current++
+      pollErrorCountRef.current = 0
       stageRef.current = 'approved'
       setStage('approved')
+      setPollError('')
       setStatusMessage('已同意并上传加密数据，等待接收端拉取...')
       onToast('已同意并上传双向加密数据')
     } catch (e) {
@@ -196,6 +252,7 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
           pollGenRef.current++
           stageRef.current = 'expired'
           setStage('expired')
+          setPollError('')
           setStatusMessage(msg)
         }
         onToast(msg, 'error')
@@ -217,9 +274,11 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
       await api.rejectSyncSend(currentId, pendingReq.requestId)
       if (!mountedRef.current || sessRef.current?.sessionId !== currentId) return
       pollGenRef.current++
+      pollErrorCountRef.current = 0
       stageRef.current = 'rejected'
       setStage('rejected')
       setPendingReq(null)
+      setPollError('')
       setStatusMessage('已拒绝该接收端请求，未上传任何保险库数据')
       onToast('已拒绝不一致的同步请求')
     } catch (e) {
@@ -237,8 +296,6 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
     if (ok) onToast('同步码已复制')
     else onToast('复制失败，请手动记录', 'error')
   }
-
-  const actionBusy = busy || decisionBusy || revoking
 
   if (!sess) {
     return (
@@ -375,6 +432,13 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
         <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/30 px-4 py-3 flex items-center gap-2.5 text-xs text-emerald-200">
           <Loader2 className="w-4 h-4 animate-spin shrink-0 text-emerald-300" />
           <span>✓ 已同意并上传加密数据，等待接收端拉取...</span>
+        </div>
+      )}
+
+      {pollError && isActiveStage(stage) && (
+        <div className="rounded-xl bg-amber-500/10 border border-amber-500/35 px-4 py-2.5 flex items-center gap-2 text-xs text-amber-200">
+          <AlertTriangle className="w-4 h-4 shrink-0 text-amber-300" />
+          <span className="break-all">{pollError}</span>
         </div>
       )}
 
