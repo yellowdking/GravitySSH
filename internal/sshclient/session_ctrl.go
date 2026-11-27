@@ -1,111 +1,115 @@
 package sshclient
 
 import (
-	"context"
-	"encoding/base64"
 	"errors"
-	"io"
-	"sync/atomic"
+	"fmt"
 	"time"
-
-	"golang.org/x/crypto/ssh"
 )
 
-const maxKeepAliveFailures = 3
+const writeChunkSize = 1024
 
-var (
-	keepAliveProbeTimeout = 10 * time.Second
-	errProbeInFlight      = errors.New("keepalive probe already in flight")
-)
+func (m *Manager) WriteInput(sessionID, data string) error {
+	sess := m.getSession(sessionID)
+	if sess == nil {
+		return fmt.Errorf("会话不存在: %s", sessionID)
+	}
+	sess.mu.Lock()
+	stdin := sess.stdin
+	rec := sess.recorder
+	sess.mu.Unlock()
+	if stdin == nil {
+		return errors.New("终端尚未就绪")
+	}
+	raw := []byte(data)
+	sess.writeMu.Lock()
+	defer sess.writeMu.Unlock()
+	for offset := 0; offset < len(raw); offset += writeChunkSize {
+		end := offset + writeChunkSize
+		if end > len(raw) {
+			end = len(raw)
+		}
+		if _, err := stdin.Write(raw[offset:end]); err != nil {
+			return err
+		}
+		if end < len(raw) {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if rec != nil {
+		rec.Feed(raw)
+	}
+	return nil
+}
 
-func (m *Manager) pumpOutput(sessionID string, r io.Reader) {
-	buf := make([]byte, 16*1024)
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			m.emit("terminal:data", map[string]string{
-				"sessionId": sessionID,
-				"data":      base64.StdEncoding.EncodeToString(buf[:n]),
-			})
+// SessionStopCh returns the session's cancellation channel, or nil if unknown.
+func (m *Manager) SessionStopCh(sessionID string) <-chan struct{} {
+	if sess := m.getSession(sessionID); sess != nil {
+		sess.mu.Lock()
+		ch := sess.stopCh
+		sess.mu.Unlock()
+		return ch
+	}
+	return nil
+}
+
+// Resize records the latest terminal dimensions even while connecting,
+// and forwards WindowChange to the live SSH session once ready.
+func (m *Manager) Resize(sessionID string, cols, rows int) error {
+	if cols <= 0 || rows <= 0 {
+		return nil
+	}
+	sess := m.getSession(sessionID)
+	if sess == nil {
+		return nil
+	}
+	sess.mu.Lock()
+	sess.lastCols = cols
+	sess.lastRows = rows
+	sshSess := sess.sshSession
+	sess.mu.Unlock()
+	if sshSess == nil {
+		return nil
+	}
+	return sshSess.WindowChange(rows, cols)
+}
+
+func (m *Manager) Disconnect(sessionID string) {
+	m.mu.Lock()
+	sess, ok := m.sessions[sessionID]
+	if ok {
+		delete(m.sessions, sessionID)
+	}
+	m.mu.Unlock()
+	if ok {
+		sess.mu.Lock()
+		sess.userClosed = true
+		cancelDial := sess.cancelDial
+		sess.cancelDial = nil
+		sess.mu.Unlock()
+		if cancelDial != nil {
+			cancelDial()
 		}
-		if err != nil {
-			return
-		}
+		m.markDisconnected(sess, "已主动断开连接")
 	}
 }
 
-func (m *Manager) sendTerminalText(sessionID, text string) {
-	m.emit("terminal:data", map[string]string{
-		"sessionId": sessionID,
-		"data":      base64.StdEncoding.EncodeToString([]byte(text)),
-	})
-}
-
-func sendKeepAliveProbe(client *ssh.Client, stopCh <-chan struct{}, timeout time.Duration, inFlight *atomic.Bool) error {
-	select {
-	case <-stopCh:
-		return context.Canceled
-	default:
+func (m *Manager) CloseAll() {
+	m.mu.Lock()
+	all := make([]*sessionState, 0, len(m.sessions))
+	for id, s := range m.sessions {
+		all = append(all, s)
+		delete(m.sessions, id)
 	}
-	if inFlight != nil && !inFlight.CompareAndSwap(false, true) {
-		return errProbeInFlight
-	}
-	errCh := make(chan error, 1)
-	go func() {
-		if inFlight != nil {
-			defer inFlight.Store(false)
+	m.mu.Unlock()
+	for _, s := range all {
+		s.mu.Lock()
+		s.userClosed = true
+		cancelDial := s.cancelDial
+		s.cancelDial = nil
+		s.mu.Unlock()
+		if cancelDial != nil {
+			cancelDial()
 		}
-		_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
-		errCh <- err
-	}()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-stopCh:
-		return context.Canceled
-	case err := <-errCh:
-		return err
-	case <-timer.C:
-		return errors.New("keepalive probe timed out")
-	}
-}
-
-// keepAliveLoop sends periodic SSH keepalive probes bounded by keepAliveProbeTimeout
-// so blackholed links reliably trip maxKeepAliveFailures without prematurely killing
-// high-latency links on a single transient failure.
-func (m *Manager) keepAliveLoop(sess *sessionState, stopCh chan struct{}, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	failures := 0
-	for {
-		select {
-		case <-stopCh:
-			return
-		case <-ticker.C:
-			sess.mu.Lock()
-			var client *ssh.Client
-			if sess.dialRes != nil {
-				client = sess.dialRes.Client
-			}
-			closed := sess.closed || sess.userClosed
-			sess.mu.Unlock()
-			if closed || client == nil {
-				return
-			}
-			err := sendKeepAliveProbe(client, stopCh, keepAliveProbeTimeout, &sess.keepAliveInFlight)
-			if errors.Is(err, context.Canceled) {
-				return
-			}
-			if err != nil {
-				failures++
-				if failures >= maxKeepAliveFailures {
-					m.markDisconnected(sess, "连接心跳超时，会话已断开")
-					return
-				}
-			} else {
-				failures = 0
-			}
-		}
+		m.markDisconnected(s, "应用关闭")
 	}
 }

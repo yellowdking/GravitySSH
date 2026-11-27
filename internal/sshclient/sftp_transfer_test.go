@@ -93,7 +93,7 @@ func (f *memRWFS) Filecmd(r *sftp.Request) error {
 		}
 		return nil
 	case "Remove":
-		delete(f.m, p)
+		delete(f.nodes, p)
 		return nil
 	case "Rename":
 		return f.renameLocked(p, path.Clean(r.Target))
