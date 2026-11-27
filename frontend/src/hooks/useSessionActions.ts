@@ -1,3 +1,4 @@
+import type { MutableRefObject } from 'react'
 import type { AppSettings, CommandShortcut, ServerView, SessionInfo } from '../types'
 import { api } from '../wailsApi'
 import type { SidebarTab } from '../components/Sidebar'
@@ -7,6 +8,7 @@ interface ActionDeps {
   setActiveNav: (tab: SidebarTab) => void
   activeSessionId: string | null
   setActiveSessionId: (id: string | null) => void
+  sessionsRef: MutableRefObject<SessionInfo[]>
   setSessions: React.Dispatch<React.SetStateAction<SessionInfo[]>>
   setSftpOpenBySession: React.Dispatch<React.SetStateAction<Record<string, boolean>>>
   setShortcuts: React.Dispatch<React.SetStateAction<CommandShortcut[]>>
@@ -32,19 +34,33 @@ export function createSessionActions(d: ActionDeps) {
   }
 
   const handleCloseSession = async (sessionId: string) => {
-    await api.disconnectSession(sessionId)
-    d.setSessions((prev) => {
-      const next = prev.filter((s) => s.sessionId !== sessionId)
-      if (d.activeSessionId === sessionId) d.setActiveSessionId(next.length > 0 ? next[next.length - 1].sessionId : null)
+    try {
+      await api.disconnectSession(sessionId)
+    } catch (err) {
+      d.showToast(`断开会话失败: ${err}`, 'error')
+    }
+    const remaining = d.sessionsRef.current.filter((s) => s.sessionId !== sessionId)
+    d.setSessions((prev) => prev.filter((s) => s.sessionId !== sessionId))
+    d.setSftpOpenBySession((prev) => {
+      if (!(sessionId in prev)) return prev
+      const next = { ...prev }
+      delete next[sessionId]
       return next
     })
+    if (d.activeSessionId === sessionId) {
+      d.setActiveSessionId(remaining.length > 0 ? remaining[remaining.length - 1].sessionId : null)
+    }
   }
 
   const handleDeleteServer = async (srv: ServerView) => {
     if (!window.confirm(`确定删除服务器 "${srv.name}" (${srv.host}) 吗？`)) return
-    await api.deleteServer(srv.id)
-    d.showToast(`已删除服务器 ${srv.name}`)
-    void d.loadAll()
+    try {
+      await api.deleteServer(srv.id)
+      d.showToast(`已删除服务器 ${srv.name}`)
+      void d.loadAll()
+    } catch (err) {
+      d.showToast(`删除服务器失败: ${err}`, 'error')
+    }
   }
 
   const handleToggleAutocomplete = async () => {
@@ -61,8 +77,12 @@ export function createSessionActions(d: ActionDeps) {
 
   const handleRunCommand = async (cmd: string, execute: boolean) => {
     if (!d.activeSessionId) return d.showToast('请先在左侧连接一台服务器', 'error')
-    await api.writeTerminal(d.activeSessionId, execute && !/[\r\n]$/.test(cmd) ? cmd + '\r' : cmd)
-    if (d.activeNav !== 'servers') d.setActiveNav('servers')
+    try {
+      await api.writeTerminal(d.activeSessionId, execute && !/[\r\n]$/.test(cmd) ? cmd + '\r' : cmd)
+      if (d.activeNav !== 'servers') d.setActiveNav('servers')
+    } catch (err) {
+      d.showToast(`发送命令失败: ${err}`, 'error')
+    }
   }
 
   const handleRunShortcut = async (sc: CommandShortcut, execute: boolean) => {

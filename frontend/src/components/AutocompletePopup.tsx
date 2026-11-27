@@ -6,7 +6,6 @@ import { getActiveTokenPrefix } from '../utils/autocomplete'
 interface Props {
   suggestions: CompletionItem[]
   selectedIdx: number
-  activePrefix?: string
   inputLine?: string
   onSelectIndex: (idx: number) => void
   onApply: (item: CompletionItem) => void
@@ -41,8 +40,8 @@ function getSourceBadge(item: CompletionItem): { label: string; cls: string; ico
   }
 }
 
-function resolvePrefix(item: CompletionItem, inputLine?: string, activePrefix?: string): string {
-  if (inputLine === undefined) return activePrefix || ''
+function resolvePrefix(item: CompletionItem, inputLine?: string): string {
+  if (inputLine === undefined) return ''
   if (item.source === 'history' || item.source === 'history_local') {
     const full = inputLine.trimStart()
     if (full && item.command.toLowerCase().startsWith(full.toLowerCase())) return full
@@ -64,13 +63,13 @@ function renderHighlighted(command: string, prefix: string) {
 }
 
 export const AutocompletePopup: React.FC<Props> = ({
-  suggestions, selectedIdx, activePrefix, inputLine, onSelectIndex, onApply,
+  suggestions, selectedIdx, inputLine, onSelectIndex, onApply,
 }) => {
   const visible = suggestions.slice(0, 5)
   if (visible.length === 0) return null
 
   return (
-    <div className="pointer-events-auto absolute top-2 right-3 z-30 w-[340px] max-w-[42%] rounded-xl bg-[#111622]/92 backdrop-blur-md border border-indigo-500/35 shadow-ag overflow-hidden select-none">
+    <div className="pointer-events-auto absolute top-2 right-3 z-30 w-[340px] max-w-[42%] rounded-xl bg-[#111622]/[0.92] backdrop-blur-md border border-indigo-500/35 shadow-ag overflow-hidden select-none">
       <div className="px-2.5 py-1 bg-[#0c101a]/95 border-b border-ag-border/80 flex items-center justify-between text-[10px] text-ag-muted">
         <span className="flex items-center gap-1 text-indigo-300 font-medium">
           <Sparkles className="w-3 h-3 shrink-0" />
@@ -82,7 +81,7 @@ export const AutocompletePopup: React.FC<Props> = ({
         {visible.map((item, idx) => {
           const isSelected = idx === selectedIdx
           const badge = getSourceBadge(item)
-          const prefix = resolvePrefix(item, inputLine, activePrefix)
+          const prefix = resolvePrefix(item, inputLine)
           const showDesc = Boolean(item.description) && !HIDE_DESC.has(item.source)
 
           return (
@@ -100,7 +99,7 @@ export const AutocompletePopup: React.FC<Props> = ({
               }}
               onMouseEnter={() => onSelectIndex(idx)}
               className={`w-full min-h-[34px] py-1.5 px-3 text-left flex items-center justify-between gap-2 cursor-pointer select-none transition ${
-                isSelected ? 'bg-indigo-500/22' : 'hover:bg-ag-hover/70'
+                isSelected ? 'bg-indigo-500/[0.22]' : 'hover:bg-ag-hover/70'
               }`}
             >
               <span className="pointer-events-none font-mono text-[12px] font-medium truncate min-w-0 flex-1">

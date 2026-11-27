@@ -22,7 +22,7 @@ export const KeyCardItem: React.FC<Props> = ({ item: k, onDeploy, onDelete }) =>
             已保存
           </span>
           {k.hasPassphrase && (
-            <span className="text-[11px] px-2 py-0.5 rounded bg-amber-500/12 text-amber-300 border border-amber-500/20">
+            <span className="text-[11px] px-2 py-0.5 rounded bg-amber-500/[0.12] text-amber-300 border border-amber-500/20">
               含口令
             </span>
           )}
