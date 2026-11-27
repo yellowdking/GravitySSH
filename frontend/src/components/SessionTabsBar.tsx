@@ -12,7 +12,7 @@ interface Props {
   onCloseSession: (sessionId: string) => void
 }
 
-export const SessionTabsBar: React.FC<Props> = ({
+export const SessionTabsBar: React.FC<Props> = React.memo(({
   sessions,
   activeSessionId,
   isServersView,
@@ -76,4 +76,4 @@ export const SessionTabsBar: React.FC<Props> = ({
       </button>
     )}
   </div>
-)
+))

@@ -3,8 +3,9 @@ import { AlertCircle, CheckCircle2, Globe, KeyRound, Loader2, Server, Sliders, W
 import type { ServerSaveRequest, ServerView, SSHKeyMeta } from '../types'
 import { api } from '../wailsApi'
 import { errMsg } from '../utils/errors'
+import { useActionDialogs } from '../hooks/useActionDialogs'
 import { ModalShell } from './ModalShell'
-import { getAvailableJumpServers, isServerConnectionDirty, makeInitialServerForm } from './serverForm'
+import { getAvailableJumpServers, isServerConnectionDirty, isServerFormDirty, makeInitialServerForm } from './serverForm'
 import { ServerBasicTab } from './ServerBasicTab'
 import { ServerProxyTab } from './ServerProxyTab'
 import { ServerJumpTab } from './ServerJumpTab'
@@ -38,6 +39,8 @@ export const ServerModal: React.FC<Props> = ({
   const savingRef = useRef(false)
   const testingRef = useRef(false)
   const deployingRef = useRef(false)
+  const confirmingCloseRef = useRef(false)
+  const { confirm, dialogNode } = useActionDialogs()
 
   useEffect(() => {
     mountedRef.current = true
@@ -75,6 +78,10 @@ export const ServerModal: React.FC<Props> = ({
   )
   const connectionDirty = useMemo(
     () => isServerConnectionDirty(form, editingServer, defaultKeepAliveSeconds),
+    [form, editingServer, defaultKeepAliveSeconds]
+  )
+  const formDirty = useMemo(
+    () => isServerFormDirty(form, editingServer, defaultKeepAliveSeconds),
     [form, editingServer, defaultKeepAliveSeconds]
   )
 
@@ -190,9 +197,33 @@ export const ServerModal: React.FC<Props> = ({
 
   const closeBlocked = saving || deploying
 
-  const handleClose = () => {
+  const confirmDiscardIfDirty = async (): Promise<boolean> => {
+    if (!formDirty) return true
+    if (confirmingCloseRef.current) return false
+    confirmingCloseRef.current = true
+    try {
+      const ok = await confirm({
+        title: '放弃未保存的修改',
+        message: '服务器配置有未保存的修改，确定放弃并关闭吗？',
+        confirmLabel: '放弃并关闭',
+      })
+      return ok && mountedRef.current
+    } finally {
+      confirmingCloseRef.current = false
+    }
+  }
+
+  const handleClose = async () => {
     if (savingRef.current || deployingRef.current) return
+    if (!(await confirmDiscardIfDirty())) return
     onClose()
+  }
+
+  const handleGoToKeyVault = async () => {
+    if (savingRef.current || deployingRef.current) return
+    if (!(await confirmDiscardIfDirty())) return
+    onClose()
+    onGoToKeyVault()
   }
 
   const handleSave = async (e: React.FormEvent) => {
@@ -287,7 +318,7 @@ export const ServerModal: React.FC<Props> = ({
   const anyBusy = saving || testing || deploying
 
   return (
-    <ModalShell open={open} onClose={handleClose}>
+    <ModalShell open={open} onClose={() => { void handleClose() }}>
       <div className="w-full max-w-2xl bg-ag-panel border border-ag-borderStrong rounded-2xl shadow-ag overflow-hidden flex flex-col max-h-[90vh]">
         <div className="px-5 py-4 border-b border-ag-border flex items-center justify-between bg-[#11151f]">
           <div className="flex items-center gap-2.5">
@@ -297,7 +328,7 @@ export const ServerModal: React.FC<Props> = ({
               <p className="text-[11px] text-ag-muted">密码 / SSH 密钥 / SOCKS5 & HTTP 代理 / 多级跳板机</p>
             </div>
           </div>
-          <button type="button" disabled={closeBlocked} onClick={handleClose} aria-label="关闭服务器配置窗口" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text disabled:opacity-40 disabled:cursor-not-allowed"><X className="w-4 h-4" /></button>
+          <button type="button" disabled={closeBlocked} onClick={() => { void handleClose() }} aria-label="关闭服务器配置窗口" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text disabled:opacity-40 disabled:cursor-not-allowed"><X className="w-4 h-4" /></button>
         </div>
 
         <div className="px-5 pt-3 border-b border-ag-border flex items-center gap-1 bg-[#11151f]/60">
@@ -321,7 +352,7 @@ export const ServerModal: React.FC<Props> = ({
               disableKeyVaultLink={closeBlocked}
               onQuickDeploy={() => void handleQuickDeploy()}
               onChange={setForm}
-              onGoToKeyVault={() => { if (!closeBlocked) { onClose(); onGoToKeyVault() } }}
+              onGoToKeyVault={() => { void handleGoToKeyVault() }}
             />
           )}
           {tab === 'proxy' && <ServerProxyTab form={form} editingServer={editingServer} onChange={setForm} />}
@@ -343,12 +374,13 @@ export const ServerModal: React.FC<Props> = ({
               {(editingServer || form.host.trim()) && <ClearHostCacheButton host={form.host} port={isValidInt(form.port, 1, 65535) ? form.port : 22} onResult={setNotice} />}
             </div>
             <div className="flex items-center gap-2">
-              <button type="button" disabled={closeBlocked} onClick={handleClose} className="ag-btn-ghost">取消</button>
+              <button type="button" disabled={closeBlocked} onClick={() => { void handleClose() }} className="ag-btn-ghost">取消</button>
               <button type="submit" disabled={anyBusy} className="ag-btn-primary">{saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}保存服务器</button>
             </div>
           </div>
         </form>
       </div>
+      {dialogNode}
     </ModalShell>
   )
 }

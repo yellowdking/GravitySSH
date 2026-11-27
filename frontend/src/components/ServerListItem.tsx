@@ -10,7 +10,7 @@ interface Props {
   onDelete: (srv: ServerView) => void
 }
 
-export const ServerListItem: React.FC<Props> = ({ server, isLive, onConnect, onEdit, onDelete }) => {
+export const ServerListItem: React.FC<Props> = React.memo(({ server, isLive, onConnect, onEdit, onDelete }) => {
   const hasProxy = server.proxy?.type && server.proxy.type !== 'none'
   const hasJump = server.jumpHost?.mode && server.jumpHost.mode !== 'none'
   const hasKey = !!server.sshKeyId
@@ -97,4 +97,4 @@ export const ServerListItem: React.FC<Props> = ({ server, isLive, onConnect, onE
       </div>
     </div>
   )
-}
+})
