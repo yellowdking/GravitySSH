@@ -4,15 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"github.com/yellowdking/GravitySSH/internal/crypto"
 	"github.com/yellowdking/GravitySSH/internal/models"
 	"github.com/yellowdking/GravitySSH/internal/sshclient"
 	"github.com/yellowdking/GravitySSH/internal/updater"
 	"github.com/yellowdking/GravitySSH/internal/vault"
 )
+
+const maxSSHKeyFileSize = 256 * 1024
 
 type wailsEventSink struct {
 	ctx context.Context
@@ -33,7 +38,9 @@ type App struct {
 }
 
 func NewApp() *App {
-	return &App{}
+	return &App{
+		syncCache: newSyncPreviewCache(),
+	}
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -50,6 +57,12 @@ func (a *App) startup(ctx context.Context) {
 func (a *App) shutdown(ctx context.Context) {
 	if a.sshMgr != nil {
 		a.sshMgr.CloseAll()
+	}
+	if a.syncCache != nil {
+		a.syncCache.close()
+	}
+	if a.store != nil {
+		_ = a.store.Close()
 	}
 }
 
@@ -113,10 +126,19 @@ func (a *App) CheckForUpdates() (models.UpdateCheckResult, error) {
 	return updater.CheckLatestRelease(ctx, AppVersion)
 }
 
-func (a *App) OpenExternalURL(url string) {
-	if a.ctx != nil && url != "" {
-		runtime.BrowserOpenURL(a.ctx, url)
+func (a *App) OpenExternalURL(rawURL string) {
+	if a.ctx == nil {
+		return
 	}
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" {
+		return
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "https" && scheme != "http" {
+		return
+	}
+	runtime.BrowserOpenURL(a.ctx, u.String())
 }
 
 func (a *App) ListServers() ([]models.ServerView, error) {
@@ -178,11 +200,22 @@ func (a *App) PickAndReadSSHKeyFile() (map[string]string, error) {
 	if selected == "" {
 		return map[string]string{"cancelled": "true"}, nil
 	}
+	info, err := os.Stat(selected)
+	if err != nil {
+		return nil, fmt.Errorf("读取密钥文件失败: %w", err)
+	}
+	if info.IsDir() {
+		return nil, errors.New("所选路径是目录，不是有效的 SSH 私钥文件")
+	}
+	if info.Size() > maxSSHKeyFileSize {
+		return nil, errors.New("文件体积过大，不是有效的 SSH 私钥文件")
+	}
 	raw, err := os.ReadFile(selected)
 	if err != nil {
 		return nil, fmt.Errorf("读取密钥文件失败: %w", err)
 	}
-	if len(raw) > 256*1024 {
+	defer crypto.ZeroBytes(raw)
+	if len(raw) > maxSSHKeyFileSize {
 		return nil, errors.New("文件体积过大，不是有效的 SSH 私钥文件")
 	}
 	return map[string]string{

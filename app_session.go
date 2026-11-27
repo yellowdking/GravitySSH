@@ -24,13 +24,6 @@ func (a *App) DisconnectSession(sessionID string) error {
 	return nil
 }
 
-func (a *App) ListSessions() ([]models.SessionInfo, error) {
-	if err := a.ensureReady(); err != nil {
-		return nil, err
-	}
-	return a.sshMgr.ListSessions(), nil
-}
-
 func (a *App) WriteTerminal(sessionID, data string) error {
 	if err := a.ensureReady(); err != nil {
 		return err
@@ -51,13 +44,6 @@ func (a *App) SetSessionCWD(sessionID, remotePath string) error {
 	}
 	a.sshMgr.SetSessionCWD(sessionID, remotePath)
 	return nil
-}
-
-func (a *App) GetCurrentInputLine(sessionID string) (string, error) {
-	if err := a.ensureReady(); err != nil {
-		return "", err
-	}
-	return a.sshMgr.CurrentInputLine(sessionID), nil
 }
 
 func (a *App) GetSessionMetrics(sessionID string) (models.HostMetrics, error) {

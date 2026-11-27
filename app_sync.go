@@ -23,22 +23,27 @@ type syncPreviewEntry struct {
 type syncPreviewCache struct {
 	mu      sync.Mutex
 	entries map[string]syncPreviewEntry
+	timer   *time.Timer
+	closed  bool
 }
 
-func (a *App) getSyncCache() *syncPreviewCache {
-	if a.syncCache == nil {
-		a.syncCache = &syncPreviewCache{entries: make(map[string]syncPreviewEntry)}
+func newSyncPreviewCache() *syncPreviewCache {
+	return &syncPreviewCache{
+		entries: make(map[string]syncPreviewEntry),
 	}
-	return a.syncCache
 }
 
 func (c *syncPreviewCache) put(bundle models.SyncBundle) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return ""
+	}
 	now := time.Now()
 	c.pruneLocked(now)
 	id := uuid.NewString()
 	c.entries[id] = syncPreviewEntry{bundle: bundle, expiresAt: now.Add(syncPreviewTTL)}
+	c.rescheduleLocked(now)
 	return id
 }
 
@@ -49,18 +54,69 @@ func (c *syncPreviewCache) pop(id string) (models.SyncBundle, bool) {
 	c.pruneLocked(now)
 	entry, ok := c.entries[id]
 	if !ok {
+		c.rescheduleLocked(now)
 		return models.SyncBundle{}, false
 	}
 	delete(c.entries, id)
+	c.rescheduleLocked(now)
 	return entry.bundle, true
+}
+
+func (c *syncPreviewCache) clear(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if strings.TrimSpace(id) == "" {
+		clear(c.entries)
+	} else {
+		delete(c.entries, id)
+	}
+	c.rescheduleLocked(time.Now())
+}
+
+func (c *syncPreviewCache) close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	if c.timer != nil {
+		c.timer.Stop()
+		c.timer = nil
+	}
+	clear(c.entries)
 }
 
 func (c *syncPreviewCache) pruneLocked(now time.Time) {
 	for k, v := range c.entries {
-		if now.After(v.expiresAt) {
+		if !now.Before(v.expiresAt) {
 			delete(c.entries, k)
 		}
 	}
+}
+
+func (c *syncPreviewCache) rescheduleLocked(now time.Time) {
+	if c.timer != nil {
+		c.timer.Stop()
+		c.timer = nil
+	}
+	if c.closed || len(c.entries) == 0 {
+		return
+	}
+	var earliest time.Time
+	for _, v := range c.entries {
+		if earliest.IsZero() || v.expiresAt.Before(earliest) {
+			earliest = v.expiresAt
+		}
+	}
+	delay := time.Until(earliest)
+	if delay < time.Millisecond {
+		delay = time.Millisecond
+	}
+	c.timer = time.AfterFunc(delay, func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		now := time.Now()
+		c.pruneLocked(now)
+		c.rescheduleLocked(now)
+	})
 }
 
 func (a *App) syncContext() context.Context {
@@ -83,6 +139,14 @@ func (a *App) resolveRelayURL(relayURL string) string {
 }
 
 func (a *App) GetDefaultSyncRelayURL() string { return syncclient.DefaultRelayURL }
+
+// ClearSyncPreview discards a pending decrypted sync preview from memory
+// (or all pending previews when previewID is empty).
+func (a *App) ClearSyncPreview(previewID string) {
+	if a.syncCache != nil {
+		a.syncCache.clear(previewID)
+	}
+}
 
 // TestSyncRelay checks TLS 1.3 + App Gate connectivity to the given or saved relay URL.
 func (a *App) TestSyncRelay(relayURL string) (int64, error) {
@@ -122,11 +186,11 @@ func (a *App) StartSyncSend(relayURL string) (models.SyncSendSession, error) {
 	if err != nil {
 		return models.SyncSendSession{}, err
 	}
-	cleanURL, _, err := syncclient.NormalizeRelayURL(a.resolveRelayURL(relayURL))
+	cleanURL, mode, err := syncclient.NormalizeRelayURL(a.resolveRelayURL(relayURL))
 	if err != nil {
 		return models.SyncSendSession{}, err
 	}
-	client, err := syncclient.NewClient(cleanURL)
+	client, err := syncclient.NewClientWithMode(cleanURL, syncclient.AppGateKey, syncclient.PinnedSPKISHA256, mode)
 	if err != nil {
 		return models.SyncSendSession{}, err
 	}
@@ -182,7 +246,7 @@ func (a *App) PreviewSyncReceive(code, relayURL string) (models.SyncReceivePrevi
 		return models.SyncReceivePreview{}, err
 	}
 	return models.SyncReceivePreview{
-		PreviewID:      a.getSyncCache().put(bundle),
+		PreviewID:      a.syncCache.put(bundle),
 		SchemaVersion:  bundle.SchemaVersion,
 		ExportedAt:     bundle.ExportedAt,
 		SourcePlatform: bundle.SourcePlatform,
@@ -198,7 +262,7 @@ func (a *App) ApplySyncReceive(previewID, mode string) (models.SyncImportSummary
 	if err := a.ensureUnlocked(); err != nil {
 		return models.SyncImportSummary{}, err
 	}
-	bundle, ok := a.getSyncCache().pop(previewID)
+	bundle, ok := a.syncCache.pop(previewID)
 	if !ok {
 		return models.SyncImportSummary{}, errors.New("预览已过期或已导入，请重新获取同步码")
 	}
