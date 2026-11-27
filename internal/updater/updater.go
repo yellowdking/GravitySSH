@@ -3,8 +3,11 @@ package updater
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -12,7 +15,10 @@ import (
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
-const latestReleaseAPI = "https://api.github.com/repos/yellowdking/GravitySSH/releases/latest"
+const (
+	latestReleaseAPI       = "https://api.github.com/repos/yellowdking/GravitySSH/releases/latest"
+	maxReleaseResponseSize = 4 << 20 // 4 MiB
+)
 
 type ghRelease struct {
 	TagName     string `json:"tag_name"`
@@ -30,16 +36,35 @@ func CheckLatestRelease(ctx context.Context, currentVersion string) (models.Upda
 	return checkReleaseAtURL(ctx, latestReleaseAPI, currentVersion)
 }
 
+func isTrustedGitHubURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !strings.EqualFold(u.Scheme, "https") {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "github.com" || strings.HasSuffix(host, ".githubusercontent.com")
+}
+
+func stripVersionPrefix(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) > 0 && (v[0] == 'v' || v[0] == 'V') {
+		return v[1:]
+	}
+	return v
+}
+
 func checkReleaseAtURL(ctx context.Context, apiURL, currentVersion string) (models.UpdateCheckResult, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+
+	cur := stripVersionPrefix(currentVersion)
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return models.UpdateCheckResult{}, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "GravitySSH/"+strings.TrimPrefix(strings.TrimSpace(currentVersion), "v"))
+	req.Header.Set("User-Agent", "GravitySSH/"+cur)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -52,56 +77,96 @@ func checkReleaseAtURL(ctx context.Context, apiURL, currentVersion string) (mode
 	}
 
 	var rel ghRelease
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxReleaseResponseSize)).Decode(&rel); err != nil {
 		return models.UpdateCheckResult{}, fmt.Errorf("解析版本信息失败: %w", err)
 	}
 
-	downloadURL := rel.HTMLURL
+	releaseURL := strings.TrimSpace(rel.HTMLURL)
+	if releaseURL != "" && !isTrustedGitHubURL(releaseURL) {
+		return models.UpdateCheckResult{}, errors.New("更新接口返回了不受信任的发布页地址")
+	}
+
+	downloadURL := releaseURL
 	for _, asset := range rel.Assets {
-		if strings.HasSuffix(strings.ToLower(asset.Name), ".exe") {
-			downloadURL = asset.BrowserDownloadURL
+		if strings.HasSuffix(strings.ToLower(asset.Name), ".exe") && isTrustedGitHubURL(asset.BrowserDownloadURL) {
+			downloadURL = strings.TrimSpace(asset.BrowserDownloadURL)
 			break
 		}
 	}
 
-	latest := strings.TrimPrefix(strings.TrimSpace(rel.TagName), "v")
-	cur := strings.TrimPrefix(strings.TrimSpace(currentVersion), "v")
+	latest := stripVersionPrefix(rel.TagName)
 
 	return models.UpdateCheckResult{
 		CurrentVersion: cur,
 		LatestVersion:  latest,
 		HasUpdate:      IsNewerVersion(cur, latest),
-		ReleaseURL:     rel.HTMLURL,
+		ReleaseURL:     releaseURL,
 		DownloadURL:    downloadURL,
 		ReleaseNotes:   strings.TrimSpace(rel.Body),
 		PublishedAt:    rel.PublishedAt,
 	}, nil
 }
 
-// IsNewerVersion compares two dotted semantic versions (e.g. "1.1.3" vs "1.2.0").
-func IsNewerVersion(current, latest string) bool {
-	cParts := parseSemver(current)
-	lParts := parseSemver(latest)
-	for i := 0; i < 3; i++ {
-		if lParts[i] != cParts[i] {
-			return lParts[i] > cParts[i]
-		}
-	}
-	return false
+type semver struct {
+	nums [3]int
+	pre  []string
 }
 
-func parseSemver(v string) [3]int {
-	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
-	if idx := strings.IndexAny(v, "-+"); idx >= 0 {
+// IsNewerVersion compares two semantic versions (e.g. "1.1.3" vs "1.2.0", "1.2.0-beta" vs "1.2.0").
+func IsNewerVersion(current, latest string) bool {
+	c := parseSemver(current)
+	l := parseSemver(latest)
+	for i := 0; i < 3; i++ {
+		if l.nums[i] != c.nums[i] {
+			return l.nums[i] > c.nums[i]
+		}
+	}
+	// Per SemVer 2.0.0: a version with pre-release identifiers has lower precedence than a normal version.
+	if len(c.pre) == 0 && len(l.pre) == 0 {
+		return false
+	}
+	if len(c.pre) > 0 && len(l.pre) == 0 {
+		return true
+	}
+	if len(c.pre) == 0 && len(l.pre) > 0 {
+		return false
+	}
+	for i := 0; i < len(c.pre) && i < len(l.pre); i++ {
+		if c.pre[i] == l.pre[i] {
+			continue
+		}
+		cn, cerr := strconv.Atoi(c.pre[i])
+		ln, lerr := strconv.Atoi(l.pre[i])
+		switch {
+		case cerr == nil && lerr == nil:
+			return ln > cn
+		case cerr == nil && lerr != nil:
+			return true // numeric < alphanumeric
+		case cerr != nil && lerr == nil:
+			return false
+		default:
+			return l.pre[i] > c.pre[i]
+		}
+	}
+	return len(l.pre) > len(c.pre)
+}
+
+func parseSemver(v string) semver {
+	v = stripVersionPrefix(v)
+	if idx := strings.IndexByte(v, '+'); idx >= 0 {
 		v = v[:idx]
 	}
-	parts := strings.Split(v, ".")
-	var out [3]int
+	core, preStr, hasPre := strings.Cut(v, "-")
+	parts := strings.Split(core, ".")
+	var out semver
 	for i := 0; i < 3 && i < len(parts); i++ {
 		n, err := strconv.Atoi(parts[i])
 		if err == nil && n >= 0 {
-			out[i] = n
+			out.nums[i] = n
 		}
+	}
+	if hasPre && preStr != "" {
+		out.pre = strings.Split(preStr, ".")
 	}
 	return out
 }

@@ -47,15 +47,17 @@ var (
 	pImmSetConv  = i32.NewProc("ImmSetConversionStatus")
 	pImmSetOpen  = i32.NewProc("ImmSetOpenStatus")
 	pImmRelCtx   = i32.NewProc("ImmReleaseContext")
-	pCurPID      = syscall.NewLazyDLL("kernel32.dll").NewProc("GetCurrentProcessId")
-	swMu, enumMu sync.Mutex
-	enumKids     []uintptr
-	enumCB       = syscall.NewCallback(func(h, _ uintptr) uintptr { enumKids = append(enumKids, h); return 1 })
+	pCurPID  = syscall.NewLazyDLL("kernel32.dll").NewProc("GetCurrentProcessId")
+	swMu     sync.Mutex
+	enumKids []uintptr
+	enumCB   = syscall.NewCallback(func(h, _ uintptr) uintptr { enumKids = append(enumKids, h); return 1 })
 )
 
 // SwitchToEnglish switches Windows IME to half-width English when GravitySSH owns the foreground window.
 func SwitchToEnglish() {
-	swMu.Lock()
+	if !swMu.TryLock() {
+		return
+	}
 	defer swMu.Unlock()
 
 	fg, _, _ := pFgWnd.Call()
@@ -64,11 +66,9 @@ func SwitchToEnglish() {
 		return
 	}
 	fgTID, _ := threadPID(fg)
-	enumMu.Lock()
 	enumKids = enumKids[:0]
 	pEnumChild.Call(fg, enumCB, 0)
 	kids := append([]uintptr(nil), enumKids...)
-	enumMu.Unlock()
 
 	seen := map[uintptr]bool{}
 	targets := make([]uintptr, 0, len(kids)+4)
@@ -155,16 +155,22 @@ func toEnglish(ime uintptr, zh bool) bool {
 	before, okB := imeCtl(ime, 1, 0)  // IMC_GETCONVERSIONMODE
 	hadNative := okB && needsEnglishConversion(before)
 	if zh {
+		if okB && !hadNative {
+			return true
+		}
 		imeCtl(ime, 2, 0) // IMC_SETCONVERSIONMODE = 0 (half-width English)
 		after, okA := imeCtl(ime, 1, 0)
 		if okA && !needsEnglishConversion(after) {
-			return hadNative
+			return true
 		}
 		if okA && needsEnglishConversion(after) {
 			imeCtl(ime, 6, 0) // IMC_SETOPENSTATUS = 0 fallback for legacy IMEs
 			imeCtl(ime, 2, 0)
 		}
 		return false
+	}
+	if okOpen && open == 0 && okB && !hadNative {
+		return true
 	}
 	if !okOpen || open != 0 || !okB || hadNative {
 		imeCtl(ime, 2, 0)

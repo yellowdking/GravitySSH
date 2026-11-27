@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -83,6 +84,15 @@ func NormalizeRelayURL(raw string) (string, RelayTLSMode, error) {
 	}
 	if strings.ContainsAny(u.Host, " \t\r\n") {
 		return "", 0, errors.New("中继服务器地址包含无效空格")
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		return "", 0, errors.New("中继服务器端口号无效（范围应为 1-65535）")
+	}
+	if portStr := u.Port(); portStr != "" {
+		portNum, err := strconv.Atoi(portStr)
+		if err != nil || portNum < 1 || portNum > 65535 {
+			return "", 0, errors.New("中继服务器端口号无效（范围应为 1-65535）")
+		}
 	}
 	u.Scheme = "https"
 	u.Path = strings.TrimRight(u.Path, "/")

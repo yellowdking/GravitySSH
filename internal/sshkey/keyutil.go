@@ -25,6 +25,18 @@ type ParsedKeyInfo struct {
 	Signer      ssh.Signer
 }
 
+func zeroBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}
+
+// SanitizeComment removes carriage returns and newlines from an SSH key comment
+// so it cannot inject extra lines into remote authorized_keys files.
+func SanitizeComment(comment string) string {
+	return strings.TrimSpace(strings.NewReplacer("\r", "", "\n", "").Replace(comment))
+}
+
 // ParsePrivateKey validates and parses a private key PEM (with optional passphrase).
 func ParsePrivateKey(pemContent string, passphrase string) (*ParsedKeyInfo, error) {
 	trimmed := strings.TrimSpace(pemContent)
@@ -33,13 +45,17 @@ func ParsePrivateKey(pemContent string, passphrase string) (*ParsedKeyInfo, erro
 	}
 
 	raw := []byte(trimmed)
+	defer zeroBytes(raw)
+
 	var (
 		signer ssh.Signer
 		err    error
 	)
 
 	if passphrase != "" {
-		signer, err = ssh.ParsePrivateKeyWithPassphrase(raw, []byte(passphrase))
+		passBytes := []byte(passphrase)
+		defer zeroBytes(passBytes)
+		signer, err = ssh.ParsePrivateKeyWithPassphrase(raw, passBytes)
 	} else {
 		signer, err = ssh.ParsePrivateKey(raw)
 		if err != nil {
@@ -64,6 +80,8 @@ func ParsePrivateKey(pemContent string, passphrase string) (*ParsedKeyInfo, erro
 
 // GenerateKeyPair generates a new Ed25519 or RSA (4096-bit) key pair in OpenSSH format.
 func GenerateKeyPair(algorithm string, comment string, passphrase string) (privatePEM string, info *ParsedKeyInfo, err error) {
+	comment = SanitizeComment(comment)
+
 	var priv any
 	switch strings.ToLower(strings.TrimSpace(algorithm)) {
 	case "", "ed25519":
@@ -90,23 +108,35 @@ func GenerateKeyPair(algorithm string, comment string, passphrase string) (priva
 
 	var block *pem.Block
 	if passphrase != "" {
-		block, err = ssh.MarshalPrivateKeyWithPassphrase(priv, comment, []byte(passphrase))
+		passBytes := []byte(passphrase)
+		defer zeroBytes(passBytes)
+		block, err = ssh.MarshalPrivateKeyWithPassphrase(priv, comment, passBytes)
 	} else {
 		block, err = ssh.MarshalPrivateKey(priv, comment)
 	}
 	if err != nil {
 		return "", nil, fmt.Errorf("marshal openssh private key: %w", err)
 	}
+	defer zeroBytes(block.Bytes)
 
 	pemBytes := pem.EncodeToMemory(block)
+	defer zeroBytes(pemBytes)
 	pemStr := string(pemBytes)
 
-	parsed, err := ParsePrivateKey(pemStr, passphrase)
+	signer, err := ssh.NewSignerFromKey(priv)
 	if err != nil {
-		return "", nil, err
+		return "", nil, fmt.Errorf("create ssh signer: %w", err)
 	}
+	pub := signer.PublicKey()
+	pubStr := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))
 	if comment != "" {
-		parsed.PublicKey = parsed.PublicKey + " " + comment
+		pubStr = pubStr + " " + comment
+	}
+	parsed := &ParsedKeyInfo{
+		KeyType:     pub.Type(),
+		Fingerprint: ssh.FingerprintSHA256(pub),
+		PublicKey:   pubStr,
+		Signer:      signer,
 	}
 	return pemStr, parsed, nil
 }
