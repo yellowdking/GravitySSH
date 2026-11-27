@@ -1,6 +1,7 @@
 package sshclient
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -51,51 +52,120 @@ func (m *Manager) getSFTP(sessionID string) (*sftp.Client, error) {
 		return nil, fmt.Errorf("会话不存在或已关闭: %s", sessionID)
 	}
 
-	sess.mu.Lock()
-	if sess.sftpClient != nil {
-		sc := sess.sftpClient
-		sess.mu.Unlock()
-		return sc, nil
-	}
-	if sess.closed || sess.userClosed {
-		sess.mu.Unlock()
-		return nil, fmt.Errorf("会话已关闭: %s", sessionID)
-	}
-	sshCli := sess.dialRes
-	sess.mu.Unlock()
+	for {
+		sess.mu.Lock()
+		if sess.sftpClient != nil {
+			sc := sess.sftpClient
+			sess.mu.Unlock()
+			return sc, nil
+		}
+		if sess.closed || sess.userClosed {
+			sess.mu.Unlock()
+			return nil, fmt.Errorf("会话已关闭: %s", sessionID)
+		}
+		stopCh := sess.stopCh
+		if flight := sess.sftpInit; flight != nil {
+			sess.mu.Unlock()
+			select {
+			case <-flight.done:
+				if flight.err != nil {
+					return nil, flight.err
+				}
+				if flight.client != nil {
+					sess.mu.Lock()
+					if sess.sftpClient != nil && !sess.closed && !sess.userClosed {
+						sc := sess.sftpClient
+						sess.mu.Unlock()
+						return sc, nil
+					}
+					closed := sess.closed || sess.userClosed
+					sess.mu.Unlock()
+					if closed {
+						return nil, fmt.Errorf("会话已关闭: %s", sessionID)
+					}
+					continue
+				}
+				continue
+			case <-stopCh:
+				return nil, fmt.Errorf("会话已关闭: %s", sessionID)
+			}
+		}
 
-	var (
-		sc  *sftp.Client
-		err error
-	)
-	if dialHook != nil {
-		sc, err = dialHook(sessionID)
-	} else {
-		if sshCli == nil || sshCli.Client == nil {
+		sshCli := sess.dialRes
+		if dialHook == nil && (sshCli == nil || sshCli.Client == nil) {
+			sess.mu.Unlock()
 			return nil, fmt.Errorf("SSH 连接未就绪")
 		}
-		sc, err = newSFTPClient(sshCli.Client)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("初始化 SFTP 失败: %w", err)
-	}
+		flight := &sftpInitFlight{
+			done:    make(chan struct{}),
+			dialRes: sshCli,
+		}
+		sess.sftpInit = flight
+		sess.mu.Unlock()
 
-	sess.mu.Lock()
-	if sess.closed || sess.userClosed || (dialHook == nil && (sess.dialRes == nil || sess.dialRes != sshCli)) {
+		initCtx, cancel := context.WithTimeout(context.Background(), sftpInitTimeout)
+		if stopCh != nil {
+			go func() {
+				select {
+				case <-stopCh:
+					cancel()
+				case <-initCtx.Done():
+				}
+			}()
+		}
+
+		var (
+			sc  *sftp.Client
+			err error
+		)
+		if dialHook != nil {
+			sc, err = dialSFTPWithContext(initCtx, func() (*sftp.Client, error) {
+				return dialHook(sessionID)
+			})
+		} else {
+			sc, err = newSFTPClientWithContext(initCtx, sshCli.Client)
+		}
+		cancel()
+
+		if err != nil {
+			wrapped := fmt.Errorf("初始化 SFTP 失败: %w", err)
+			flight.err = wrapped
+			sess.mu.Lock()
+			if sess.sftpInit == flight {
+				sess.sftpInit = nil
+			}
+			sess.mu.Unlock()
+			close(flight.done)
+			return nil, wrapped
+		}
+
+		sess.mu.Lock()
+		if sess.sftpInit == flight {
+			sess.sftpInit = nil
+		}
+		if sess.closed || sess.userClosed || (dialHook == nil && (sess.dialRes == nil || sess.dialRes != sshCli)) {
+			sess.mu.Unlock()
+			_ = sc.Close()
+			closedErr := fmt.Errorf("会话已关闭: %s", sessionID)
+			flight.err = closedErr
+			close(flight.done)
+			return nil, closedErr
+		}
+		if sess.sftpClient != nil {
+			existing := sess.sftpClient
+			sess.mu.Unlock()
+			_ = sc.Close()
+			flight.client = existing
+			close(flight.done)
+			return existing, nil
+		}
+		sess.sftpClient = sc
+		sess.info.SFTPReady = true
 		sess.mu.Unlock()
-		_ = sc.Close()
-		return nil, fmt.Errorf("会话已关闭: %s", sessionID)
+		flight.client = sc
+		close(flight.done)
+		return sc, nil
 	}
-	if sess.sftpClient != nil {
-		existing := sess.sftpClient
-		sess.mu.Unlock()
-		_ = sc.Close()
-		return existing, nil
-	}
-	sess.sftpClient = sc
-	sess.info.SFTPReady = true
-	sess.mu.Unlock()
-	return sc, nil
 }
 
 func (m *Manager) invalidateSFTP(sessionID string, bad *sftp.Client) {

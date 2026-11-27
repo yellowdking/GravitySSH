@@ -59,7 +59,7 @@ func buildExtractCommand(dir, base string) (string, error) {
 	switch {
 	case strings.HasSuffix(lower, ".zip"):
 		install := autoInstallSnippet("unzip", "unzip", "unzip", "unzip", "unzip", "unzip")
-		return fmt.Sprintf("cd -- %s && { if ! command -v unzip >/dev/null 2>&1; then %s; fi && unzip -o %s -d .; }", qDir, install, qBase), nil
+		return fmt.Sprintf("cd -- %s && { if ! command -v unzip >/dev/null 2>&1; then %s; fi && unzip -oq %s -d .; }", qDir, install, qBase), nil
 	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
 		return fmt.Sprintf("cd -- %s && tar -xzf %s", qDir, qBase), nil
 	case strings.HasSuffix(lower, ".tar.bz2"), strings.HasSuffix(lower, ".tbz2"):
@@ -70,7 +70,7 @@ func buildExtractCommand(dir, base string) (string, error) {
 		return fmt.Sprintf("cd -- %s && tar -xf %s", qDir, qBase), nil
 	case strings.HasSuffix(lower, ".7z"):
 		install := autoInstallSnippet("p7zip-full", "p7zip", "p7zip", "p7zip", "7zip", "p7zip")
-		return fmt.Sprintf("cd -- %s && { if ! command -v 7z >/dev/null 2>&1; then %s; fi && 7z x -y -- %s; }", qDir, install, qBase), nil
+		return fmt.Sprintf("cd -- %s && { if ! command -v 7z >/dev/null 2>&1; then %s; fi && 7z x -y -bso0 -- %s; }", qDir, install, qBase), nil
 	case strings.HasSuffix(lower, ".gz"):
 		return fmt.Sprintf("cd -- %s && gunzip -kf -- %s", qDir, qBase), nil
 	default:

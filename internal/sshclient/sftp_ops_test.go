@@ -27,9 +27,9 @@ func TestPickDominantMode(t *testing.T) {
 
 func TestBuildExtractCommand(t *testing.T) {
 	for _, tc := range [][3]string{
-		{"/w", "a b.zip", "unzip -o 'a b.zip' -d ."},
+		{"/w", "a b.zip", "unzip -oq 'a b.zip' -d ."},
 		{"/d", "b.tar.gz", "tar -xzf 'b.tar.gz'"},
-		{"/t", "p.7z", "7z x -y -- 'p.7z'"},
+		{"/t", "p.7z", "7z x -y -bso0 -- 'p.7z'"},
 		{"/l", "a.gz", "gunzip -kf -- 'a.gz'"},
 	} {
 		if c, err := buildExtractCommand(tc[0], tc[1]); err != nil || !strings.Contains(c, tc[2]) {
