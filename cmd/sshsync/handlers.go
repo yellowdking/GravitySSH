@@ -34,7 +34,7 @@ func (s *relayServer) handleDrop(w http.ResponseWriter, rawBody []byte) {
 		writeJSON(w, http.StatusBadRequest, []byte(`{"error":"invalid_fields"}`))
 		return
 	}
-	exp, err := s.store.Drop(req.ChannelID, req.Salt, req.Nonce, req.Ciphertext, req.TTLSeconds)
+	exp, err := s.store.DropOwned(req.ChannelID, req.Salt, req.Nonce, req.Ciphertext, req.TTLSeconds)
 	if err != nil {
 		switch {
 		case errors.Is(err, errSlotExists):
@@ -46,6 +46,8 @@ func (s *relayServer) handleDrop(w http.ResponseWriter, rawBody []byte) {
 		}
 		return
 	}
+	// Ownership of decoded byte slices transferred to memStore; prevent defer from wiping stored data.
+	req.Salt, req.Nonce, req.Ciphertext = nil, nil, nil
 	resp, _ := json.Marshal(struct {
 		OK        bool   `json:"ok"`
 		ExpiresAt string `json:"expiresAt"`

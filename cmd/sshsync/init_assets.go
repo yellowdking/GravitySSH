@@ -125,12 +125,10 @@ func generateSelfSignedCertBytes(sanHost string) ([]byte, []byte, string, error)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("create cert: %w", err)
 	}
-	parsed, err := x509.ParseCertificate(der)
+	spkiHex, err := spkiHexFromDER(der)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("parse cert: %w", err)
+		return nil, nil, "", err
 	}
-	sum := sha256.Sum256(parsed.RawSubjectPublicKeyInfo)
-	spkiHex := hex.EncodeToString(sum[:])
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyDER, err := x509.MarshalECPrivateKey(priv)
@@ -148,13 +146,19 @@ func generateSelfSignedCert(certPath, keyPath, sanIP string) (string, error) {
 		return "", err
 	}
 	defer clear(keyPEM)
-	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
-		return "", fmt.Errorf("write cert: %w", err)
-	}
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		return "", fmt.Errorf("write key: %w", err)
+	if err := persistKeyPair(certPath, keyPath, certPEM, keyPEM); err != nil {
+		return "", fmt.Errorf("write keypair: %w", err)
 	}
 	return spkiHex, nil
+}
+
+func spkiHexFromDER(der []byte) (string, error) {
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return "", fmt.Errorf("parse cert: %w", err)
+	}
+	sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func extractSPKIHex(certPath string) (string, error) {
@@ -166,12 +170,7 @@ func extractSPKIHex(certPath string) (string, error) {
 	if blk == nil {
 		return "", errors.New("invalid PEM certificate")
 	}
-	cert, err := x509.ParseCertificate(blk.Bytes)
-	if err != nil {
-		return "", fmt.Errorf("parse cert: %w", err)
-	}
-	sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
-	return hex.EncodeToString(sum[:]), nil
+	return spkiHexFromDER(blk.Bytes)
 }
 
 func fileExists(path string) bool {

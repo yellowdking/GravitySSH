@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"sync"
 	"time"
@@ -10,6 +11,7 @@ import (
 
 const (
 	maxSlots      = 64
+	maxTotalBytes = 24 << 20
 	minTTLSeconds = 60
 	maxTTLSeconds = 600
 	defaultTTLSec = 300
@@ -24,38 +26,27 @@ var (
 type b64Bytes []byte
 
 func (b *b64Bytes) UnmarshalJSON(data []byte) error {
-	if len(data) < 2 || data[0] != '"' || data[len(data)-1] != '"' {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
 		return errors.New("expected base64 string")
 	}
-	inner := data[1 : len(data)-1]
-	raw := make([]byte, 0, len(inner))
-	for i := 0; i < len(inner); i++ {
-		if inner[i] == '\\' && i+1 < len(inner) && inner[i+1] == '/' {
-			raw = append(raw, '/')
-			i++
-			continue
-		}
-		raw = append(raw, inner[i])
-	}
-	if len(raw) == 0 {
-		clear(raw)
+	if s == "" {
 		return errors.New("empty base64 string")
 	}
-	decBuf := make([]byte, base64.StdEncoding.DecodedLen(len(raw)))
-	n, err := base64.StdEncoding.Decode(decBuf, raw)
-	clear(decBuf)
-	if err != nil || n == 0 {
-		clear(raw)
+	dec, err := base64.StdEncoding.DecodeString(s)
+	if err != nil || len(dec) == 0 {
+		clear(dec)
 		return errors.New("invalid base64")
 	}
-	*b = raw
+	*b = dec
 	return nil
 }
 
 func (b b64Bytes) MarshalJSON() ([]byte, error) {
-	out := make([]byte, len(b)+2)
+	encLen := base64.StdEncoding.EncodedLen(len(b))
+	out := make([]byte, encLen+2)
 	out[0] = '"'
-	copy(out[1:], b)
+	base64.StdEncoding.Encode(out[1:1+encLen], b)
 	out[len(out)-1] = '"'
 	return out, nil
 }
@@ -64,6 +55,7 @@ type slot struct {
 	salt       []byte
 	nonce      []byte
 	ciphertext []byte
+	size       int64
 	expiresAt  time.Time
 }
 
@@ -77,12 +69,15 @@ func zeroSlot(s *slot) {
 	s.salt = nil
 	s.nonce = nil
 	s.ciphertext = nil
+	s.size = 0
 }
 
 type memStore struct {
-	mu    sync.Mutex
-	slots map[string]*slot
-	now   func() time.Time
+	mu         sync.Mutex
+	slots      map[string]*slot
+	totalBytes int64
+	maxBytes   int64
+	now        func() time.Time
 }
 
 func newMemStore(nowFn func() time.Time) *memStore {
@@ -90,8 +85,9 @@ func newMemStore(nowFn func() time.Time) *memStore {
 		nowFn = func() time.Time { return time.Now().UTC() }
 	}
 	return &memStore{
-		slots: make(map[string]*slot, maxSlots),
-		now:   nowFn,
+		slots:    make(map[string]*slot, maxSlots),
+		maxBytes: maxTotalBytes,
+		now:      nowFn,
 	}
 }
 
@@ -106,11 +102,19 @@ func clampTTL(sec int) time.Duration {
 	return time.Duration(sec) * time.Second
 }
 
+func (m *memStore) releaseBytesLocked(n int64) {
+	m.totalBytes -= n
+	if m.totalBytes < 0 {
+		m.totalBytes = 0
+	}
+}
+
 func (m *memStore) purgeExpiredLocked(now time.Time) int {
 	removed := 0
 	for k, s := range m.slots {
 		if !now.Before(s.expiresAt) {
 			delete(m.slots, k)
+			m.releaseBytesLocked(s.size)
 			zeroSlot(s)
 			removed++
 		}
@@ -119,6 +123,14 @@ func (m *memStore) purgeExpiredLocked(now time.Time) int {
 }
 
 func (m *memStore) Drop(channelID string, salt, nonce, ciphertext []byte, ttlSeconds int) (time.Time, error) {
+	return m.drop(channelID, salt, nonce, ciphertext, ttlSeconds, true)
+}
+
+func (m *memStore) DropOwned(channelID string, salt, nonce, ciphertext []byte, ttlSeconds int) (time.Time, error) {
+	return m.drop(channelID, salt, nonce, ciphertext, ttlSeconds, false)
+}
+
+func (m *memStore) drop(channelID string, salt, nonce, ciphertext []byte, ttlSeconds int, clone bool) (time.Time, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -128,17 +140,25 @@ func (m *memStore) Drop(channelID string, salt, nonce, ciphertext []byte, ttlSec
 	if _, exists := m.slots[channelID]; exists {
 		return time.Time{}, errSlotExists
 	}
-	if len(m.slots) >= maxSlots {
+	slotSize := int64(len(salt) + len(nonce) + len(ciphertext))
+	if len(m.slots) >= maxSlots || m.totalBytes+slotSize > m.maxBytes {
 		return time.Time{}, errStoreFull
 	}
 
+	if clone {
+		salt = bytes.Clone(salt)
+		nonce = bytes.Clone(nonce)
+		ciphertext = bytes.Clone(ciphertext)
+	}
 	exp := now.Add(clampTTL(ttlSeconds))
 	m.slots[channelID] = &slot{
-		salt:       bytes.Clone(salt),
-		nonce:      bytes.Clone(nonce),
-		ciphertext: bytes.Clone(ciphertext),
+		salt:       salt,
+		nonce:      nonce,
+		ciphertext: ciphertext,
+		size:       slotSize,
 		expiresAt:  exp,
 	}
+	m.totalBytes += slotSize
 	return exp, nil
 }
 
@@ -151,6 +171,7 @@ func (m *memStore) Pickup(channelID string) (*slot, bool) {
 		return nil, false
 	}
 	delete(m.slots, channelID)
+	m.releaseBytesLocked(s.size)
 	now := m.now().UTC()
 	if !now.Before(s.expiresAt) {
 		zeroSlot(s)
@@ -165,6 +186,7 @@ func (m *memStore) Cancel(channelID string) {
 
 	if s, ok := m.slots[channelID]; ok {
 		delete(m.slots, channelID)
+		m.releaseBytesLocked(s.size)
 		zeroSlot(s)
 	}
 }
@@ -181,6 +203,12 @@ func (m *memStore) Len() int {
 	return len(m.slots)
 }
 
+func (m *memStore) TotalBytes() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.totalBytes
+}
+
 func (m *memStore) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -188,6 +216,7 @@ func (m *memStore) Close() {
 		delete(m.slots, k)
 		zeroSlot(s)
 	}
+	m.totalBytes = 0
 }
 
 func (m *memStore) StartSweeper(stop <-chan struct{}) {
