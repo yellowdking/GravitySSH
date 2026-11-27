@@ -8,18 +8,6 @@ import (
 	"time"
 )
 
-type dropRequest struct {
-	ChannelID  string   `json:"channelId"`
-	Salt       b64Bytes `json:"salt"`
-	Nonce      b64Bytes `json:"nonce"`
-	Ciphertext b64Bytes `json:"ciphertext"`
-	TTLSeconds int      `json:"ttlSeconds"`
-}
-
-type channelRequest struct {
-	ChannelID string `json:"channelId"`
-}
-
 type pairInitRequest struct {
 	ChannelID   string `json:"channelId"`
 	SenderToken string `json:"senderToken"`
@@ -95,74 +83,8 @@ func decodeHexToken64(s string) ([]byte, bool) {
 	return b, true
 }
 
-func (s *relayServer) handleDrop(w http.ResponseWriter, rawBody []byte) {
-	var req dropRequest
-	defer func() {
-		clear(req.Salt)
-		clear(req.Nonce)
-		clear(req.Ciphertext)
-	}()
-	if err := json.Unmarshal(rawBody, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, []byte(`{"error":"invalid_json"}`))
-		return
-	}
-	if !isLowerHex64(req.ChannelID) || len(req.Salt) == 0 || len(req.Nonce) == 0 || len(req.Ciphertext) == 0 {
-		writeJSON(w, http.StatusBadRequest, []byte(`{"error":"invalid_fields"}`))
-		return
-	}
-	exp, err := s.store.DropOwned(req.ChannelID, req.Salt, req.Nonce, req.Ciphertext, req.TTLSeconds)
-	if err != nil {
-		s.writeStoreErr(w, "", err)
-		return
-	}
-	// Ownership of decoded byte slices transferred to memStore; prevent defer from wiping stored data.
-	req.Salt, req.Nonce, req.Ciphertext = nil, nil, nil
-	writeOKExpiry(w, exp)
-}
-
-func (s *relayServer) handlePickup(w http.ResponseWriter, ip string, rawBody []byte) {
-	var req channelRequest
-	if err := json.Unmarshal(rawBody, &req); err != nil || !isLowerHex64(req.ChannelID) {
-		writeJSON(w, http.StatusBadRequest, []byte(`{"error":"invalid_channel"}`))
-		return
-	}
-	entry, ok := s.store.Pickup(req.ChannelID)
-	if !ok {
-		s.guard.RecordStrike(ip)
-		silentNotFound(w)
-		return
-	}
-	defer zeroSlot(entry)
-
-	resp, err := json.Marshal(struct {
-		Salt       b64Bytes `json:"salt"`
-		Nonce      b64Bytes `json:"nonce"`
-		Ciphertext b64Bytes `json:"ciphertext"`
-	}{
-		Salt:       b64Bytes(entry.salt),
-		Nonce:      b64Bytes(entry.nonce),
-		Ciphertext: b64Bytes(entry.ciphertext),
-	})
-	defer clear(resp)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, []byte(`{"error":"encode"}`))
-		return
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-func (s *relayServer) handleCancel(w http.ResponseWriter, rawBody []byte) {
-	var req channelRequest
-	if err := json.Unmarshal(rawBody, &req); err != nil || !isLowerHex64(req.ChannelID) {
-		writeJSON(w, http.StatusBadRequest, []byte(`{"error":"invalid_channel"}`))
-		return
-	}
-	s.store.Cancel(req.ChannelID)
-	writeJSON(w, http.StatusOK, []byte(`{"ok":true}`))
-}
-
 func (s *relayServer) handlePing(w http.ResponseWriter) {
-	writeJSON(w, http.StatusOK, []byte(`{"ok":true,"service":"sshsync","protocol":"gssh-sync-v1"}`))
+	writeJSON(w, http.StatusOK, []byte(`{"ok":true,"service":"sshsync","protocol":"gssh-sync-v2"}`))
 }
 
 func (s *relayServer) handlePairInit(w http.ResponseWriter, ip string, rawBody []byte) {

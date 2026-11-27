@@ -18,9 +18,9 @@ const (
 	tsHeaderName       = "X-GSSH-TS"
 	sigHeaderName      = "X-GSSH-Sig"
 	maxClockSkewSec    = 120
-	maxBodyBytes       = 2 << 20
-	maxSmallBodyBytes  = 4096
-	maxConcurrentDrops = 4
+	maxBodyBytes          = 2 << 20
+	maxSmallBodyBytes     = 4096
+	maxConcurrentApproves = 4
 )
 
 type relayServer struct {
@@ -40,7 +40,7 @@ func newRelayServer(store *memStore, guard *ipGuard, appGateKey string, nowFn fu
 		guard:        guard,
 		appGateKey:   []byte(appGateKey),
 		now:          nowFn,
-		heavyBodySem: make(chan struct{}, maxConcurrentDrops),
+		heavyBodySem: make(chan struct{}, maxConcurrentApproves),
 	}
 }
 
@@ -84,7 +84,7 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	limit := int64(maxSmallBodyBytes)
-	isHeavy := r.URL.Path == "/v1/drop" || r.URL.Path == "/v1/pair/approve"
+	isHeavy := r.URL.Path == "/v1/pair/approve"
 	if isHeavy {
 		limit = maxBodyBytes
 	}
@@ -124,12 +124,6 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.URL.Path {
-	case "/v1/drop":
-		s.handleDrop(w, rawBody)
-	case "/v1/pickup":
-		s.handlePickup(w, ip, rawBody)
-	case "/v1/cancel":
-		s.handleCancel(w, rawBody)
 	case "/v1/ping":
 		s.handlePing(w)
 	case "/v1/pair/init":
@@ -151,7 +145,7 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func isValidEndpoint(p string) bool {
 	switch p {
-	case "/v1/drop", "/v1/pickup", "/v1/cancel", "/v1/ping",
+	case "/v1/ping",
 		"/v1/pair/init", "/v1/pair/request", "/v1/pair/poll",
 		"/v1/pair/approve", "/v1/pair/reject", "/v1/pair/status", "/v1/pair/cancel":
 		return true

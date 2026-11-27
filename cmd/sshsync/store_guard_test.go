@@ -24,28 +24,42 @@ func TestStoreLimitsExpiryAndZeroing(t *testing.T) {
 	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
 	st := newMemStore(func() time.Time { return now })
 
+	tok := []byte("0123456789abcdef0123456789abcdef")
+	reqID0 := makeTestHex64("slot-req-0")
+
 	// Fill all 64 slots
 	for i := 0; i < maxSlots; i++ {
 		ch := makeTestChannel(fmt.Sprintf("slot-%d", i))
-		exp, err := st.Drop(ch, []byte("salt"), []byte("nonce"), []byte("ct"), 30)
-		if err != nil {
-			t.Fatalf("drop %d: %v", i, err)
+		ttl := 30
+		wantTTL := 60 * time.Second
+		if i == 1 {
+			ttl = 900
+			wantTTL = 600 * time.Second
 		}
-		// ttl 30 clamped to 60
-		if !exp.Equal(now.Add(60 * time.Second)) {
-			t.Fatalf("expected ttl 60s, got %v", exp.Sub(now))
+		exp, err := st.PairInit(ch, tok, ttl)
+		if err != nil {
+			t.Fatalf("pair init %d: %v", i, err)
+		}
+		if !exp.Equal(now.Add(wantTTL)) {
+			t.Fatalf("slot %d expected ttl %v, got %v", i, wantTTL, exp.Sub(now))
 		}
 	}
 	// 65th slot -> errStoreFull
-	if _, err := st.Drop(makeTestChannel("overflow"), []byte("salt"), []byte("nonce"), []byte("ct"), 0); err != errStoreFull {
+	if _, err := st.PairInit(makeTestChannel("overflow"), tok, 0); err != errStoreFull {
 		t.Fatalf("expected errStoreFull, got %v", err)
 	}
 
-	// Pickup returns slot and removes it; zeroSlot wipes bytes
+	// Approve slot-0 and read via PairStatus -> returns slot and removes it; zeroSlot wipes bytes
 	ch0 := makeTestChannel("slot-0")
-	entry, ok := st.Pickup(ch0)
-	if !ok {
-		t.Fatal("expected pickup hit")
+	if _, err := st.PairRequest(ch0, reqID0, []byte("rs"), []byte("rn"), []byte("rct")); err != nil {
+		t.Fatalf("pair request 0: %v", err)
+	}
+	if err := st.PairApprove(ch0, tok, reqID0, []byte("salt"), []byte("nonce"), []byte("secret-ct")); err != nil {
+		t.Fatalf("pair approve 0: %v", err)
+	}
+	state, entry, code := st.PairStatus(ch0, reqID0)
+	if code != http.StatusOK || state != "approved" || entry == nil {
+		t.Fatalf("expected approved status hit, got state=%q code=%d", state, code)
 	}
 	ctRef := entry.ciphertext
 	zeroSlot(entry)
@@ -55,10 +69,18 @@ func TestStoreLimitsExpiryAndZeroing(t *testing.T) {
 		}
 	}
 
-	// Advance past expiry -> Sweep removes all remaining 63 slots
+	// Advance 61s -> Sweep removes the 63 slots with 60s TTL (slot-1 has 600s TTL and remains)
 	now = now.Add(61 * time.Second)
-	if swept := st.Sweep(); swept != maxSlots-1 {
-		t.Fatalf("expected %d swept, got %d", maxSlots-1, swept)
+	if swept := st.Sweep(); swept != maxSlots-2 {
+		t.Fatalf("expected %d swept, got %d", maxSlots-2, swept)
+	}
+	if st.Len() != 1 {
+		t.Fatalf("expected 1 remaining slot with 600s TTL, len=%d", st.Len())
+	}
+	// Advance past 600s -> Sweep removes slot-1
+	now = now.Add(540 * time.Second)
+	if swept := st.Sweep(); swept != 1 {
+		t.Fatalf("expected 1 swept for 600s TTL slot, got %d", swept)
 	}
 	if st.Len() != 0 || st.TotalBytes() != 0 {
 		t.Fatalf("expected empty store, len=%d bytes=%d", st.Len(), st.TotalBytes())
@@ -69,28 +91,41 @@ func TestStoreMaxTotalBytesAndB64Escapes(t *testing.T) {
 	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
 	st := newMemStore(func() time.Time { return now })
 
+	tok := []byte("0123456789abcdef0123456789abcdef")
 	chunk := make([]byte, 2<<20) // 2 MiB raw binary
 	for i := 0; i < int(maxTotalBytes/(2<<20)); i++ {
 		ch := makeTestChannel(fmt.Sprintf("big-%d", i))
-		if _, err := st.Drop(ch, []byte{}, []byte{}, chunk, 120); err != nil {
-			t.Fatalf("drop big %d failed: %v", i, err)
+		reqID := makeTestHex64(fmt.Sprintf("big-req-%d", i))
+		if _, err := st.PairInit(ch, tok, 120); err != nil {
+			t.Fatalf("pair init big %d failed: %v", i, err)
+		}
+		if _, err := st.PairRequest(ch, reqID, []byte{1}, []byte{2}, []byte{3}); err != nil {
+			t.Fatalf("pair request big %d failed: %v", i, err)
+		}
+		if err := st.PairApprove(ch, tok, reqID, []byte{}, []byte{}, chunk); err != nil {
+			t.Fatalf("pair approve big %d failed: %v", i, err)
 		}
 	}
 	if st.TotalBytes() != maxTotalBytes {
 		t.Fatalf("expected totalBytes=%d, got %d", maxTotalBytes, st.TotalBytes())
 	}
-	if _, err := st.Drop(makeTestChannel("big-over"), []byte{1}, []byte{2}, []byte{3}, 120); err != errStoreFull {
+	chOver := makeTestChannel("big-over")
+	reqOver := makeTestHex64("big-over-req")
+	if _, err := st.PairInit(chOver, tok, 120); err != nil {
+		t.Fatalf("pair init big-over failed: %v", err)
+	}
+	if _, err := st.PairRequest(chOver, reqOver, []byte{1}, []byte{2}, []byte{3}); err != errStoreFull {
 		t.Fatalf("expected errStoreFull over maxTotalBytes, got %v", err)
 	}
 
-	// Reclaim via pickup -> new drop succeeds
-	entry, ok := st.Pickup(makeTestChannel("big-0"))
-	if !ok {
-		t.Fatal("expected pickup of big-0")
+	// Reclaim via PairStatus -> new PairRequest succeeds
+	state, entry, code := st.PairStatus(makeTestChannel("big-0"), makeTestHex64("big-req-0"))
+	if code != http.StatusOK || state != "approved" || entry == nil {
+		t.Fatalf("expected approved status of big-0, got state=%q code=%d", state, code)
 	}
 	zeroSlot(entry)
-	if _, err := st.Drop(makeTestChannel("big-ok"), []byte{1}, []byte{2}, []byte{3}, 120); err != nil {
-		t.Fatalf("expected drop after reclaim to succeed, got %v", err)
+	if _, err := st.PairRequest(chOver, reqOver, []byte{1}, []byte{2}, []byte{3}); err != nil {
+		t.Fatalf("expected pair request after reclaim to succeed, got %v", err)
 	}
 
 	// Standard JSON string unmarshaling (\u002b and \/) + raw binary storage + roundtrip re-encode
@@ -119,34 +154,36 @@ func TestRateLimitBurstAndOversizedStealthStrike(t *testing.T) {
 	guard := newIPGuard(nowFn)
 	srv := newRelayServer(newMemStore(nowFn), guard, testAppKey, nowFn)
 
-	body := []byte(fmt.Sprintf(`{"channelId":"%s"}`, makeTestChannel("rl")))
+	tok := makeTestHex64("rl-tok")
 	ip := "198.51.100.77"
 	for i := 0; i < 5; i++ {
+		body := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s"}`, makeTestChannel(fmt.Sprintf("rl-%d", i)), tok))
 		r := httptest.NewRecorder()
-		srv.ServeHTTP(r, signReq(t, http.MethodPost, "/v1/cancel", body, testAppKey, now.Unix(), ip))
+		srv.ServeHTTP(r, signReq(t, http.MethodPost, "/v1/pair/init", body, testAppKey, now.Unix(), ip))
 		if r.Code != http.StatusOK {
 			t.Fatalf("burst req %d expected 200, got %d", i+1, r.Code)
 		}
 	}
 	// 6th immediate request -> 429 rate limited
+	body6 := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s"}`, makeTestChannel("rl-5"), tok))
 	r6 := httptest.NewRecorder()
-	srv.ServeHTTP(r6, signReq(t, http.MethodPost, "/v1/cancel", body, testAppKey, now.Unix(), ip))
+	srv.ServeHTTP(r6, signReq(t, http.MethodPost, "/v1/pair/init", body6, testAppKey, now.Unix(), ip))
 	if r6.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 on 6th burst req, got %d", r6.Code)
 	}
 	// Advance 6s -> 1 token refilled -> 200
 	now = now.Add(6 * time.Second)
 	r7 := httptest.NewRecorder()
-	srv.ServeHTTP(r7, signReq(t, http.MethodPost, "/v1/cancel", body, testAppKey, now.Unix(), ip))
+	srv.ServeHTTP(r7, signReq(t, http.MethodPost, "/v1/pair/init", body6, testAppKey, now.Unix(), ip))
 	if r7.Code != http.StatusOK {
 		t.Fatalf("expected 200 after token refill, got %d", r7.Code)
 	}
 
-	// Oversized drop body (> 2 MiB) -> silent 404 + strike (never leaks 413)
+	// Oversized heavy approve body (> 2 MiB) -> silent 404 + strike (never leaks 413)
 	huge := bytes.Repeat([]byte("A"), maxBodyBytes+10)
 	badIP := "198.51.100.88"
 	for i := 0; i < strikeLimit; i++ {
-		req := signReq(t, http.MethodPost, "/v1/drop", huge, testAppKey, now.Unix(), badIP)
+		req := signReq(t, http.MethodPost, "/v1/pair/approve", huge, testAppKey, now.Unix(), badIP)
 		if i%2 == 1 {
 			// Also test unknown/chunked ContentLength streaming path
 			req.ContentLength = -1
@@ -355,18 +392,6 @@ func TestPairFullFlowAndBurnAfterRead(t *testing.T) {
 	srv.ServeHTTP(rDupInit, signReq(t, http.MethodPost, "/v1/pair/init", initBody, testAppKey, now.Unix(), senderIP))
 	if rDupInit.Code != http.StatusConflict || !strings.Contains(rDupInit.Body.String(), `"exists"`) {
 		t.Fatalf("duplicate pair/init expected 409 exists, got %d %s", rDupInit.Code, rDupInit.Body.String())
-	}
-
-	// v1 pickup & cancel must NOT affect pairing slot
-	rV1Pick := httptest.NewRecorder()
-	srv.ServeHTTP(rV1Pick, signReq(t, http.MethodPost, "/v1/pickup", []byte(fmt.Sprintf(`{"channelId":"%s"}`, ch)), testAppKey, now.Unix(), "198.51.100.32"))
-	if rV1Pick.Code != http.StatusNotFound {
-		t.Fatalf("v1 pickup on pair slot expected 404, got %d", rV1Pick.Code)
-	}
-	rV1Can := httptest.NewRecorder()
-	srv.ServeHTTP(rV1Can, signReq(t, http.MethodPost, "/v1/cancel", []byte(fmt.Sprintf(`{"channelId":"%s"}`, ch)), testAppKey, now.Unix(), "198.51.100.32"))
-	if rV1Can.Code != http.StatusOK || store.Len() != 1 {
-		t.Fatalf("v1 cancel must not delete pair slot: code=%d len=%d", rV1Can.Code, store.Len())
 	}
 
 	// 2. PairPoll while waiting
@@ -647,10 +672,18 @@ func TestPairStoreMemoryLimitsAndZeroing(t *testing.T) {
 	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
 	st := newMemStore(func() time.Time { return now })
 
-	// Fill store close to maxTotalBytes using Drop, leaving 100 bytes free
+	// Fill store close to maxTotalBytes using a pair slot, leaving 100 bytes free
 	bigCh := makeTestHex64("fill-store")
-	if _, err := st.Drop(bigCh, nil, nil, make([]byte, maxTotalBytes-100), 120); err != nil {
-		t.Fatalf("drop fill: %v", err)
+	bigTok := []byte("fedcba9876543210fedcba9876543210")
+	bigReqID := makeTestHex64("fill-store-req")
+	if _, err := st.PairInit(bigCh, bigTok, 120); err != nil {
+		t.Fatalf("pair init fill: %v", err)
+	}
+	if _, err := st.PairRequest(bigCh, bigReqID, []byte{1}, []byte{2}, []byte{3}); err != nil {
+		t.Fatalf("pair request fill: %v", err)
+	}
+	if err := st.PairApprove(bigCh, bigTok, bigReqID, nil, nil, make([]byte, maxTotalBytes-100)); err != nil {
+		t.Fatalf("pair approve fill: %v", err)
 	}
 
 	pairCh := makeTestHex64("pair-mem-limit")
@@ -668,7 +701,9 @@ func TestPairStoreMemoryLimitsAndZeroing(t *testing.T) {
 	}
 
 	// Free bigCh -> PairApprove succeeds and zeroes old req* slices
-	st.Cancel(bigCh)
+	if !st.PairCancel(bigCh, bigTok) {
+		t.Fatal("expected PairCancel(bigCh) to succeed")
+	}
 	sRef := st.slots[pairCh]
 	reqCTRef := sRef.reqCiphertext
 	if err := st.PairApprove(pairCh, tok, reqID, []byte("s1"), []byte("n1"), []byte("final-ct")); err != nil {

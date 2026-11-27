@@ -26,9 +26,9 @@ func TestSilent404AndAutoBan(t *testing.T) {
 		t.Fatalf("unexpected server headers: %+v", rec.Header())
 	}
 
-	body := []byte(fmt.Sprintf(`{"channelId":"%s"}`, makeTestChannel("skew")))
+	body := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s"}`, makeTestChannel("skew"), makeTestHex64("skew-tok")))
 	recSkew := httptest.NewRecorder()
-	srv.ServeHTTP(recSkew, signReq(t, http.MethodPost, "/v1/cancel", body, testAppKey, now.Unix()-125, "203.0.113.6"))
+	srv.ServeHTTP(recSkew, signReq(t, http.MethodPost, "/v1/pair/init", body, testAppKey, now.Unix()-125, "203.0.113.6"))
 	if recSkew.Code != http.StatusNotFound || recSkew.Body.Len() != 0 {
 		t.Fatalf("expected 404 on clock skew, got %d", recSkew.Code)
 	}
@@ -36,21 +36,21 @@ func TestSilent404AndAutoBan(t *testing.T) {
 	badIP := "203.0.113.99"
 	for i := 0; i < strikeLimit; i++ {
 		r := httptest.NewRecorder()
-		srv.ServeHTTP(r, signReq(t, http.MethodPost, "/v1/cancel", body, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", now.Unix(), badIP))
+		srv.ServeHTTP(r, signReq(t, http.MethodPost, "/v1/pair/init", body, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", now.Unix(), badIP))
 		if r.Code != http.StatusNotFound {
 			t.Fatalf("strike %d expected 404, got %d", i+1, r.Code)
 		}
 	}
 
 	rValid := httptest.NewRecorder()
-	srv.ServeHTTP(rValid, signReq(t, http.MethodPost, "/v1/cancel", body, testAppKey, now.Unix(), badIP))
+	srv.ServeHTTP(rValid, signReq(t, http.MethodPost, "/v1/pair/init", body, testAppKey, now.Unix(), badIP))
 	if rValid.Code != http.StatusNotFound {
 		t.Fatalf("expected banned IP to get 404, got %d", rValid.Code)
 	}
 
 	now = now.Add(banDuration + time.Second)
 	rAfter := httptest.NewRecorder()
-	srv.ServeHTTP(rAfter, signReq(t, http.MethodPost, "/v1/cancel", body, testAppKey, now.Unix(), badIP))
+	srv.ServeHTTP(rAfter, signReq(t, http.MethodPost, "/v1/pair/init", body, testAppKey, now.Unix(), badIP))
 	if rAfter.Code != http.StatusOK {
 		t.Fatalf("expected 200 after ban expiry, got %d", rAfter.Code)
 	}
@@ -79,7 +79,7 @@ func TestPingAuthAndSilent404(t *testing.T) {
 	}
 
 	// Authenticated POST /v1/ping -> 200 JSON
-	want := `{"ok":true,"service":"sshsync","protocol":"gssh-sync-v1"}`
+	want := `{"ok":true,"service":"sshsync","protocol":"gssh-sync-v2"}`
 	aRec := httptest.NewRecorder()
 	srv.ServeHTTP(aRec, signReq(t, http.MethodPost, "/v1/ping", []byte("{}"), testAppKey, now.Unix(), "203.0.113.22"))
 	if aRec.Code != http.StatusOK || aRec.Body.String() != want {

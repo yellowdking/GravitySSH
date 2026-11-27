@@ -63,14 +63,18 @@ func (g *ipGuard) getOrCreateLocked(ip string, now time.Time) *ipState {
 	return st
 }
 
-func (g *ipGuard) evictLocked(now time.Time) {
-	// Pass 1: drop expired/stale unbanned entries.
+func (g *ipGuard) sweepStaleLocked(now time.Time) {
 	for k, st := range g.ips {
 		unbanned := st.banUntil.IsZero() || !now.Before(st.banUntil)
 		if unbanned && now.Sub(st.lastSeen) > staleIPTTL {
 			delete(g.ips, k)
 		}
 	}
+}
+
+func (g *ipGuard) evictLocked(now time.Time) {
+	// Pass 1: drop expired/stale unbanned entries.
+	g.sweepStaleLocked(now)
 	if len(g.ips) < maxTrackedIPs {
 		return
 	}
@@ -187,13 +191,7 @@ func (g *ipGuard) RecordStrike(ip string) bool {
 func (g *ipGuard) Sweep() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	now := g.now().UTC()
-	for k, st := range g.ips {
-		unbanned := st.banUntil.IsZero() || !now.Before(st.banUntil)
-		if unbanned && now.Sub(st.lastSeen) > staleIPTTL {
-			delete(g.ips, k)
-		}
-	}
+	g.sweepStaleLocked(g.now().UTC())
 }
 
 func clientIP(r *http.Request) string {

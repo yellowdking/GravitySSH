@@ -56,7 +56,6 @@ func (b b64Bytes) MarshalJSON() ([]byte, error) {
 }
 
 type slot struct {
-	isPair        bool
 	state         string
 	senderToken   []byte
 	requestID     string
@@ -70,27 +69,34 @@ type slot struct {
 	expiresAt     time.Time
 }
 
+func clearReqPayload(s *slot) {
+	clear(s.reqSalt)
+	clear(s.reqNonce)
+	clear(s.reqCiphertext)
+	s.reqSalt = nil
+	s.reqNonce = nil
+	s.reqCiphertext = nil
+}
+
+func clearApprovedPayload(s *slot) {
+	clear(s.salt)
+	clear(s.nonce)
+	clear(s.ciphertext)
+	s.salt = nil
+	s.nonce = nil
+	s.ciphertext = nil
+}
+
 func zeroSlot(s *slot) {
 	if s == nil {
 		return
 	}
 	clear(s.senderToken)
-	clear(s.reqSalt)
-	clear(s.reqNonce)
-	clear(s.reqCiphertext)
-	clear(s.salt)
-	clear(s.nonce)
-	clear(s.ciphertext)
 	s.senderToken = nil
-	s.reqSalt = nil
-	s.reqNonce = nil
-	s.reqCiphertext = nil
-	s.salt = nil
-	s.nonce = nil
-	s.ciphertext = nil
+	clearReqPayload(s)
+	clearApprovedPayload(s)
 	s.requestID = ""
 	s.state = ""
-	s.isPair = false
 	s.size = 0
 }
 
@@ -144,78 +150,16 @@ func (m *memStore) purgeExpiredLocked(now time.Time) int {
 	return removed
 }
 
-func (m *memStore) Drop(channelID string, salt, nonce, ciphertext []byte, ttlSeconds int) (time.Time, error) {
-	return m.drop(channelID, salt, nonce, ciphertext, ttlSeconds, true)
-}
-
-func (m *memStore) DropOwned(channelID string, salt, nonce, ciphertext []byte, ttlSeconds int) (time.Time, error) {
-	return m.drop(channelID, salt, nonce, ciphertext, ttlSeconds, false)
-}
-
-func (m *memStore) drop(channelID string, salt, nonce, ciphertext []byte, ttlSeconds int, clone bool) (time.Time, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	now := m.now().UTC()
-	m.purgeExpiredLocked(now)
-
-	if _, exists := m.slots[channelID]; exists {
-		return time.Time{}, errSlotExists
-	}
-	slotSize := int64(len(salt) + len(nonce) + len(ciphertext))
-	if len(m.slots) >= maxSlots || m.totalBytes+slotSize > m.maxBytes {
-		return time.Time{}, errStoreFull
-	}
-
-	if clone {
-		salt = bytes.Clone(salt)
-		nonce = bytes.Clone(nonce)
-		ciphertext = bytes.Clone(ciphertext)
-	}
-	exp := now.Add(clampTTL(ttlSeconds))
-	m.slots[channelID] = &slot{
-		salt:       salt,
-		nonce:      nonce,
-		ciphertext: ciphertext,
-		size:       slotSize,
-		expiresAt:  exp,
-	}
-	m.totalBytes += slotSize
-	return exp, nil
-}
-
-func (m *memStore) Pickup(channelID string) (*slot, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
+func (m *memStore) lookupPairOwnedLocked(channelID string, senderToken []byte) (*slot, bool) {
 	s, ok := m.slots[channelID]
-	if !ok {
+	if !ok || len(s.senderToken) == 0 || subtle.ConstantTimeCompare(s.senderToken, senderToken) != 1 {
 		return nil, false
 	}
-	now := m.now().UTC()
-	if !now.Before(s.expiresAt) {
-		delete(m.slots, channelID)
-		m.releaseBytesLocked(s.size)
-		zeroSlot(s)
-		return nil, false
-	}
-	if s.isPair {
-		return nil, false
-	}
-	delete(m.slots, channelID)
-	m.releaseBytesLocked(s.size)
 	return s, true
 }
 
-func (m *memStore) Cancel(channelID string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if s, ok := m.slots[channelID]; ok && !s.isPair {
-		delete(m.slots, channelID)
-		m.releaseBytesLocked(s.size)
-		zeroSlot(s)
-	}
+func matchRequestID(s *slot, requestID string) bool {
+	return s.requestID != "" && subtle.ConstantTimeCompare([]byte(s.requestID), []byte(requestID)) == 1
 }
 
 func (m *memStore) PairInit(channelID string, senderToken []byte, ttlSeconds int) (time.Time, error) {
@@ -234,7 +178,6 @@ func (m *memStore) PairInit(channelID string, senderToken []byte, ttlSeconds int
 
 	exp := now.Add(clampTTL(ttlSeconds))
 	m.slots[channelID] = &slot{
-		isPair:      true,
 		state:       "waiting",
 		senderToken: bytes.Clone(senderToken),
 		expiresAt:   exp,
@@ -250,7 +193,7 @@ func (m *memStore) PairRequest(channelID, requestID string, salt, nonce, ciphert
 	m.purgeExpiredLocked(now)
 
 	s, ok := m.slots[channelID]
-	if !ok || !s.isPair {
+	if !ok {
 		return time.Time{}, errPairNotFound
 	}
 	if s.state != "waiting" {
@@ -279,8 +222,8 @@ func (m *memStore) PairPoll(channelID string, senderToken []byte) (state, reques
 	now := m.now().UTC()
 	m.purgeExpiredLocked(now)
 
-	s, ok := m.slots[channelID]
-	if !ok || !s.isPair || len(s.senderToken) == 0 || subtle.ConstantTimeCompare(s.senderToken, senderToken) != 1 {
+	s, ok := m.lookupPairOwnedLocked(channelID, senderToken)
+	if !ok {
 		return "", "", nil, nil, nil, http.StatusNotFound
 	}
 	if s.state == "requested" {
@@ -304,11 +247,8 @@ func (m *memStore) pairApprove(channelID string, senderToken []byte, requestID s
 	now := m.now().UTC()
 	m.purgeExpiredLocked(now)
 
-	s, ok := m.slots[channelID]
-	if !ok || !s.isPair || len(s.senderToken) == 0 || subtle.ConstantTimeCompare(s.senderToken, senderToken) != 1 {
-		return errPairNotFound
-	}
-	if s.requestID == "" || subtle.ConstantTimeCompare([]byte(s.requestID), []byte(requestID)) != 1 {
+	s, ok := m.lookupPairOwnedLocked(channelID, senderToken)
+	if !ok || !matchRequestID(s, requestID) {
 		return errPairNotFound
 	}
 	if s.state != "requested" {
@@ -321,12 +261,7 @@ func (m *memStore) pairApprove(channelID string, senderToken []byte, requestID s
 		return errStoreFull
 	}
 
-	clear(s.reqSalt)
-	clear(s.reqNonce)
-	clear(s.reqCiphertext)
-	s.reqSalt = nil
-	s.reqNonce = nil
-	s.reqCiphertext = nil
+	clearReqPayload(s)
 	m.releaseBytesLocked(s.size)
 
 	if clone {
@@ -350,26 +285,13 @@ func (m *memStore) PairReject(channelID string, senderToken []byte, requestID st
 	now := m.now().UTC()
 	m.purgeExpiredLocked(now)
 
-	s, ok := m.slots[channelID]
-	if !ok || !s.isPair || len(s.senderToken) == 0 || subtle.ConstantTimeCompare(s.senderToken, senderToken) != 1 {
-		return errPairNotFound
-	}
-	if s.requestID == "" || subtle.ConstantTimeCompare([]byte(s.requestID), []byte(requestID)) != 1 {
+	s, ok := m.lookupPairOwnedLocked(channelID, senderToken)
+	if !ok || !matchRequestID(s, requestID) {
 		return errPairNotFound
 	}
 
-	clear(s.reqSalt)
-	clear(s.reqNonce)
-	clear(s.reqCiphertext)
-	clear(s.salt)
-	clear(s.nonce)
-	clear(s.ciphertext)
-	s.reqSalt = nil
-	s.reqNonce = nil
-	s.reqCiphertext = nil
-	s.salt = nil
-	s.nonce = nil
-	s.ciphertext = nil
+	clearReqPayload(s)
+	clearApprovedPayload(s)
 	m.releaseBytesLocked(s.size)
 	s.size = 0
 	s.state = "rejected"
@@ -389,7 +311,7 @@ func (m *memStore) PairStatus(channelID, requestID string) (state string, entry 
 	m.purgeExpiredLocked(now)
 
 	s, ok := m.slots[channelID]
-	if !ok || !s.isPair || s.requestID == "" || subtle.ConstantTimeCompare([]byte(s.requestID), []byte(requestID)) != 1 {
+	if !ok || !matchRequestID(s, requestID) {
 		return "", nil, http.StatusNotFound
 	}
 
@@ -417,8 +339,8 @@ func (m *memStore) PairCancel(channelID string, senderToken []byte) bool {
 	now := m.now().UTC()
 	m.purgeExpiredLocked(now)
 
-	s, ok := m.slots[channelID]
-	if !ok || !s.isPair || len(s.senderToken) == 0 || subtle.ConstantTimeCompare(s.senderToken, senderToken) != 1 {
+	s, ok := m.lookupPairOwnedLocked(channelID, senderToken)
+	if !ok {
 		return false
 	}
 	delete(m.slots, channelID)
