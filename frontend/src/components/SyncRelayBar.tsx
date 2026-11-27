@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { Check, ChevronDown, ChevronRight, Copy, Loader2, RotateCcw, Save, Server, Wifi } from 'lucide-react'
 import type { AppSettings } from '../types'
 import { api } from '../wailsApi'
@@ -14,7 +14,8 @@ interface Props {
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
 
-const DOCKER_CMD = 'docker run -d --name sshsync --restart unless-stopped -p 54843:54843 bbplin/sshsync'
+const DOCKER_CMD =
+  'docker run -d --name sshsync --restart unless-stopped --read-only --cap-drop=ALL --security-opt=no-new-privileges --memory=96m --pids-limit=64 -p 54843:54843 bbplin/sshsync'
 
 export const SyncRelayBar: React.FC<Props> = ({
   settings, relayInput, defaultRelay, onRelayInputChange, onSettingsSaved, onToast,
@@ -25,37 +26,66 @@ export const SyncRelayBar: React.FC<Props> = ({
   const [showDocker, setShowDocker] = useState(false)
   const { copied: copiedCmd, copy } = useCopyFeedback()
 
+  const mountedRef = useRef(true)
+  const savingRef = useRef(false)
+  const testReqIdRef = useRef(0)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      testReqIdRef.current++
+    }
+  }, [])
+
+  useEffect(() => {
+    testReqIdRef.current++
+    setTesting(false)
+    setTestRes(null)
+  }, [relayInput])
+
   const trimmed = relayInput.trim()
   const isCustom = trimmed !== '' && trimmed !== defaultRelay
 
   const persistRelay = async (val: string, msg: string) => {
+    if (savingRef.current) return
+    savingRef.current = true
     setSaving(true)
     try {
       const saved = await api.saveSettings({ ...settings, syncRelayUrl: val })
+      if (!mountedRef.current) return
       onSettingsSaved(saved)
       onRelayInputChange(saved.syncRelayUrl || '')
       onToast(msg)
     } catch (err) {
-      onToast(errMsg(err), 'error')
+      if (mountedRef.current) onToast(errMsg(err), 'error')
     } finally {
-      setSaving(false)
+      savingRef.current = false
+      if (mountedRef.current) setSaving(false)
     }
   }
 
   const handleTest = async () => {
+    const reqId = ++testReqIdRef.current
     setTesting(true)
     setTestRes(null)
     try {
       const ms = await api.testSyncRelay(trimmed || defaultRelay)
+      if (!mountedRef.current || testReqIdRef.current !== reqId) return
       setTestRes({ ok: true, text: `✓ 已连通 (${ms}ms)` })
     } catch (err) {
+      if (!mountedRef.current || testReqIdRef.current !== reqId) return
       setTestRes({ ok: false, text: errMsg(err) })
     } finally {
-      setTesting(false)
+      if (mountedRef.current && testReqIdRef.current === reqId) {
+        setTesting(false)
+      }
     }
   }
 
   const handleReset = () => {
+    testReqIdRef.current++
+    setTesting(false)
     onRelayInputChange('')
     setTestRes(null)
     if (settings.syncRelayUrl) void persistRelay('', '已恢复默认内置中继')
@@ -88,7 +118,7 @@ export const SyncRelayBar: React.FC<Props> = ({
         <input
           type="text"
           value={relayInput}
-          onChange={(e) => { onRelayInputChange(e.target.value); setTestRes(null) }}
+          onChange={(e) => { testReqIdRef.current++; setTesting(false); onRelayInputChange(e.target.value); setTestRes(null) }}
           placeholder="默认内置中继，或输入新 VPS 地址如 1.2.3.4:54843"
           className="flex-1 min-w-0 rounded-lg bg-[#0b0d12] border border-ag-border px-2.5 py-1.5 font-mono text-xs text-ag-text placeholder:text-ag-subtle focus:outline-none focus:border-indigo-500/60"
         />

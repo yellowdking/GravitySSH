@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { CheckCircle2, Clock, Loader2, RefreshCw, ShieldAlert, ShieldCheck, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Clock, Loader2, RefreshCw, ShieldAlert, ShieldCheck, XCircle } from 'lucide-react'
 import type { SyncImportSummary, SyncReceivePreview, SyncReceiveWaitSession } from '../syncTypes'
 import { api } from '../wailsApi'
 import { errMsg } from '../utils/errors'
@@ -9,9 +9,13 @@ import { SyncPreviewCard } from './SyncPreviewCard'
 
 interface Props {
   relayUrl: string
+  onBusyChange?: (busy: boolean) => void
   onSynced: () => void
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
+
+const OFFLINE_EXPIRY_GRACE_MS = 30_000
+const MAX_CONSECUTIVE_POLL_ERRORS_NO_EXPIRY = 20
 
 function formatSyncInput(raw: string): string {
   const trimmed = raw.trim()
@@ -35,12 +39,13 @@ function isRetryablePollError(msg: string): boolean {
   )
 }
 
-export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast }) => {
+export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onBusyChange, onSynced, onToast }) => {
   const [recvCode, setRecvCode] = useState('')
   const [inputCode, setInputCode] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [waitSess, setWaitSess] = useState<SyncReceiveWaitSession | null>(null)
   const [errorBanner, setErrorBanner] = useState('')
+  const [pollError, setPollError] = useState('')
   const [applying, setApplying] = useState(false)
   const [preview, setPreview] = useState<SyncReceivePreview | null>(null)
   const [mode, setMode] = useState<'merge' | 'overwrite'>('merge')
@@ -49,10 +54,21 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
   const waitLeft = useSyncCountdown(waitSess?.expiresAt)
 
   const mountedRef = useRef(true)
+  const submittingRef = useRef(false)
+  const applyingRef = useRef(false)
+  const pollErrorCountRef = useRef(0)
   const waitSessRef = useRef<SyncReceiveWaitSession | null>(null)
   waitSessRef.current = waitSess
   const previewRef = useRef<SyncReceivePreview | null>(null)
   previewRef.current = preview
+
+  const tabBusy = submitting || applying
+  useEffect(() => {
+    onBusyChange?.(tabBusy)
+    return () => {
+      onBusyChange?.(false)
+    }
+  }, [tabBusy, onBusyChange])
 
   useEffect(() => {
     mountedRef.current = true
@@ -107,12 +123,17 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
           }
           return false
         }
+        if (pollErrorCountRef.current > 0) {
+          pollErrorCountRef.current = 0
+          setPollError('')
+        }
         switch (res.status) {
           case 'pending':
             return true
           case 'rejected': {
             const msg = res.message || '发送端已拒绝此次同步请求'
             setWaitSess(null)
+            setPollError('')
             setErrorBanner(msg)
             onToast(msg, 'error')
             void refreshRecvCode()
@@ -121,13 +142,16 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
           case 'expired': {
             const msg = res.message || '同步码已过期或发送端已取消'
             setWaitSess(null)
+            setPollError('')
             setErrorBanner(msg)
             onToast(msg, 'error')
+            void refreshRecvCode()
             return false
           }
           case 'ready':
             if (res.preview) {
               setWaitSess(null)
+              setPollError('')
               setErrorBanner('')
               setPreview(res.preview)
               setMode('merge')
@@ -141,11 +165,31 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
         if (!mountedRef.current || waitSessRef.current?.waitId !== current.waitId) return false
         const msg = errMsg(err)
         if (!isRetryablePollError(msg)) {
+          pollErrorCountRef.current = 0
           setWaitSess(null)
+          setPollError('')
           setErrorBanner(msg)
           onToast(msg, 'error')
           void refreshRecvCode()
           return false
+        }
+        const cnt = ++pollErrorCountRef.current
+        const expiresMs = current.expiresAt ? new Date(current.expiresAt).getTime() : Number.NaN
+        const expiredPastGrace = Number.isFinite(expiresMs)
+          ? Date.now() >= expiresMs + OFFLINE_EXPIRY_GRACE_MS
+          : cnt >= MAX_CONSECUTIVE_POLL_ERRORS_NO_EXPIRY
+        if (expiredPastGrace) {
+          pollErrorCountRef.current = 0
+          const timeoutMsg = '连接中继失败且等待已超过有效期，请检查网络后重试'
+          setWaitSess(null)
+          setPollError('')
+          setErrorBanner(timeoutMsg)
+          onToast(timeoutMsg, 'error')
+          void refreshRecvCode()
+          return false
+        }
+        if (cnt >= 2) {
+          setPollError(`轮询中继失败（连续 ${cnt} 次）：${msg}`)
         }
         return true
       }
@@ -153,10 +197,14 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
   })
 
   const handleStartVerify = async () => {
+    if (submittingRef.current) return
     if (!inputCode.trim()) { onToast('请输入发送端 8 位同步码或粘贴链接', 'error'); return }
     if (!recvCode.trim()) { onToast('正在生成本机确认码，请稍候', 'error'); return }
+    submittingRef.current = true
+    pollErrorCountRef.current = 0
     setSubmitting(true)
     setErrorBanner('')
+    setPollError('')
     setSummary(null)
     try {
       const ws = await api.startSyncReceive(inputCode, recvCode, relayUrl)
@@ -172,6 +220,7 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
         onToast(msg, 'error')
       }
     } finally {
+      submittingRef.current = false
       if (mountedRef.current) setSubmitting(false)
     }
   }
@@ -179,11 +228,15 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
   const handleCancelWait = () => {
     if (!waitSess) return
     const wid = waitSess.waitId
+    pollErrorCountRef.current = 0
+    setPollError('')
     setWaitSess(null)
     void api.cancelSyncReceive(wid).catch(() => {})
+    void refreshRecvCode()
   }
 
   const handleDiscardPreview = () => {
+    if (applyingRef.current) return
     if (preview) {
       void api.clearSyncPreview(preview.previewId).catch(() => {})
     }
@@ -192,7 +245,8 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
   }
 
   const handleApply = async () => {
-    if (!preview) return
+    if (!preview || applyingRef.current) return
+    applyingRef.current = true
     setApplying(true)
     try {
       const res = await api.applySyncReceive(preview.previewId, mode)
@@ -206,6 +260,7 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
     } catch (err) {
       if (mountedRef.current) onToast(errMsg(err), 'error')
     } finally {
+      applyingRef.current = false
       if (mountedRef.current) setApplying(false)
     }
   }
@@ -270,9 +325,15 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
           </p>
           <div className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-300">
             <Clock className="w-3.5 h-3.5" />
-            <span>{waitLeft <= 0 ? '即将过期' : `等待超时 ${fmtSec(waitLeft)}`}</span>
+            <span>{waitLeft <= 0 ? '即将过期 · 等待中继确认状态' : `等待超时 ${fmtSec(waitLeft)}`}</span>
           </div>
         </div>
+        {pollError && (
+          <div className="rounded-xl bg-amber-500/10 border border-amber-500/35 px-3.5 py-2.5 flex items-center gap-2 text-xs text-amber-200">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-300" />
+            <span className="break-all">{pollError}</span>
+          </div>
+        )}
         <button
           onClick={handleCancelWait}
           className="w-full py-2.5 rounded-xl bg-rose-500/[0.12] hover:bg-rose-500/20 border border-rose-500/30 text-xs font-medium text-rose-300 flex items-center justify-center gap-1.5 transition"
@@ -317,12 +378,16 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
         </label>
         <input
           type="text"
+          disabled={submitting}
           value={inputCode}
           onChange={(e) => setInputCode(formatSyncInput(e.target.value))}
-          onKeyDown={(e) => { if (e.key === 'Enter' && !submitting) void handleStartVerify() }}
+          onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return
+            if (e.key === 'Enter' && !submittingRef.current) void handleStartVerify()
+          }}
           placeholder="XXXX-XXXX"
           autoFocus
-          className="w-full rounded-xl bg-[#0b0d12] border border-ag-border px-4 py-3 text-center font-mono text-xl tracking-[0.22em] text-ag-text placeholder:text-ag-subtle focus:outline-none focus:border-indigo-500/70 transition"
+          className="w-full rounded-xl bg-[#0b0d12] border border-ag-border px-4 py-3 text-center font-mono text-xl tracking-[0.22em] text-ag-text placeholder:text-ag-subtle focus:outline-none focus:border-indigo-500/70 transition disabled:opacity-60"
         />
         <p className="text-[11px] text-ag-muted">
           点击后将使用发送端同步码加密提交本机确认码，待发送端核对一致并同意后，再用双方密钥联合解密预览。
