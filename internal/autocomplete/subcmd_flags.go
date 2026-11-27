@@ -45,7 +45,7 @@ var (
 		"journalctl":          parseSpecs("-u :指定服务;-xe:最新错误;-f:实时跟踪;--since :起始时间;--no-pager:不分页;-n 100:近100行"),
 		"systemctl":           parseSpecs("--now:立即生效;--failed:失败单元;--type=service:仅服务;--no-pager:不分页"),
 		"rsync":               parseSpecs("-avzP :归档进度;--delete :删除多余;--exclude=:排除路径;--dry-run:模拟演练"),
-		"chmod":               parseSpecs("-R :递归修改;+x :执行权限"),
+		"chmod":               parseSpecs("-R :递归修改"),
 		"kubectl":             parseSpecs("-A:全部命名空间;-n :指定命名空间;-o wide:宽表输出;-f :清单文件"),
 		"ss":                  parseSpecs("-tulpn:监听端口;-antp:全部TCP;-s:连接统计"),
 		"nginx":               parseSpecs("-t:校验语法;-s reload:平滑重载"),
@@ -68,11 +68,14 @@ func MatchFlags(eff []string, curTok string) []SubcmdSpec {
 	used := make(map[string]bool, len(prior))
 	nonFlags := make([]string, 0, len(prior))
 	nonFlags = append(nonFlags, strings.ToLower(prior[0]))
-	for _, t := range prior[1:] {
+	for i := 1; i < len(prior); i++ {
+		t := prior[i]
 		if strings.HasPrefix(t, "-") {
 			used[t] = true
 			if eq := strings.IndexByte(t, '='); eq > 0 {
 				used[t[:eq+1]], used[t[:eq]] = true, true
+			} else if FileFlags[strings.ToLower(t)] && i+1 < len(prior) {
+				i++
 			}
 		} else {
 			nonFlags = append(nonFlags, strings.ToLower(t))

@@ -13,8 +13,7 @@ func sq(in string) []models.CompletionItem {
 }
 
 func TestZeroShortcutsAndMidWordNoise(t *testing.T) {
-	sc := []models.CommandShortcut{{Name: "部署", Command: "docker compose up -d", Pinned: true}}
-	for _, it := range Suggest("docker ", sc, nil, true, false, 8) {
+	for _, it := range SuggestWithContext(SuggestRequest{Input: "docker ", Limit: 8}) {
 		if it.Source == "shortcut" {
 			t.Fatalf("shortcuts forbidden: %+v", it)
 		}
@@ -71,6 +70,11 @@ func TestContextualFlagsAndDedup(t *testing.T) {
 			t.Fatalf("-d: %+v", up)
 		}
 	}
+	// FileFlags value arg skipped when resolving flag context: docker compose -f compose.yml up - -> docker compose up flags
+	withFile := sq("docker compose -f compose.yml up -")
+	if len(withFile) == 0 || withFile[0].Source != "flag" || withFile[0].Command != "-d" {
+		t.Fatalf("file-flag skip failed: %+v", withFile)
+	}
 }
 
 func TestFilesDirsOnlyExtBoostAndHome(t *testing.T) {
@@ -93,8 +97,30 @@ func TestFilesDirsOnlyExtBoostAndHome(t *testing.T) {
 	if dir, ok := ExtractPathContextWithHome("cd ~/work/a", "/srv", "/home/alice"); !ok || dir != "/home/alice/work" {
 		t.Fatalf("~/: %q %v", dir, ok)
 	}
-	if _, ok := ExtractPathContext("docker c", "/srv"); ok {
+	// Empty homeDir must NOT default to "/"
+	if dir, ok := ExtractPathContextWithHome("cd ~/work/a", "/srv", ""); ok || dir != "" {
+		t.Fatalf("empty homeDir should not expand to /: dir=%q ok=%v", dir, ok)
+	}
+	// Quoted ~/ must NOT expand to homeDir
+	if dir, ok := ExtractPathContextWithHome(`cd "~/work/a`, "/srv", "/home/alice"); !ok || dir != "/srv/~/work" {
+		t.Fatalf("quoted ~/ should stay relative to cwd: dir=%q ok=%v", dir, ok)
+	}
+	if _, ok := ExtractPathContextWithHome("docker c", "/srv", "/home/alice"); ok {
 		t.Fatal("suppress")
+	}
+
+	// $HOME/... must NOT escape leading $ while literal $ in filename IS escaped
+	if got := EscapePathToken("$HOME/", "app", true, 0); got != "$HOME/app/" {
+		t.Fatalf("unquoted $HOME escaped: %q", got)
+	}
+	if got := EscapePathToken("$HOME/my dir/", "price$5.txt", false, 0); got != `$HOME/my\ dir/price\$5.txt` {
+		t.Fatalf("mixed $HOME + $file: %q", got)
+	}
+	if got := EscapePathToken("${HOME}/", "my dir", true, '"'); got != `"${HOME}/my dir/` {
+		t.Fatalf("double-quoted ${HOME}: %q", got)
+	}
+	if dir, ok := ExtractPathContextWithHome("cd $HOME/work/a", "/srv", "/home/alice"); !ok || dir != "/home/alice/work" {
+		t.Fatalf("$HOME/: %q %v", dir, ok)
 	}
 }
 
@@ -123,8 +149,18 @@ func TestHistoryAffinityFrecencyAndDenylist(t *testing.T) {
 		mk("curl https://b.io/api", "s2", -time.Hour),
 		mk("curl https://a.io/ok", "s1", -2*time.Hour),
 		mk("curl https://a.io/ok", "s1", -10*time.Minute),
-		mk("rm -rf /", "s1", 0), mk("sudo rm -rf /*", "s1", 0),
-		mk("TOKEN=abc curl https://s.io", "s1", 0), mk("mkfs.ext4 /dev/sda1", "s1", 0), mk("reboot", "s1", 0),
+		mk("rm -rf /", "s1", 0),
+		mk("sudo rm -rf /*", "s1", 0),
+		mk("/bin/rm -rf /", "s1", 0),
+		mk("cat zero | dd of=/dev/sda", "s1", 0),
+		mk("rm -rf / & echo ok", "s1", 0),
+		mk("TOKEN=abc curl https://s.io", "s1", 0),
+		mk("AWS_SECRET_ACCESS_KEY=xyz aws s3 ls", "s1", 0),
+		mk("PASSWD=123 mysql", "s1", 0),
+		mk("API_KEY=sk-123 curl https://s.io", "s1", 0),
+		mk(`curl -H "Authorization: Bearer secret123" https://s.io`, "s1", 0),
+		mk("mkfs.ext4 /dev/sda1", "s1", 0),
+		mk("reboot", "s1", 0),
 	}
 	hq := func(in string) []models.CompletionItem {
 		return SuggestWithContext(SuggestRequest{Input: in, ServerID: "s1", History: hist, IncludeHistory: true, Limit: 5})
@@ -132,7 +168,7 @@ func TestHistoryAffinityFrecencyAndDenylist(t *testing.T) {
 	if it := hq("curl https://"); len(it) != 2 || it[0].Source != "history_local" || it[0].Category != "本机历史" || it[1].Source != "history" {
 		t.Fatalf("hist: %+v", it)
 	}
-	for _, q := range []string{"rm -r", "sudo rm", "mkfs", "rebo", "TOKEN="} {
+	for _, q := range []string{"rm -r", "sudo rm", "/bin/rm", "cat zero", "mkfs", "rebo", "TOKEN=", "AWS_SECRET", "PASSWD=", "API_KEY=", "curl -H"} {
 		for _, it := range hq(q) {
 			if it.Source == "history_local" || it.Source == "history" {
 				t.Fatalf("deny %q: %+v", q, it)

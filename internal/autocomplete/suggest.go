@@ -16,11 +16,13 @@ type SuggestRequest struct {
 	Limit                         int
 }
 
-var rootCatMap = map[string]string{
-	"docker": "Docker", "systemctl": "Systemd", "journalctl": "Systemd", "git": "Git", "kubectl": "K8s",
-	"apt": "APT", "apt-get": "APT", "apk": "APK", "dnf": "DNF", "yum": "YUM", "pm2": "PM2",
-	"tmux": "终端", "nginx": "Nginx", "ufw": "防火墙", "firewall-cmd": "防火墙", "ss": "网络", "ip": "网络", "curl": "网络",
-}
+var rootDescByCmd = func() map[string]string {
+	m := make(map[string]string, len(RootCommandList))
+	for _, s := range RootCommandList {
+		m[strings.ToLower(s.Token)] = s.Desc
+	}
+	return m
+}()
 
 func mkItem(cmd, desc, cat, src, ins string, score int) models.CompletionItem {
 	return models.CompletionItem{Command: cmd, Description: desc, Category: cat, Source: src, InsertText: ins, Score: score}
@@ -37,22 +39,6 @@ func sortTopItems(out []models.CompletionItem, limit int) []models.CompletionIte
 		return out[:limit]
 	}
 	return out
-}
-
-func ComputeInsertSuffix(currentInput, fullCommand string) string {
-	_, ins := ComputeCompletionEdit(currentInput, fullCommand)
-	return ins
-}
-
-func Suggest(input string, _ []models.CommandShortcut, history []models.CommandRecord, _, includeHistory bool, limit int) []models.CompletionItem {
-	return SuggestWithContext(SuggestRequest{Input: input, History: history, IncludeHistory: includeHistory, Limit: limit})
-}
-
-func SuggestWithFiles(input, cwd string, dirEntries []models.SFTPFileEntry, _ []models.CommandShortcut, history []models.CommandRecord, _, includeHistory bool, limit int) []models.CompletionItem {
-	return SuggestWithContext(SuggestRequest{
-		Input: input, CWD: cwd, CWDEntries: dirEntries, TargetEntries: dirEntries,
-		History: history, IncludeHistory: includeHistory, Limit: limit,
-	})
 }
 
 func specInsert(prefix string, s SubcmdSpec) string {
@@ -98,7 +84,7 @@ func SuggestWithContext(req SuggestRequest) []models.CompletionItem {
 		if len(entries) == 0 && path.Clean(p.TargetDir) == path.Clean(cwd) {
 			entries = req.CWDEntries
 		}
-		for _, it := range suggestFileCandidates(p, req.Input, entries, sig) {
+		for _, it := range suggestFileCandidates(p, req.Input, entries) {
 			add(it)
 			fileHits++
 		}
@@ -114,11 +100,11 @@ func SuggestWithContext(req SuggestRequest) []models.CompletionItem {
 	// Stage 3: Subcommands
 	if !isFlag && fileHits == 0 && !strings.Contains(cur, "/") && (len(p.Effective) >= 2 || (len(p.Effective) == 1 && p.EndsWithSpace)) {
 		cmdPath := NormalizedCmdPath(p.Effective, p.EndsWithSpace)
-		cat := rootCatMap[strings.ToLower(p.Effective[0])]
+		cat := rootDescByCmd[strings.ToLower(p.Effective[0])]
 		if cat == "" {
 			cat = "命令"
 		}
-		for i, s := range MatchSubcommands(p.Effective, p.EndsWithSpace) {
+		for i, s := range matchSubcommandsForPath(cmdPath, p.Effective, p.EndsWithSpace) {
 			sc := min(680, max(480, 560-i*5+FolderSubcmdBoost(cmdPath, s.Token, sig)))
 			add(mkItem(s.Token, s.Desc, cat, "subcmd", specInsert(p.TokPrefix, s), sc))
 		}
@@ -130,7 +116,7 @@ func SuggestWithContext(req SuggestRequest) []models.CompletionItem {
 			add(it)
 		}
 	}
-	if isFirst && !p.PathActive && len(cur) >= 1 {
+	if isFirst && !p.PathActive && cur != "" {
 		loCur := strings.ToLower(cur)
 		for i, s := range FolderRootSuggestions(cur, sig) {
 			add(mkItem(s.Token, s.Desc, "目录上下文", "builtin", specInsert(p.TokPrefix, s), max(440, 470-i*10)))
