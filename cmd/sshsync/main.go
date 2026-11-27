@@ -88,9 +88,10 @@ func main() {
 		log.Fatalf("app gate key failed: %v", err)
 	}
 
+	certs := newCertStore(certPath, keyPath, cert)
 	tlsCfg := &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{cert},
+		MinVersion:     tls.VersionTLS13,
+		GetCertificate: certs.GetCertificate,
 	}
 
 	store := newMemStore(nil)
@@ -117,6 +118,10 @@ func main() {
 		}
 	}()
 
+	reloadCh, stopReloadSignal := startReloadSignal()
+	defer stopReloadSignal()
+	reloadDone := startCertReloader(certs, reloadCh, stopCh, nil)
+
 	handler := newRelayServer(store, guard, appGateKey, nil)
 	srv := &http.Server{
 		Handler:           handler,
@@ -133,8 +138,11 @@ func main() {
 	defer signal.Stop(sigCh)
 
 	log.Printf("sshsync listening on %s (TLS 1.3, SPKI=%s)", *listenAddr, spkiHex)
-	if err := serveWithGracefulShutdown(srv, ln, store, stopCh, sigCh, 5*time.Second); err != nil {
-		log.Fatalf("serve error: %v", err)
+	serveErr := serveWithGracefulShutdown(srv, ln, store, stopCh, sigCh, 5*time.Second)
+	stopReloadSignal()
+	<-reloadDone
+	if serveErr != nil {
+		log.Fatalf("serve error: %v", serveErr)
 	}
 }
 
@@ -214,6 +222,7 @@ func runHealthcheck(listenAddr, appGateKey string, timeout time.Duration) error 
 	req.Header.Set(clientHeaderName, clientHeaderValue)
 	req.Header.Set(tsHeaderName, tsStr)
 	req.Header.Set(sigHeaderName, sigHex)
+	req.Header.Set(protoHeaderName, strconv.Itoa(MaxProtoVersion))
 
 	tr := &http.Transport{
 		DisableKeepAlives: true,

@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,12 +18,26 @@ const (
 	clientHeaderValue     = "GravitySSH/1"
 	tsHeaderName          = "X-GSSH-TS"
 	sigHeaderName         = "X-GSSH-Sig"
+	protoHeaderName       = "X-GSSH-Proto"
+	protoMinHeaderName    = "X-GSSH-Proto-Min"
+	protoMaxHeaderName    = "X-GSSH-Proto-Max"
+	MinProtoVersion       = 1
+	MaxProtoVersion       = 2
 	maxClockSkewSec       = 120
 	maxBodyBytes          = 2 << 20
 	maxSmallBodyBytes     = 4096
 	maxConcurrentApproves = 4
 	initialBodyBufBytes   = 4096
 	readBodyChunkBytes    = 16 * 1024
+)
+
+var (
+	protoMinHeaderValue     = strconv.Itoa(MinProtoVersion)
+	protoMaxHeaderValue     = strconv.Itoa(MaxProtoVersion)
+	unsupportedProtoPayload = []byte(fmt.Sprintf(
+		`{"error":"unsupported_protocol","minVersion":%d,"maxVersion":%d}`,
+		MinProtoVersion, MaxProtoVersion,
+	))
 )
 
 type relayServer struct {
@@ -68,6 +84,31 @@ func writeJSON(w http.ResponseWriter, status int, payload []byte) {
 func writeJSONClose(w http.ResponseWriter, status int, payload []byte) {
 	w.Header().Set("Connection", "close")
 	writeJSON(w, status, payload)
+}
+
+func setProtoVersionHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set(protoMinHeaderName, protoMinHeaderValue)
+	h.Set(protoMaxHeaderName, protoMaxHeaderValue)
+}
+
+func validateProtoVersion(r *http.Request) bool {
+	vals := r.Header.Values(protoHeaderName)
+	if len(vals) == 0 {
+		return true
+	}
+	if len(vals) > 1 {
+		return false
+	}
+	v := strings.TrimSpace(vals[0])
+	if v == "" {
+		return true
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || strconv.Itoa(n) != v {
+		return false
+	}
+	return n >= MinProtoVersion && n <= MaxProtoVersion
 }
 
 func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -138,6 +179,8 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	setProtoVersionHeaders(w)
+
 	if !rateChecked {
 		isPollEndpoint := r.URL.Path == "/v1/ping" || r.URL.Path == "/v1/pair/poll" || r.URL.Path == "/v1/pair/status"
 		allowed := false
@@ -150,6 +193,11 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusTooManyRequests, []byte(`{"error":"rate_limited"}`))
 			return
 		}
+	}
+
+	if !validateProtoVersion(r) {
+		writeJSON(w, http.StatusUpgradeRequired, unsupportedProtoPayload)
+		return
 	}
 
 	switch r.URL.Path {

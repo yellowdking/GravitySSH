@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -169,4 +171,97 @@ func spkiFromTLSCert(cert tls.Certificate) (string, error) {
 		return "", errors.New("empty tls certificate chain")
 	}
 	return spkiHexFromDER(cert.Certificate[0])
+}
+
+type certStore struct {
+	reloadMu sync.Mutex
+	certPath string
+	keyPath  string
+	current  atomic.Pointer[tls.Certificate]
+}
+
+func newCertStore(certPath, keyPath string, initial tls.Certificate) *certStore {
+	s := &certStore{
+		certPath: strings.TrimSpace(certPath),
+		keyPath:  strings.TrimSpace(keyPath),
+	}
+	certCopy := initial
+	s.current.Store(&certCopy)
+	return s
+}
+
+func (s *certStore) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	cert := s.current.Load()
+	if cert == nil {
+		return nil, errors.New("no tls certificate loaded")
+	}
+	return cert, nil
+}
+
+func (s *certStore) Current() *tls.Certificate {
+	return s.current.Load()
+}
+
+func (s *certStore) Reload() (string, error) {
+	return s.ReloadAt(time.Now().UTC())
+}
+
+func (s *certStore) ReloadAt(now time.Time) (string, error) {
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+
+	if s.certPath == "" || s.keyPath == "" {
+		return "", errors.New("tls cert/key paths are not configured")
+	}
+	cert, err := tls.LoadX509KeyPair(s.certPath, s.keyPath)
+	if err != nil {
+		return "", fmt.Errorf("reload tls keypair: %w", err)
+	}
+	spkiHex, err := validateAndExtractSPKI(cert, now)
+	if err != nil {
+		return "", err
+	}
+	s.current.Store(&cert)
+	return spkiHex, nil
+}
+
+func startCertReloader(
+	certs *certStore,
+	reloadCh <-chan os.Signal,
+	stopCh <-chan struct{},
+	onResult func(spkiHex string, err error),
+) <-chan struct{} {
+	doneCh := make(chan struct{})
+	if certs == nil || reloadCh == nil {
+		close(doneCh)
+		return doneCh
+	}
+	go func() {
+		defer close(doneCh)
+		for {
+			select {
+			case <-stopCh:
+				return
+			default:
+			}
+			select {
+			case <-stopCh:
+				return
+			case _, ok := <-reloadCh:
+				if !ok {
+					return
+				}
+				spkiHex, err := certs.Reload()
+				if err != nil {
+					log.Printf("ERROR: sshsync TLS certificate reload failed (keeping current cert): %v", err)
+				} else {
+					log.Printf("sshsync reloaded TLS certificate (SPKI=%s)", spkiHex)
+				}
+				if onResult != nil {
+					onResult(spkiHex, err)
+				}
+			}
+		}
+	}()
+	return doneCh
 }
