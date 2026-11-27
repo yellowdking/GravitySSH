@@ -83,3 +83,46 @@ func TestVaultPasswordLockUnlockChangeAndRemove(t *testing.T) {
 		t.Fatalf("expected unlocked & HasPassword=false, got %+v", reopened3.LockState())
 	}
 }
+
+func TestUnlockResetsHasPasswordWhenVaultFileReplacedWithNoPasswordMode(t *testing.T) {
+	vaultPath := filepath.Join(t.TempDir(), "vault.gsv")
+	store, err := Open(vaultPath, nil)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	if err := store.SetPassword("", "pw-123"); err != nil {
+		t.Fatalf("SetPassword failed: %v", err)
+	}
+	_ = store.Close()
+
+	// Reopen in locked state (Mode 0x02).
+	locked, err := Open(vaultPath, nil)
+	if err != nil || !locked.IsLocked() {
+		t.Fatalf("expected locked vault, err=%v", err)
+	}
+	defer locked.Close()
+
+	// Externally replace vault.gsv with a Mode 0x01 (DPAPI-only, no password) vault.
+	otherStore, err := Open(vaultPath, nil)
+	if err != nil {
+		t.Fatalf("open other: %v", err)
+	}
+	if err := otherStore.Unlock("pw-123"); err != nil {
+		t.Fatalf("unlock other: %v", err)
+	}
+	if err := otherStore.SetPassword("pw-123", ""); err != nil {
+		t.Fatalf("remove password on other: %v", err)
+	}
+	_ = otherStore.Close()
+
+	// Calling Unlock on the still-locked handle succeeds with nil pwSalt/pwKey and MUST set hasPassword=false.
+	if err := locked.Unlock("anything"); err != nil {
+		t.Fatalf("Unlock after Mode 0x01 replacement failed: %v", err)
+	}
+	if locked.LockState().HasPassword {
+		t.Fatal("expected HasPassword=false when unlocked from Mode 0x01 blob")
+	}
+	if _, err := locked.SaveServer(models.ServerSaveRequest{Name: "PostUnlock", Host: "10.0.0.8"}); err != nil {
+		t.Fatalf("SaveServer failed after Mode 0x01 unlock: %v", err)
+	}
+}

@@ -73,6 +73,50 @@ func (s *Store) GetServerInternal(id string) (*models.ServerConfig, error) {
 	return nil, fmt.Errorf("server not found: %s", id)
 }
 
+func normalizeAuthType(raw models.AuthType, sshKeyID string) models.AuthType {
+	switch models.AuthType(strings.ToLower(strings.TrimSpace(string(raw)))) {
+	case models.AuthPassword:
+		return models.AuthPassword
+	case models.AuthKey:
+		return models.AuthKey
+	case models.AuthBoth:
+		return models.AuthBoth
+	default:
+		if strings.TrimSpace(sshKeyID) != "" {
+			return models.AuthKey
+		}
+		return models.AuthPassword
+	}
+}
+
+func hasJumpCycle(servers []models.ServerConfig, selfID, jumpServerID string) bool {
+	jumpServerID = strings.TrimSpace(jumpServerID)
+	if jumpServerID == "" {
+		return false
+	}
+	byID := make(map[string]models.ServerConfig, len(servers))
+	for _, srv := range servers {
+		byID[srv.ID] = srv
+	}
+	visited := make(map[string]bool)
+	if selfID = strings.TrimSpace(selfID); selfID != "" {
+		visited[selfID] = true
+	}
+	cur := jumpServerID
+	for cur != "" {
+		if visited[cur] {
+			return true
+		}
+		visited[cur] = true
+		next, ok := byID[cur]
+		if !ok || next.JumpHost.Mode != models.JumpServer {
+			return false
+		}
+		cur = strings.TrimSpace(next.JumpHost.ServerID)
+	}
+	return false
+}
+
 func normalizeServerConfig(srv *models.ServerConfig, defaultKeepAlive int) bool {
 	srv.Host = strings.TrimSpace(srv.Host)
 	if srv.Host == "" {
@@ -90,27 +134,68 @@ func normalizeServerConfig(srv *models.ServerConfig, defaultKeepAlive int) bool 
 	if srv.Port <= 0 || srv.Port > 65535 {
 		srv.Port = 22
 	}
-	if srv.AuthType == "" {
-		if srv.SSHKeyID != "" {
-			srv.AuthType = models.AuthKey
-		} else {
-			srv.AuthType = models.AuthPassword
-		}
-	}
+	srv.SSHKeyID = strings.TrimSpace(srv.SSHKeyID)
+	srv.AuthType = normalizeAuthType(srv.AuthType, srv.SSHKeyID)
+
 	srv.Proxy.Host = strings.TrimSpace(srv.Proxy.Host)
 	srv.Proxy.Username = strings.TrimSpace(srv.Proxy.Username)
-	if srv.Proxy.Type == "" {
+	switch models.ProxyType(strings.ToLower(strings.TrimSpace(string(srv.Proxy.Type)))) {
+	case models.ProxySOCKS5:
+		srv.Proxy.Type = models.ProxySOCKS5
+		if srv.Proxy.Port <= 0 || srv.Proxy.Port > 65535 {
+			srv.Proxy.Port = 1080
+		}
+	case models.ProxyHTTP:
+		srv.Proxy.Type = models.ProxyHTTP
+		if srv.Proxy.Port <= 0 || srv.Proxy.Port > 65535 {
+			srv.Proxy.Port = 8080
+		}
+	default:
 		srv.Proxy.Type = models.ProxyNone
+		if srv.Proxy.Port < 0 || srv.Proxy.Port > 65535 {
+			srv.Proxy.Port = 0
+		}
 	}
+
+	srv.JumpHost.ServerID = strings.TrimSpace(srv.JumpHost.ServerID)
 	srv.JumpHost.Host = strings.TrimSpace(srv.JumpHost.Host)
 	srv.JumpHost.Username = strings.TrimSpace(srv.JumpHost.Username)
-	if srv.JumpHost.Mode == "" {
+	srv.JumpHost.SSHKeyID = strings.TrimSpace(srv.JumpHost.SSHKeyID)
+	switch models.JumpMode(strings.ToLower(strings.TrimSpace(string(srv.JumpHost.Mode)))) {
+	case models.JumpServer:
+		if srv.JumpHost.ServerID == "" || (srv.ID != "" && srv.JumpHost.ServerID == srv.ID) {
+			srv.JumpHost.Mode = models.JumpNone
+			srv.JumpHost.ServerID = ""
+		} else {
+			srv.JumpHost.Mode = models.JumpServer
+		}
+		if srv.JumpHost.Port < 0 || srv.JumpHost.Port > 65535 {
+			srv.JumpHost.Port = 0
+		}
+	case models.JumpCustom:
+		srv.JumpHost.Mode = models.JumpCustom
+		if srv.JumpHost.Port <= 0 || srv.JumpHost.Port > 65535 {
+			srv.JumpHost.Port = 22
+		}
+		srv.JumpHost.AuthType = normalizeAuthType(srv.JumpHost.AuthType, srv.JumpHost.SSHKeyID)
+	default:
 		srv.JumpHost.Mode = models.JumpNone
+		srv.JumpHost.ServerID = ""
+		if srv.JumpHost.Port < 0 || srv.JumpHost.Port > 65535 {
+			srv.JumpHost.Port = 0
+		}
+		if strings.TrimSpace(string(srv.JumpHost.AuthType)) != "" {
+			srv.JumpHost.AuthType = normalizeAuthType(srv.JumpHost.AuthType, srv.JumpHost.SSHKeyID)
+		}
 	}
+
 	if srv.TimeoutSeconds <= 0 {
 		srv.TimeoutSeconds = 15
 	}
-	if srv.KeepAliveSeconds <= 0 {
+	if srv.KeepAliveSeconds < 0 {
+		if defaultKeepAlive <= 0 {
+			defaultKeepAlive = 30
+		}
 		srv.KeepAliveSeconds = defaultKeepAlive
 	}
 	srv.DefaultRemotePath = strings.TrimSpace(srv.DefaultRemotePath)
@@ -131,8 +216,15 @@ func (s *Store) SaveServer(req models.ServerSaveRequest) (models.ServerView, err
 	if strings.TrimSpace(req.Host) == "" {
 		return models.ServerView{}, errors.New("服务器地址 (IP / 域名) 不能为空")
 	}
-	if req.JumpHost.Mode == models.JumpServer && req.ID != "" && req.JumpHost.ServerID == req.ID {
-		return models.ServerView{}, errors.New("跳板机不能指向服务器自身")
+	jumpMode := models.JumpMode(strings.ToLower(strings.TrimSpace(string(req.JumpHost.Mode))))
+	jumpServerID := strings.TrimSpace(req.JumpHost.ServerID)
+	if jumpMode == models.JumpServer {
+		if req.ID != "" && jumpServerID == req.ID {
+			return models.ServerView{}, errors.New("跳板机不能指向服务器自身")
+		}
+		if hasJumpCycle(s.data.Servers, req.ID, jumpServerID) {
+			return models.ServerView{}, errors.New("跳板机配置存在循环引用")
+		}
 	}
 
 	now := time.Now()

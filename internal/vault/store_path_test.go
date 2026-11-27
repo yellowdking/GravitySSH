@@ -63,3 +63,29 @@ func TestVaultForwardCompatibleSchemaAndLegacyMigration(t *testing.T) {
 		t.Fatalf("marshal LockState failed: %v", err)
 	}
 }
+
+func TestMigrateFirstExistingValidatesMagicAndReturnsErrors(t *testing.T) {
+	dir := t.TempDir()
+	garbage := filepath.Join(dir, "garbage.gsv")
+	validV1 := filepath.Join(dir, "legacy_v1.gsv")
+	target := filepath.Join(dir, "dest", "vault.gsv")
+	_ = os.MkdirAll(filepath.Dir(target), 0o700)
+	_ = os.WriteFile(garbage, []byte("NOT-A-VAULT-HEADER"), 0o600)
+	v1Payload := []byte("GSV1\x00\x00\x00\x04test-payload")
+	_ = os.WriteFile(validV1, v1Payload, 0o600)
+
+	// Must skip garbage candidate without GSV1/GSV2 magic and migrate validV1 atomically.
+	if err := migrateFirstExisting([]string{garbage, validV1}, target); err != nil {
+		t.Fatalf("migrateFirstExisting failed: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || !bytes.Equal(got, v1Payload) {
+		t.Fatalf("migrated payload mismatch: got=%q err=%v", got, err)
+	}
+
+	// Write failure to non-existent parent dir must return error instead of swallowing it.
+	badTarget := filepath.Join(dir, "nonexistent-parent", "vault.gsv")
+	if err := migrateFirstExisting([]string{validV1}, badTarget); err == nil {
+		t.Fatal("expected migrateFirstExisting to return error when target directory is missing")
+	}
+}

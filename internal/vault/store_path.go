@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,7 +49,9 @@ func resolveDefaultVaultPath(exeDir, userConfigDir string) (string, error) {
 		portableDir := filepath.Join(exeDir, configDirName)
 		portablePath := filepath.Join(portableDir, "vault.gsv")
 		if err := ensureDirWritable(portableDir); err == nil {
-			migrateFirstExisting(legacyCandidates, portablePath)
+			if err := migrateFirstExisting(legacyCandidates, portablePath); err != nil {
+				return "", err
+			}
 			return portablePath, nil
 		}
 	}
@@ -62,7 +65,9 @@ func resolveDefaultVaultPath(exeDir, userConfigDir string) (string, error) {
 	if err := os.MkdirAll(fallbackDir, 0o700); err != nil {
 		return "", fmt.Errorf("create fallback config dir: %w", err)
 	}
-	migrateFirstExisting(legacyCandidates, fallbackPath)
+	if err := migrateFirstExisting(legacyCandidates, fallbackPath); err != nil {
+		return "", err
+	}
 	return fallbackPath, nil
 }
 
@@ -80,22 +85,28 @@ func ensureDirWritable(dir string) error {
 	return nil
 }
 
-func migrateFirstExisting(candidates []string, targetPath string) {
-	if _, err := os.Stat(targetPath); !os.IsNotExist(err) {
-		return
+func hasVaultMagic(raw []byte) bool {
+	return len(raw) >= 4 && (bytes.Equal(raw[:4], []byte("GSV1")) || bytes.Equal(raw[:4], []byte("GSV2")))
+}
+
+func migrateFirstExisting(candidates []string, targetPath string) error {
+	if _, err := os.Stat(targetPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat vault target %s: %w", targetPath, err)
 	}
 	for _, src := range candidates {
 		if src == "" || src == targetPath {
 			continue
 		}
-		if raw, err := os.ReadFile(src); err == nil && len(raw) > 0 {
-			tmpPath := targetPath + ".migrate.tmp"
-			if os.WriteFile(tmpPath, raw, 0o600) == nil {
-				if os.Rename(tmpPath, targetPath) != nil {
-					_ = os.Remove(tmpPath)
-				}
-			}
-			return
+		raw, err := os.ReadFile(src)
+		if err != nil || !hasVaultMagic(raw) {
+			continue
 		}
+		if err := writeFileAtomic(targetPath, raw); err != nil {
+			return fmt.Errorf("migrate legacy vault from %s to %s: %w", src, targetPath, err)
+		}
+		return nil
 	}
+	return nil
 }
