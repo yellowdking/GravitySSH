@@ -1,7 +1,6 @@
 import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
 import { AlertCircle } from 'lucide-react'
 import type { AppSettings, SessionInfo } from '../types'
-import type { PasteInspection } from '../utils/pasteGuard'
 import type { TerminalActions } from '../hooks/terminalStream'
 import { useAutocomplete } from '../hooks/useAutocomplete'
 import { useTerminalInstance } from '../hooks/useTerminalInstance'
@@ -28,7 +27,6 @@ interface TerminalPaneProps {
 
 interface PendingPaste {
   text: string
-  inspection: PasteInspection
   bracketedPasteActive: boolean
 }
 
@@ -74,7 +72,6 @@ export const TerminalPane: React.FC<TerminalPaneProps> = React.memo(({
     rightDrawer,
     settings,
     suggestionsRef: ac.suggestionsRef,
-    selectedIdxRef: ac.selectedIdxRef,
     inputLineRef,
     onRequestSuggestions: (line) => ac.requestSuggestions(line),
     onClearSuggestions: () => ac.clearSuggestions(true),
@@ -82,8 +79,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = React.memo(({
     onMoveSelection: ac.moveSelection,
     onApplySelected: ac.applySelected,
     onOpenSearch: openSearch,
-    onPasteGuard: (text, inspection, bracketedPasteActive) =>
-      setPendingPaste({ text, inspection, bracketedPasteActive }),
+    onPasteGuard: (text, bracketedPasteActive) =>
+      setPendingPaste({ text, bracketedPasteActive }),
   })
   focusTermRef.current = () => termRef.current?.focus()
 

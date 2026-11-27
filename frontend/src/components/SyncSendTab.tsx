@@ -110,8 +110,7 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onBusyChange, onToast }
           case 'consumed':
             stageRef.current = 'consumed'
             setStage('consumed')
-            setStatusMessage(res.message || '对方已成功接收配置，中继密文已焚毁')
-            onToast('对方已成功接收配置，中继密文已焚毁')
+            onToast(res.message || '对方已成功接收配置，中继密文已焚毁')
             return false
           case 'rejected':
             if (curStage === 'approved') return true
@@ -243,7 +242,6 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onBusyChange, onToast }
       stageRef.current = 'approved'
       setStage('approved')
       setPollError('')
-      setStatusMessage('已同意并上传加密数据，等待接收端拉取...')
       onToast('已同意并上传双向加密数据')
     } catch (e) {
       if (mountedRef.current && sessRef.current?.sessionId === currentId) {
