@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { BookmarkPlus, History, Search, X } from 'lucide-react'
 import type { CommandRecord, CommandShortcut } from '../types'
 import { api } from '../wailsApi'
@@ -18,7 +18,7 @@ interface HistoryPanelProps {
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
 
-export const HistoryPanel: React.FC<HistoryPanelProps> = ({
+export const HistoryPanel: React.FC<HistoryPanelProps> = React.memo(({
   history,
   activeServerId,
   activeSessionId,
@@ -30,7 +30,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
 }) => {
   const [search, setSearch] = useState('')
   const [onlyCurrentServer, setOnlyCurrentServer] = useState(!!activeServerId)
-  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [savingDraft, setSavingDraft] = useState<Partial<CommandShortcut> | null>(null)
   const { confirm, dialogNode } = useActionDialogs()
 
@@ -45,20 +45,30 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
 
   useEffect(() => {
     setSelectedIds((prev) => {
-      if (prev.length === 0) return prev
+      if (prev.size === 0) return prev
       const validIds = new Set(history.map((h) => h.id))
-      const next = prev.filter((id) => validIds.has(id))
-      return next.length === prev.length ? prev : next
+      let removed = false
+      for (const id of prev) {
+        if (!validIds.has(id)) {
+          removed = true
+          break
+        }
+      }
+      if (!removed) return prev
+      const next = new Set<string>()
+      for (const id of prev) {
+        if (validIds.has(id)) next.add(id)
+      }
+      return next
     })
   }, [history])
 
-  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds])
   const visibleSelected = useMemo(
-    () => filtered.filter((h) => selectedIdSet.has(h.id)),
-    [filtered, selectedIdSet]
+    () => filtered.filter((h) => selectedIds.has(h.id)),
+    [filtered, selectedIds]
   )
 
-  const openSaveModal = (commands: string[]) => {
+  const openSaveModal = useCallback((commands: string[]) => {
     if (commands.length === 0) return
     const ordered = commands.length > 1 ? [...commands].reverse() : commands
     setSavingDraft({
@@ -69,19 +79,19 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
       autoExecute: true,
       pinned: false,
     })
-  }
+  }, [])
 
-  const submitShortcut = async (draft: Partial<CommandShortcut>) => {
+  const submitShortcut = useCallback(async (draft: Partial<CommandShortcut>) => {
     try {
       const saved = await api.saveShortcut(draft)
       onShortcutSaved(saved)
-      setSelectedIds([])
+      setSelectedIds(new Set())
       setSavingDraft(null)
       onToast(`已将命令加密保存为快捷命令 "${saved.name}"`)
     } catch (err) { onToast(errMsg(err), 'error') }
-  }
+  }, [onShortcutSaved, onToast])
 
-  const handleClear = async () => {
+  const handleClear = useCallback(async () => {
     const scope = onlyCurrentServer && activeServerId ? '当前服务器' : '所有服务器'
     const ok = await confirm({
       title: '清空命令历史',
@@ -91,29 +101,53 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
     if (!ok) return
     try {
       await api.clearHistory(onlyCurrentServer && activeServerId ? activeServerId : '')
-      setSelectedIds([])
+      setSelectedIds(new Set())
       onHistoryChanged()
       onToast('已清空命令历史')
     } catch (err) {
       onToast(errMsg(err), 'error')
     }
-  }
+  }, [onlyCurrentServer, activeServerId, confirm, onHistoryChanged, onToast])
 
-  const handleCopyCommand = async (cmd: string) => {
+  const handleToggleId = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  const handleSaveSingleAsShortcut = useCallback((cmd: string) => {
+    openSaveModal([cmd])
+  }, [openSaveModal])
+
+  const handleRun = useCallback((cmd: string, exec: boolean) => {
+    void onRunCommand(cmd, exec)
+  }, [onRunCommand])
+
+  const handleCopyCommand = useCallback(async (cmd: string) => {
     const ok = await copyToClipboard(cmd)
     if (ok) onToast('已复制命令')
     else onToast('复制命令失败', 'error')
-  }
+  }, [onToast])
 
-  const handleDeleteEntry = async (id: string) => {
+  const handleDeleteEntry = useCallback(async (id: string) => {
     try {
       await api.deleteHistoryEntry(id)
-      setSelectedIds((p) => p.filter((x) => x !== id))
+      setSelectedIds((prev) => {
+        if (!prev.has(id)) return prev
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
       onHistoryChanged()
     } catch (err) {
       onToast(errMsg(err), 'error')
     }
-  }
+  }, [onHistoryChanged, onToast])
+
+  const hasActiveSession = !!activeSessionId
 
   return (
     <div className={`flex flex-col h-full ${compact ? 'w-[360px] shrink-0 border-l border-ag-border bg-ag-sidebar' : 'flex-1 bg-ag-bg'}`}>
@@ -146,7 +180,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
             <button type="button" onClick={() => openSaveModal(visibleSelected.map((h) => h.command))} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-indigo-500 hover:bg-indigo-400 text-white font-medium transition">
               <BookmarkPlus className="w-3.5 h-3.5" />存为快捷命令
             </button>
-            <button type="button" onClick={() => setSelectedIds([])} aria-label="取消选择" className="p-1 rounded hover:bg-ag-hover text-ag-muted"><X className="w-3.5 h-3.5" /></button>
+            <button type="button" onClick={() => setSelectedIds(new Set())} aria-label="取消选择" className="p-1 rounded hover:bg-ag-hover text-ag-muted"><X className="w-3.5 h-3.5" /></button>
           </div>
         </div>
       )}
@@ -162,13 +196,13 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
             <HistoryRow
               key={rec.id}
               rec={rec}
-              checked={selectedIdSet.has(rec.id)}
-              hasActiveSession={!!activeSessionId}
-              onToggle={() => setSelectedIds((p) => (p.includes(rec.id) ? p.filter((x) => x !== rec.id) : [...p, rec.id]))}
-              onSaveAsShortcut={() => openSaveModal([rec.command])}
-              onRun={(exec) => { void onRunCommand(rec.command, exec) }}
-              onCopy={() => { void handleCopyCommand(rec.command) }}
-              onDelete={() => { void handleDeleteEntry(rec.id) }}
+              checked={selectedIds.has(rec.id)}
+              hasActiveSession={hasActiveSession}
+              onToggle={handleToggleId}
+              onSaveAsShortcut={handleSaveSingleAsShortcut}
+              onRun={handleRun}
+              onCopy={handleCopyCommand}
+              onDelete={handleDeleteEntry}
             />
           ))
         )}
@@ -178,4 +212,4 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
       {dialogNode}
     </div>
   )
-}
+})

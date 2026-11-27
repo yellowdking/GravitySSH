@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ServerView } from './types'
 import { useAppData } from './hooks/useAppData'
 import { useLayoutState } from './hooks/useLayoutState'
@@ -26,6 +26,7 @@ export default function App() {
   const [syncM, setSyncM] = useState(false)
   const [toast, setToast] = useState<{ text: string; type: 'info' | 'error' } | null>(null)
   const wsRef = useRef<HTMLDivElement | null>(null)
+  const drawerRef = useRef<HTMLDivElement | null>(null)
 
   const notify = useCallback((text: string, type: 'info' | 'error' = 'info') => setToast({ text, type }), [])
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 3600); return () => clearTimeout(t) }, [toast])
@@ -35,9 +36,33 @@ export default function App() {
   const { confirm, dialogNode } = useActionDialogs()
   const {
     sessions, activeSessionId: sid, servers, sshKeys, shortcuts, history, settings,
-    loadAll, reloadServers, reloadKeys, reloadShortcuts, reloadHistory, setSftpOpenBySession,
+    loadAll, reloadServers, reloadKeys, reloadShortcuts, reloadHistory,
+    setActiveSessionId, setSessions, setSftpOpenBySession, setShortcuts, setSettings,
+    closedSessionIdsRef, lockState,
   } = data
 
+  useEffect(() => {
+    if (lockState?.locked) {
+      setCfgM(false)
+      setSrvM(false)
+      setSyncM(false)
+    }
+  }, [lockState?.locked])
+
+  useLayoutEffect(() => {
+    wsRef.current?.style.setProperty('--gssh-sftp-width', `${lay.sftpWidth}px`)
+  }, [lay.sftpWidth, lockState?.locked])
+
+  useLayoutEffect(() => {
+    if (drawerRef.current) drawerRef.current.style.width = `${lay.drawerWidth}px`
+  }, [lay.drawerWidth, drw, nav, sessions.length, lockState?.locked])
+
+  const navRef = useRef(nav)
+  navRef.current = nav
+  const sidRef = useRef(sid)
+  sidRef.current = sid
+  const drwRef = useRef(drw)
+  drwRef.current = drw
   const sessionsRef = useRef(sessions)
   sessionsRef.current = sessions
   const serversRef = useRef(servers)
@@ -60,14 +85,54 @@ export default function App() {
     else terminalActionsRef.current.delete(sessionId)
   }, [])
 
-  const act = createSessionActions({
-    activeNav: nav, setActiveNav: setNav, activeSessionId: sid, setActiveSessionId: data.setActiveSessionId,
-    sessionsRef, closedSessionIdsRef: data.closedSessionIdsRef, terminalActionsRef, setSessions: data.setSessions, setSftpOpenBySession, setShortcuts: data.setShortcuts,
-    settings, settingsRef, autocompleteToggleStateRef, setSettings: data.setSettings, reloadServers, confirm, showToast: notify,
-    estimatePty: () => lay.estimateInitialPty(wsRef.current, settings.terminalFontSize, settings.autoOpenSftp, drw !== 'none'),
-  })
-  const actRef = useRef(act)
-  actRef.current = act
+  const estimatePty = useCallback(
+    () =>
+      lay.estimateInitialPty(
+        wsRef.current,
+        settingsRef.current.terminalFontSize,
+        settingsRef.current.autoOpenSftp,
+        drwRef.current !== 'none'
+      ),
+    [lay.estimateInitialPty]
+  )
+
+  const act = useMemo(
+    () =>
+      createSessionActions({
+        activeNav: navRef.current,
+        activeNavRef: navRef,
+        setActiveNav: setNav,
+        activeSessionId: sidRef.current,
+        activeSessionIdRef: sidRef,
+        setActiveSessionId,
+        sessionsRef,
+        closedSessionIdsRef,
+        terminalActionsRef,
+        setSessions,
+        setSftpOpenBySession,
+        setShortcuts,
+        settings: settingsRef.current,
+        settingsRef,
+        autocompleteToggleStateRef,
+        setSettings,
+        reloadServers,
+        confirm,
+        showToast: notify,
+        estimatePty,
+      }),
+    [
+      setActiveSessionId,
+      closedSessionIdsRef,
+      setSessions,
+      setSftpOpenBySession,
+      setShortcuts,
+      setSettings,
+      reloadServers,
+      confirm,
+      notify,
+      estimatePty,
+    ]
+  )
 
   const reload = useCallback(() => { void loadAll() }, [loadAll])
   const handleServersReload = useCallback(() => { void reloadServers() }, [reloadServers])
@@ -79,23 +144,75 @@ export default function App() {
   }, [reloadKeys, reloadServers])
   const toggleSftp = useCallback((id: string) => setSftpOpenBySession((p) => ({ ...p, [id]: !p[id] })), [setSftpOpenBySession])
   const toggleRightDrawer = useCallback((m: 'history' | 'shortcuts') => setDrw((p) => (p === m ? 'none' : m)), [])
-  const handleToggleAutocomplete = useCallback(() => { void actRef.current.handleToggleAutocomplete() }, [])
+  const handleToggleAutocomplete = useCallback(() => { void act.handleToggleAutocomplete() }, [act])
   const reconn = useCallback((id: string) => {
     const t = serversRef.current.find((s) => s.id === id)
-    if (t) void actRef.current.handleConnectServer(t)
-  }, [])
+    if (t) void act.handleConnectServer(t)
+    else notify('该服务器已被删除，无法重新连接', 'error')
+  }, [act, notify])
 
-  if (data.lockState?.locked) return <VaultLockScreen vaultPath={data.lockState.vaultPath} onUnlocked={() => void loadAll()} />
+  const previewSftpWidth = useCallback((w: number) => {
+    wsRef.current?.style.setProperty('--gssh-sftp-width', `${w}px`)
+  }, [])
+  const commitSftpWidth = useCallback((w: number) => {
+    wsRef.current?.style.setProperty('--gssh-sftp-width', `${w}px`)
+    lay.commitSftpWidth(w)
+  }, [lay.commitSftpWidth])
+
+  const previewDrawerWidth = useCallback((w: number) => {
+    if (drawerRef.current) drawerRef.current.style.width = `${w}px`
+  }, [])
+  const commitDrawerWidth = useCallback((w: number) => {
+    if (drawerRef.current) drawerRef.current.style.width = `${w}px`
+    lay.commitDrawerWidth(w)
+  }, [lay.commitDrawerWidth])
+
+  const addSrv = useCallback(() => { setEditS(null); setSrvM(true) }, [])
+  const handleEditServer = useCallback((s: ServerView) => { setEditS(s); setSrvM(true) }, [])
+  const handleOpenSync = useCallback(() => setSyncM(true), [])
+  const handleCloseSync = useCallback(() => setSyncM(false), [])
+  const handleOpenSettings = useCallback(() => setCfgM(true), [])
+  const handleCloseSettings = useCallback(() => setCfgM(false), [])
+  const handleCloseServerModal = useCallback(() => setSrvM(false), [])
+  const handleSelectSession = useCallback((id: string) => { setNav('servers'); setActiveSessionId(id) }, [setActiveSessionId])
+  const handleCloseSession = useCallback((id: string) => { void act.handleCloseSession(id) }, [act])
+  const handleOpenKeys = useCallback(() => setNav('keys'), [])
+  const handleOpenShortcuts = useCallback(() => setNav('shortcuts'), [])
+
+  if (lockState?.locked) return <VaultLockScreen vaultPath={lockState.vaultPath} onUnlocked={reload} />
 
   const cur = sessions.find((s) => s.sessionId === sid) || null
-  const addSrv = () => { setEditS(null); setSrvM(true) }
   const ov = 'absolute inset-0 z-20 bg-ag-bg'
 
   return (
     <div className="w-screen h-screen flex overflow-hidden bg-ag-bg text-ag-text">
-      <Sidebar activeNav={nav} collapsed={lay.sidebarCollapsed} width={lay.sidebarWidth} onToggleCollapse={lay.toggleSidebar} onWidthChange={lay.setSidebarWidth} onWidthCommit={lay.commitSidebarWidth} onSelectNav={setNav} servers={servers} sessions={sessions} keyCount={sshKeys.length} shortcutCount={shortcuts.length} onAddServer={addSrv} onEditServer={(s) => { setEditS(s); setSrvM(true) }} onDeleteServer={act.handleDeleteServer} onConnectServer={act.handleConnectServer} onOpenSync={() => setSyncM(true)} onOpenSettings={() => setCfgM(true)} />
+      <Sidebar
+        activeNav={nav}
+        collapsed={lay.sidebarCollapsed}
+        width={lay.sidebarWidth}
+        onToggleCollapse={lay.toggleSidebar}
+        onWidthCommit={lay.commitSidebarWidth}
+        onSelectNav={setNav}
+        servers={servers}
+        sessions={sessions}
+        keyCount={sshKeys.length}
+        shortcutCount={shortcuts.length}
+        onAddServer={addSrv}
+        onEditServer={handleEditServer}
+        onDeleteServer={act.handleDeleteServer}
+        onConnectServer={act.handleConnectServer}
+        onOpenSync={handleOpenSync}
+        onOpenSettings={handleOpenSettings}
+      />
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
-        <SessionTabsBar sessions={sessions} activeSessionId={sid} isServersView={nav === 'servers'} updateInfo={data.updateInfo} onSelectSession={(id) => { setNav('servers'); data.setActiveSessionId(id) }} onCloseSession={(id) => void act.handleCloseSession(id)} />
+        <SessionTabsBar
+          sessions={sessions}
+          activeSessionId={sid}
+          isServersView={nav === 'servers'}
+          updateInfo={data.updateInfo}
+          onSelectSession={handleSelectSession}
+          onCloseSession={handleCloseSession}
+        />
         <div ref={wsRef} className="flex-1 min-h-0 flex relative overflow-hidden">
           <div className="flex-1 min-w-0 h-full relative overflow-hidden">
             {sessions.map((s) => {
@@ -108,9 +225,9 @@ export default function App() {
                   visible={isVisible}
                   settings={settings}
                   showSftp={isSftpOpen}
-                  sftpWidth={isSftpOpen ? lay.sftpWidth : 0}
-                  onSftpWidthChange={lay.setSftpWidth}
-                  onSftpWidthCommit={lay.commitSftpWidth}
+                  sftpWidth={isVisible && isSftpOpen ? lay.sftpWidth : 0}
+                  onSftpWidthChange={previewSftpWidth}
+                  onSftpWidthCommit={commitSftpWidth}
                   rightDrawer={isVisible ? drw : 'none'}
                   onToggleSftp={toggleSftp}
                   onToggleRightDrawer={toggleRightDrawer}
@@ -121,7 +238,9 @@ export default function App() {
                 />
               )
             })}
-            {nav === 'servers' && !sessions.length && <WelcomeView onAddServer={addSrv} onOpenKeys={() => setNav('keys')} onOpenShortcuts={() => setNav('shortcuts')} />}
+            {nav === 'servers' && !sessions.length && (
+              <WelcomeView onAddServer={addSrv} onOpenKeys={handleOpenKeys} onOpenShortcuts={handleOpenShortcuts} />
+            )}
           </div>
           {nav === 'servers' && sessions.length > 0 && drw !== 'none' && (
             <>
@@ -130,11 +249,11 @@ export default function App() {
                 min={260}
                 max={560}
                 direction="left"
-                onChange={lay.setDrawerWidth}
-                onCommit={lay.commitDrawerWidth}
+                onChange={previewDrawerWidth}
+                onCommit={commitDrawerWidth}
                 title="拖动调整抽屉宽度"
               />
-              <div style={{ width: lay.drawerWidth }} className="shrink-0 h-full min-w-0 flex overflow-hidden [&>*]:!w-full [&>*]:min-w-0">
+              <div ref={drawerRef} className="shrink-0 h-full min-w-0 flex overflow-hidden [&>*]:!w-full [&>*]:min-w-0">
                 {drw === 'shortcuts' && (
                   <ShortcutsPanel compact shortcuts={shortcuts} activeSessionId={cur?.sessionId} onRunShortcut={act.handleRunShortcut} onRunCommand={act.handleRunCommand} onChanged={handleShortcutsReload} onToast={notify} />
                 )}
@@ -155,7 +274,22 @@ export default function App() {
           {nav === 'history' && <div className={`${ov} flex`}><HistoryPanel history={history} activeServerId={cur?.serverId} activeSessionId={cur?.sessionId} onRunCommand={act.handleRunCommand} onShortcutSaved={handleShortcutsReload} onHistoryChanged={handleHistoryReload} onToast={notify} /></div>}
         </div>
       </div>
-      <AppOverlays serverModalOpen={srvM} editingServer={editS} settingsOpen={cfgM} syncModalOpen={syncM} toast={toast} data={data} onCloseServerModal={() => setSrvM(false)} onCloseSettings={() => setCfgM(false)} onOpenSync={() => setSyncM(true)} onCloseSync={() => setSyncM(false)} onSelectNav={setNav} onServerSaved={handleServersReload} onReload={reload} onToast={notify} />
+      <AppOverlays
+        serverModalOpen={srvM}
+        editingServer={editS}
+        settingsOpen={cfgM}
+        syncModalOpen={syncM}
+        toast={toast}
+        data={data}
+        onCloseServerModal={handleCloseServerModal}
+        onCloseSettings={handleCloseSettings}
+        onOpenSync={handleOpenSync}
+        onCloseSync={handleCloseSync}
+        onSelectNav={setNav}
+        onServerSaved={handleServersReload}
+        onReload={reload}
+        onToast={notify}
+      />
       {dialogNode}
     </div>
   )
