@@ -83,7 +83,7 @@ else
 fi
 printf '%s\n' "$pub" >> "$tmp" || exit 1
 chmod 600 -- "$tmp" && mv -f -- "$tmp" "$ak"`
-	return fmt.Sprintf("sh -c %s _ %s", shellQuote(script), shellQuote(cleanPubKey))
+	return fmt.Sprintf("env LC_ALL=C sh -c %s _ %s", shellQuote(script), shellQuote(cleanPubKey))
 }
 
 // DeploySSHKeyToServers installs the selected key's public key into ~/.ssh/authorized_keys

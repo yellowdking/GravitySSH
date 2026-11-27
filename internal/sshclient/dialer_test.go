@@ -36,11 +36,15 @@ func TestDialServerViaHTTPProxyAndJumpHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
 	}
+	targetPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(targetKeyInfo.PublicKey))
+	if err != nil {
+		t.Fatalf("parse target pubkey: %v", err)
+	}
 
 	jumpHost, jumpPort, stopJump := startTestSSHServer(t, "jumpuser", "jumppass", nil)
 	defer stopJump()
 
-	targetHost, targetPort, stopTarget := startTestSSHServer(t, "appuser", "", targetKeyInfo.Signer.PublicKey())
+	targetHost, targetPort, stopTarget := startTestSSHServer(t, "appuser", "", targetPub)
 	defer stopTarget()
 
 	proxyHost, proxyPort, stopProxy := startTestHTTPConnectProxy(t, "puser", "ppass")
@@ -138,9 +142,13 @@ func TestTOFUHostKeyVerificationAcceptsFirstAndRejectsMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gen new key: %v", err)
 	}
+	newPubKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(newKeyInfo.PublicKey))
+	if err != nil {
+		t.Fatalf("parse new pubkey: %v", err)
+	}
 	cb := tofuHostKeyCallback(khPath)
 	hostPort := net.JoinHostPort(host, strconv.Itoa(port))
-	err = cb(hostPort, nil, newKeyInfo.Signer.PublicKey())
+	err = cb(hostPort, nil, newPubKey)
 	if err == nil || !strings.Contains(err.Error(), "SSH 缓存") {
 		t.Fatalf("expected Chinese mismatch error mentioning SSH 缓存, got: %v", err)
 	}
@@ -149,7 +157,7 @@ func TestTOFUHostKeyVerificationAcceptsFirstAndRejectsMismatch(t *testing.T) {
 	if _, err := ClearKnownHostsHost(khPath, host, port); err != nil {
 		t.Fatalf("ClearKnownHostsHost failed: %v", err)
 	}
-	if err := cb(hostPort, nil, newKeyInfo.Signer.PublicKey()); err != nil {
+	if err := cb(hostPort, nil, newPubKey); err != nil {
 		t.Fatalf("expected TOFU accept after clearing cache, got: %v", err)
 	}
 }

@@ -28,7 +28,11 @@ func TestSanitizeAuthorizedPublicKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gen ed25519: %v", err)
 	}
-	edClean := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(edInfo.Signer.PublicKey())))
+	edPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(edInfo.PublicKey))
+	if err != nil {
+		t.Fatalf("parse ed25519 pubkey: %v", err)
+	}
+	edClean := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(edPub)))
 
 	// Valid key with comment -> stripped cleanly to "<type> <base64>".
 	got, err := sanitizeAuthorizedPublicKey("  " + edClean + " alice@laptop  ")
@@ -64,11 +68,15 @@ func TestBuildKeyDeployCommandHardening(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cleanKey := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(edInfo.Signer.PublicKey())))
+	edPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(edInfo.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanKey := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(edPub)))
 	cmd := buildKeyDeployCommand(cleanKey)
 
 	for _, want := range []string{
-		"sh -c ",
+		"env LC_ALL=C sh -c ",
 		"umask 077",
 		"chmod 700 --",
 		"chmod 600 --",

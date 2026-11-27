@@ -57,7 +57,19 @@ func TestCommandRecorderCurrentLineAndUpArrow(t *testing.T) {
 		t.Fatalf("expected no recorded command on up-arrow history recall, got %#v", recorded)
 	}
 
-	// Typing again resets cleanly
+	// Up arrow followed by typing extra args must keep dirtyHist until Enter/Ctrl+C
+	// so partial appended fragments are NOT logged as standalone commands.
+	rec.Feed([]byte("\x1b[A --verbose"))
+	if got := rec.CurrentLine(); got != "" {
+		t.Fatalf("expected CurrentLine empty while dirtyHist active, got %q", got)
+	}
+	rec.Feed([]byte("\r"))
+	if len(recorded) != 0 {
+		t.Fatalf("expected no recorded fragment after Up+typing+Enter, got %#v", recorded)
+	}
+
+	// Up arrow + typing + Ctrl+C resets cleanly so next fresh command records normally.
+	rec.Feed([]byte("\x1b[B --extra\x03"))
 	rec.Feed([]byte("free -h\r"))
 	if len(recorded) != 1 || recorded[0] != "free -h" {
 		t.Fatalf("expected ['free -h'], got %#v", recorded)
