@@ -5,7 +5,7 @@ import type { SearchAddon } from '@xterm/addon-search'
 import type { AppSettings, CompletionItem } from '../types'
 import { api } from '../wailsApi'
 import { applyTerminalInputToLine, sanitizePasteText } from '../utils/autocomplete'
-import { inspectPasteSafety, type PasteInspection } from '../utils/pasteGuard'
+import { inspectPasteSafety } from '../utils/pasteGuard'
 import { createLogHighlighter } from '../utils/keywordHighlight'
 import { base64ToUint8Array, DEFAULT_TERMINAL_FONT } from '../components/terminalTheme'
 import { attachTerminalImeGuard as bindIme, attachTerminalInputHandlers as bindInput, createConfiguredTerminal as initTerm, syncTerminalImeAttrs as syncIme } from './terminalHandlers'
@@ -36,7 +36,6 @@ interface UseTerminalOptions {
   rightDrawer: string
   settings: AppSettings
   suggestionsRef: MutableRefObject<CompletionItem[]>
-  selectedIdxRef: MutableRefObject<number>
   inputLineRef: MutableRefObject<string>
   onRequestSuggestions: (l: string) => void
   onClearSuggestions: () => void
@@ -44,7 +43,7 @@ interface UseTerminalOptions {
   onMoveSelection: (d: number) => void
   onApplySelected: () => void
   onOpenSearch: () => void
-  onPasteGuard: (t: string, i: PasteInspection, bracketedPasteActive: boolean) => void
+  onPasteGuard: (t: string, bracketedPasteActive: boolean) => void
 }
 
 export function useTerminalInstance(opts: UseTerminalOptions) {
@@ -80,7 +79,7 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
       const bracketed = t.modes.bracketedPasteMode
       const c = inspectPasteSafety(s, bracketed)
       if (c.needsConfirm) {
-        cRef.current.onPasteGuard(s, c, bracketed)
+        cRef.current.onPasteGuard(s, bracketed)
         return
       }
     }
@@ -122,7 +121,7 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
     if (t) {
       t.options.fontSize = settings.terminalFontSize
       t.options.fontFamily = settings.terminalFontFamily || DEFAULT_TERMINAL_FONT
-      syncSize()
+      if (cRef.current.active) syncSize()
     }
   }, [settings.terminalFontSize, settings.terminalFontFamily, syncSize])
 
@@ -303,9 +302,10 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
     })
     let roT = 0
     const ro = new ResizeObserver(() => {
+      if (!cRef.current.active) return
       clearTimeout(roT)
       roT = window.setTimeout(() => {
-        if (el.clientWidth === 0 || el.clientHeight === 0) return
+        if (!cRef.current.active || el.clientWidth === 0 || el.clientHeight === 0) return
         try {
           const proposed = fit.proposeDimensions()
           if (proposed && proposed.cols === term.cols && proposed.rows === term.rows) return
@@ -313,7 +313,7 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
         } catch {
           /**/
         }
-      }, 24)
+      }, 80)
     })
     ro.observe(el)
     return () => {
@@ -336,9 +336,9 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
 
   useEffect(() => {
     if (status !== 'connected') return
-    syncSize()
+    if (active) syncSize()
     const t = setTimeout(() => {
-      syncSize()
+      if (cRef.current.active) syncSize()
       if (active && !isTerminalFocusBlocked(termRef.current?.textarea)) {
         termRef.current?.focus()
         imeRef.current?.(true)
@@ -349,14 +349,21 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
 
   useEffect(() => {
     if (!active) return
+    const rafId = requestAnimationFrame(() => {
+      if (cRef.current.active) syncSize()
+    })
     const id = setTimeout(() => {
+      if (!cRef.current.active) return
       syncSize()
       if (!isTerminalFocusBlocked(termRef.current?.textarea)) {
         termRef.current?.focus()
         imeRef.current?.(true)
       }
     }, 40)
-    return () => clearTimeout(id)
+    return () => {
+      cancelAnimationFrame(rafId)
+      clearTimeout(id)
+    }
   }, [active, showSftp, rightDrawer, settings.monitorBarEnabled, syncSize])
 
   return { containerRef, termRef, searchAddonRef, pasteText, commitPaste }

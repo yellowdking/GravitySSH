@@ -25,6 +25,7 @@ export const api = {
   openExternalURL: (url: string) => callGo<void>('OpenExternalURL', url),
   getVaultSecurityInfo: () => callGo<VaultSecurityInfo>('GetVaultSecurityInfo'),
   getVaultLockState: () => callGo<VaultLockState>('GetVaultLockState'),
+  lockVault: () => callGo<void>('LockVault'),
   unlockVault: (password: string) => callGo<void>('UnlockVault', password),
   setVaultPassword: (cur: string, next: string) => callGo<void>('SetVaultPassword', cur, next),
   listServers: () => callGo<ServerView[]>('ListServers'),
@@ -34,6 +35,8 @@ export const api = {
   listSSHKeys: () => callGo<SSHKeyMeta[]>('ListSSHKeys'),
   importSSHKeyFromText: (name: string, pem: string, pass: string, comment: string) =>
     callGo<SSHKeyMeta>('ImportSSHKeyFromText', name, pem, pass, comment),
+  importSSHKeyFromFile: (name: string, pass: string, comment: string) =>
+    callGo<SSHKeyMeta | null>('ImportSSHKeyFromFile', name, pass, comment),
   pickAndReadSSHKeyFile: () => callGo<{ cancelled: string; fileName?: string; content?: string }>('PickAndReadSSHKeyFile'),
   generateSSHKey: (name: string, algo: string, pass: string, comment: string) =>
     callGo<SSHKeyMeta>('GenerateSSHKey', name, algo, pass, comment),

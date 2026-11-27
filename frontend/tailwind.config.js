@@ -13,8 +13,6 @@ export default {
           border: '#23293a',
           borderStrong: '#303952',
           accent: '#6366f1',
-          accentHover: '#7c7ff8',
-          cyan: '#38bdf8',
           text: '#e6eaf5',
           muted: '#8c96b0',
           subtle: '#5f6982',
