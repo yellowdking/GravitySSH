@@ -10,9 +10,9 @@ import (
 
 const (
 	// DefaultRelayURL is the built-in zero-knowledge GravitySSH relay endpoint.
-	DefaultRelayURL = "https://107.172.98.169:54843"
+	DefaultRelayURL = "https://43.155.231.14:54843"
 	// DefaultRelayHost is used to determine whether built-in SPKI pinning applies.
-	DefaultRelayHost = "107.172.98.169:54843"
+	DefaultRelayHost = "43.155.231.14:54843"
 	// ClientHeaderValue identifies this protocol client to the relay app gate.
 	ClientHeaderValue = "GravitySSH/1"
 	// DefaultTTLSeconds is the default 5-minute ephemeral drop lifetime.
@@ -36,7 +36,7 @@ const (
 
 // PinnedSPKISHA256 and AppGateKey are populated from the deployed relay config.
 var (
-	PinnedSPKISHA256 = "8d02a67e23e9f5af5922a8e700a6309dfa4ce335baca7125452fe22f4e5e29ba"
+	PinnedSPKISHA256 = "ca1a5f441de4962b6269449325ded3a284a0a8a9d8fd3d995ffcb218c8eb7575"
 	AppGateKey       = "fb6f39e339dffe1141537e5e8154491cce0044c7bc2ecb26b17828571b9d5aae"
 )
 

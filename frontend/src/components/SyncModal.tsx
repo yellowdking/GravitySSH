@@ -16,7 +16,7 @@ interface SyncModalProps {
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
 
-const FALLBACK_RELAY = 'https://107.172.98.169:54843'
+const FALLBACK_RELAY = 'https://43.155.231.14:54843'
 
 export const SyncModal: React.FC<SyncModalProps> = ({
   open, settings, onSettingsSaved, onClose, onSynced, onToast,
