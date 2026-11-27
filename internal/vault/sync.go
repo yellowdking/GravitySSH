@@ -58,7 +58,7 @@ func (s *Store) ImportSyncBundle(bundle models.SyncBundle, mode string) (models.
 	if s.locked {
 		return models.SyncImportSummary{}, errors.New("配置文件已锁定，请先解锁后再同步")
 	}
-	if bundle.SchemaVersion != 1 {
+	if bundle.SchemaVersion < 1 || bundle.SchemaVersion > 2 {
 		return models.SyncImportSummary{}, fmt.Errorf("不支持的同步数据版本: %d", bundle.SchemaVersion)
 	}
 	mode = strings.ToLower(strings.TrimSpace(mode))
@@ -69,7 +69,10 @@ func (s *Store) ImportSyncBundle(bundle models.SyncBundle, mode string) (models.
 		return models.SyncImportSummary{}, fmt.Errorf("无效的同步模式: %s", mode)
 	}
 
-	snapshot := cloneVaultData(s.data)
+	prevServers := cloneServers(s.data.Servers)
+	prevKeys := cloneSSHKeys(s.data.SSHKeys)
+	prevShortcuts := cloneShortcuts(s.data.Shortcuts)
+	prevTemplates := cloneTemplates(s.data.Templates)
 	var summary models.SyncImportSummary
 	summary.Mode = mode
 
@@ -90,7 +93,10 @@ func (s *Store) ImportSyncBundle(bundle models.SyncBundle, mode string) (models.
 	}
 
 	if err := s.saveLocked(); err != nil {
-		s.data = snapshot
+		s.data.Servers = prevServers
+		s.data.SSHKeys = prevKeys
+		s.data.Shortcuts = prevShortcuts
+		s.data.Templates = prevTemplates
 		return models.SyncImportSummary{}, err
 	}
 	return summary, nil

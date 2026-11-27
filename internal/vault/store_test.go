@@ -564,3 +564,61 @@ func TestVaultFlushRetryBackoffAndClosedRejection(t *testing.T) {
 		t.Fatal("expected pwKey/pwSalt to remain nil after Close")
 	}
 }
+
+func TestVaultTailAppendHistoryOrderingEvictionAndGetShortcut(t *testing.T) {
+	vaultPath := filepath.Join(t.TempDir(), "vault.gsv")
+	store, err := Open(vaultPath, nil)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Configure MaxHistoryEntries=100 (minimum allowed by SaveSettings).
+	cfg := store.GetSettings()
+	cfg.MaxHistoryEntries = 100
+	if _, err := store.SaveSettings(cfg); err != nil {
+		t.Fatalf("SaveSettings failed: %v", err)
+	}
+
+	for i := 1; i <= 115; i++ {
+		if _, err := store.RecordCommand("srv-a", "A", "s1", "cmd-"+string(rune('0'+i%10))+"-"+time.Duration(i).String()); err != nil {
+			t.Fatalf("RecordCommand %d failed: %v", i, err)
+		}
+	}
+	all := store.ListHistory("srv-a", 200)
+	if len(all) != 100 {
+		t.Fatalf("expected history capped at 100, got %d", len(all))
+	}
+	// ListHistory must return newest-first: #115 first, #16 last (#1..#15 evicted).
+	if all[0].Command != "cmd-5-115ns" || all[99].Command != "cmd-6-16ns" {
+		t.Fatalf("unexpected newest-first ordering after tail-append cap: first=%q last=%q", all[0].Command, all[99].Command)
+	}
+
+	// Direct GetShortcut lookup finds saved shortcut without scanning ListShortcuts.
+	sc, err := store.SaveShortcut(models.CommandShortcut{Name: "Ping", Command: "ping -c 1 1.1.1.1"})
+	if err != nil {
+		t.Fatalf("SaveShortcut failed: %v", err)
+	}
+	got, ok := store.GetShortcut(sc.ID)
+	if !ok || got.Command != "ping -c 1 1.1.1.1" {
+		t.Fatalf("GetShortcut failed: ok=%v got=%+v", ok, got)
+	}
+	if _, ok := store.GetShortcut("does-not-exist"); ok {
+		t.Fatal("expected GetShortcut to return false for unknown ID")
+	}
+
+	// Legacy newest-first vault history is migrated to tail-append order by normalizeVault.
+	tOld := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	tNew := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	legacy := models.VaultData{
+		Version: 5,
+		History: []models.CommandRecord{
+			{ID: "new", Command: "newest", ExecutedAt: tNew},
+			{ID: "old", Command: "oldest", ExecutedAt: tOld},
+		},
+	}
+	normalizeVault(&legacy)
+	if legacy.History[0].ID != "old" || legacy.History[1].ID != "new" {
+		t.Fatalf("expected legacy newest-first history migrated to chronological tail-append order, got %+v", legacy.History)
+	}
+}
