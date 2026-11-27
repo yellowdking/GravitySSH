@@ -17,4 +17,6 @@ ENV GOMEMLIMIT=48MiB \
     SSHSYNC_LISTEN=:54843 \
     SSHSYNC_CERT_FILE=/data/cert.pem \
     SSHSYNC_KEY_FILE=/data/key.pem
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD ["/sshsync", "-healthcheck"]
 ENTRYPOINT ["/sshsync"]

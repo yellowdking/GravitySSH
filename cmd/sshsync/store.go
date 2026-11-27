@@ -12,6 +12,7 @@ import (
 
 const (
 	maxSlots      = 64
+	maxSlotsPerIP = 4
 	maxTotalBytes = 16 * 1024 * 1024
 	minTTLSeconds = 60
 	maxTTLSeconds = 600
@@ -22,6 +23,7 @@ const (
 var (
 	errSlotExists   = errors.New("channel already exists")
 	errStoreFull    = errors.New("relay store full")
+	errIPSlotsFull  = errors.New("per-ip slot limit reached")
 	errPairNotFound = errors.New("pair channel not found")
 	errPairAuth     = errors.New("pair channel auth failed")
 	errSlotBusy     = errors.New("pair channel busy")
@@ -57,6 +59,7 @@ func (b b64Bytes) MarshalJSON() ([]byte, error) {
 }
 
 type slot struct {
+	ownerIP       string
 	state         string
 	senderToken   []byte
 	requestID     string
@@ -96,6 +99,7 @@ func zeroSlot(s *slot) {
 	s.senderToken = nil
 	clearReqPayload(s)
 	clearApprovedPayload(s)
+	s.ownerIP = ""
 	s.requestID = ""
 	s.state = ""
 	s.size = 0
@@ -104,6 +108,7 @@ func zeroSlot(s *slot) {
 type memStore struct {
 	mu         sync.Mutex
 	slots      map[string]*slot
+	ipSlots    map[string]int
 	totalBytes int64
 	maxBytes   int64
 	now        func() time.Time
@@ -115,6 +120,7 @@ func newMemStore(nowFn func() time.Time) *memStore {
 	}
 	return &memStore{
 		slots:    make(map[string]*slot, maxSlots),
+		ipSlots:  make(map[string]int, maxSlots),
 		maxBytes: maxTotalBytes,
 		now:      nowFn,
 	}
@@ -138,13 +144,31 @@ func (m *memStore) releaseBytesLocked(n int64) {
 	}
 }
 
+func (m *memStore) releaseOwnerSlotLocked(ownerIP string) {
+	if ownerIP == "" {
+		return
+	}
+	if n := m.ipSlots[ownerIP]; n <= 1 {
+		delete(m.ipSlots, ownerIP)
+	} else {
+		m.ipSlots[ownerIP] = n - 1
+	}
+}
+
+func (m *memStore) removeSlotLocked(channelID string, s *slot, zero bool) {
+	delete(m.slots, channelID)
+	m.releaseOwnerSlotLocked(s.ownerIP)
+	m.releaseBytesLocked(s.size)
+	if zero {
+		zeroSlot(s)
+	}
+}
+
 func (m *memStore) purgeExpiredLocked(now time.Time) int {
 	removed := 0
 	for k, s := range m.slots {
 		if !now.Before(s.expiresAt) {
-			delete(m.slots, k)
-			m.releaseBytesLocked(s.size)
-			zeroSlot(s)
+			m.removeSlotLocked(k, s, true)
 			removed++
 		}
 	}
@@ -166,7 +190,7 @@ func matchRequestID(s *slot, requestID string) bool {
 	return s.requestID != "" && subtle.ConstantTimeCompare([]byte(s.requestID), []byte(requestID)) == 1
 }
 
-func (m *memStore) PairInit(channelID string, senderToken []byte, ttlSeconds int) (time.Time, error) {
+func (m *memStore) PairInit(channelID string, senderToken []byte, ttlSeconds int, ownerIP string) (time.Time, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -176,15 +200,23 @@ func (m *memStore) PairInit(channelID string, senderToken []byte, ttlSeconds int
 	if _, exists := m.slots[channelID]; exists {
 		return time.Time{}, errSlotExists
 	}
+	ipKey := normalizeIPKey(ownerIP)
+	if ipKey != "" && m.ipSlots[ipKey] >= maxSlotsPerIP {
+		return time.Time{}, errIPSlotsFull
+	}
 	if len(m.slots) >= maxSlots {
 		return time.Time{}, errStoreFull
 	}
 
 	exp := now.Add(clampTTL(ttlSeconds))
 	m.slots[channelID] = &slot{
+		ownerIP:     ipKey,
 		state:       "waiting",
 		senderToken: bytes.Clone(senderToken),
 		expiresAt:   exp,
+	}
+	if ipKey != "" {
+		m.ipSlots[ipKey]++
 	}
 	return exp, nil
 }
@@ -336,16 +368,13 @@ func (m *memStore) PairStatusGated(channelID, requestID string, tryAcquireHeavy 
 	case "waiting", "requested":
 		return "pending", nil, nil
 	case "rejected":
-		delete(m.slots, channelID)
-		m.releaseBytesLocked(s.size)
-		zeroSlot(s)
+		m.removeSlotLocked(channelID, s, true)
 		return "rejected", nil, nil
 	case "approved":
 		if tryAcquireHeavy != nil && !tryAcquireHeavy() {
 			return "", nil, errRelayBusy
 		}
-		delete(m.slots, channelID)
-		m.releaseBytesLocked(s.size)
+		m.removeSlotLocked(channelID, s, false)
 		return "approved", s, nil
 	default:
 		return "", nil, errPairNotFound
@@ -363,9 +392,7 @@ func (m *memStore) PairCancel(channelID string, senderToken []byte) error {
 	if err != nil {
 		return err
 	}
-	delete(m.slots, channelID)
-	m.releaseBytesLocked(s.size)
-	zeroSlot(s)
+	m.removeSlotLocked(channelID, s, true)
 	return nil
 }
 
@@ -394,6 +421,7 @@ func (m *memStore) Close() {
 		delete(m.slots, k)
 		zeroSlot(s)
 	}
+	clear(m.ipSlots)
 	m.totalBytes = 0
 }
 

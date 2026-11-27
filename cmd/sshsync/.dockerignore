@@ -1,0 +1,11 @@
+*_test.go
+README.md
+Dockerfile
+.dockerignore
+docker-compose.yml
+certs/
+*.pem
+*.crt
+*.key
+.DS_Store
+Thumbs.db

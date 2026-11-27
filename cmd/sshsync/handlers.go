@@ -68,6 +68,8 @@ func (s *relayServer) writeStoreErr(w http.ResponseWriter, ip string, err error)
 		writeJSON(w, http.StatusConflict, []byte(`{"error":"busy"}`))
 	case errors.Is(err, errRelayBusy):
 		writeJSON(w, http.StatusTooManyRequests, []byte(`{"error":"busy"}`))
+	case errors.Is(err, errIPSlotsFull):
+		writeJSON(w, http.StatusTooManyRequests, []byte(`{"error":"ip_limit"}`))
 	case errors.Is(err, errStoreFull):
 		writeJSON(w, http.StatusTooManyRequests, []byte(`{"error":"full"}`))
 	default:
@@ -103,7 +105,7 @@ func (s *relayServer) handlePairInit(w http.ResponseWriter, ip string, rawBody [
 		writeJSON(w, http.StatusBadRequest, []byte(`{"error":"invalid_fields"}`))
 		return
 	}
-	exp, err := s.store.PairInit(req.ChannelID, tok, req.TTLSeconds)
+	exp, err := s.store.PairInit(req.ChannelID, tok, req.TTLSeconds, ip)
 	if err != nil {
 		s.writeStoreErr(w, ip, err)
 		return
