@@ -58,8 +58,8 @@ export const api = {
   loadPresetTemplates: () => callGo<PresetLoadResult>('LoadPresetTemplates'),
   saveShortcut: (sc: Partial<CommandShortcut>) => callGo<CommandShortcut>('SaveShortcut', sc),
   deleteShortcut: (id: string) => callGo<void>('DeleteShortcut', id),
-  runShortcut: (sessionId: string, shortcutId: string, forceExec: boolean) =>
-    callGo<void>('RunShortcut', sessionId, shortcutId, forceExec),
+  runShortcut: (sessionId: string, shortcutId: string, execute: boolean) =>
+    callGo<void>('RunShortcut', sessionId, shortcutId, execute),
   suggestCommandsForSession: (input: string, serverId: string, sessionId: string) =>
     callGo<CompletionItem[]>('SuggestCommandsForSession', input, serverId, sessionId),
   getSettings: () => callGo<AppSettings>('GetSettings'),

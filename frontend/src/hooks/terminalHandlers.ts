@@ -142,8 +142,9 @@ export function attachTerminalImeGuard(
   }
 
   const isOtherInput = () => {
+    if (document.querySelector('[role="dialog"]')) return true
     const a = document.activeElement
-    return Boolean(a && a !== ta && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || (a as HTMLElement).isContentEditable))
+    return Boolean(a && a !== ta && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' || (a as HTMLElement).isContentEditable))
   }
 
   const onFocus = () => { if (!refocusing) trigger() }

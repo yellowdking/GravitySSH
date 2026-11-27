@@ -13,6 +13,7 @@ import type {
 import { api } from '../wailsApi'
 import { errMsg } from '../utils/errors'
 import { DEFAULT_TERMINAL_FONT } from '../components/terminalTheme'
+import { pushTerminalData } from './terminalStream'
 
 function sameSettings(a: AppSettings, b: AppSettings): boolean {
   const keys = Object.keys(a) as Array<keyof AppSettings>
@@ -49,7 +50,7 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
   const [securityInfo, setSecurityInfo] = useState<VaultSecurityInfo | null>(null)
   const [lockState, setLockState] = useState<VaultLockState | null>(null)
-  const [appVersion, setAppVersion] = useState('1.4.0')
+  const [appVersion, setAppVersion] = useState('1.4.1')
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null)
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
@@ -138,10 +139,14 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
         setSftpOpenBySession((prev) => ({ ...prev, [info.sessionId]: prev[info.sessionId] ?? true }))
       }
     })
+    const unsubTermData = api.onEvent<{ sessionId: string; data: string }>('terminal:data', (p) => {
+      if (!p?.sessionId || !p.data || closedSessionIdsRef.current.has(p.sessionId)) return
+      pushTerminalData(p.sessionId, p.data)
+    })
     const unsubCmd = api.onEvent<CommandRecord>('command:recorded', (rec) => {
       setHistory((prev) => [rec, ...prev].slice(0, 500))
     })
-    return () => { unsubStatus(); unsubCmd() }
+    return () => { unsubStatus(); unsubTermData(); unsubCmd() }
   }, [])
 
   return {

@@ -9,6 +9,24 @@ import { inspectPasteSafety, type PasteInspection } from '../utils/pasteGuard'
 import { createLogHighlighter } from '../utils/keywordHighlight'
 import { base64ToUint8Array, DEFAULT_TERMINAL_FONT } from '../components/terminalTheme'
 import { attachTerminalImeGuard as bindIme, attachTerminalInputHandlers as bindInput, createConfiguredTerminal as initTerm, syncTerminalImeAttrs as syncIme } from './terminalHandlers'
+import { attachTerminalListener } from './terminalStream'
+
+function isTerminalFocusBlocked(termTextarea?: HTMLTextAreaElement | null): boolean {
+  if (document.querySelector('[role="dialog"]')) return true
+  const activeEl = document.activeElement
+  if (
+    activeEl &&
+    activeEl !== document.body &&
+    activeEl !== termTextarea &&
+    (activeEl.tagName === 'INPUT' ||
+      activeEl.tagName === 'TEXTAREA' ||
+      activeEl.tagName === 'SELECT' ||
+      (activeEl as HTMLElement).isContentEditable)
+  ) {
+    return true
+  }
+  return false
+}
 
 interface UseTerminalOptions {
   sessionId: string
@@ -22,6 +40,7 @@ interface UseTerminalOptions {
   inputLineRef: MutableRefObject<string>
   onRequestSuggestions: (l: string) => void
   onClearSuggestions: () => void
+  onResetAutocomplete: () => void
   onMoveSelection: (d: number) => void
   onApplySelected: () => void
   onOpenSearch: () => void
@@ -66,7 +85,16 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
       }
     }
     t.paste(s)
-    t.focus()
+    if (cRef.current.active && !isTerminalFocusBlocked(t.textarea)) {
+      t.focus()
+    } else {
+      requestAnimationFrame(() => {
+        const curTerm = termRef.current
+        if (curTerm && cRef.current.active && !isTerminalFocusBlocked(curTerm.textarea)) {
+          curTerm.focus()
+        }
+      })
+    }
   }, [])
   const commitPaste = useCallback((r: string) => doPaste(r, false), [doPaste])
   const pasteText = useCallback((r: string) => doPaste(r, true), [doPaste])
@@ -100,7 +128,9 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
 
   useEffect(() => {
     syncIme(termRef.current, settings.autoSwitchEnglishIme)
-    if (active && settings.autoSwitchEnglishIme) imeRef.current?.(true)
+    if (active && settings.autoSwitchEnglishIme && !isTerminalFocusBlocked(termRef.current?.textarea)) {
+      imeRef.current?.(true)
+    }
   }, [settings.autoSwitchEnglishIme, active])
 
   useEffect(() => {
@@ -120,8 +150,8 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
     let inAltScreen = term.buffer.active.type === 'alternate'
     let pendingWrites = 0
     let escTail = ''
-    const ALT_SCREEN_RE = /\x1b\[\?(?:47|1047|1049)([hl])/g
-    const INCOMPLETE_ALT_TAIL_RE = /\x1b(?:\[(?:\?(?:[0-9]{1,4})?)?)?$/
+    const ALT_SCREEN_RE = /\x1b\[\?(?:[0-9]+;)*(?:47|1047|1049)(?:;[0-9]+)*([hl])/g
+    const INCOMPLETE_ALT_TAIL_RE = /\x1b(?:\[(?:\?[0-9;]{0,64})?)?$/
 
     const queuedWrite = (payload: string | Uint8Array) => {
       if (typeof payload === 'string' ? payload.length === 0 : payload.byteLength === 0) return
@@ -134,36 +164,41 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
       })
     }
 
-    const flushHighlighter = (writeTail: boolean) => {
+    const flushHighlighter = () => {
       if (!wasHighlighting) return
       wasHighlighting = false
       const hlTail = hl.reset()
-      if (writeTail && hlTail) queuedWrite(hlTail)
+      if (hlTail) queuedWrite(hlTail)
     }
 
-    const flushPipelineForRawMode = (writeTail: boolean) => {
+    const flushPipelineForRawMode = () => {
+      // Chronological order: hl.pending (oldest) -> escTail -> trailing UTF-8 decoder bytes
+      if (wasHighlighting) {
+        wasHighlighting = false
+        const hlTail = hl.reset()
+        if (hlTail) queuedWrite(hlTail)
+      }
       if (escTail) {
         const tail = escTail
         escTail = ''
-        if (writeTail) queuedWrite(tail)
+        queuedWrite(tail)
       }
-      const decodedTail = decActive ? dec.decode() : ''
       if (decActive) {
+        const decodedTail = dec.decode()
         decActive = false
         dec = new TextDecoder('utf-8')
-      }
-      if (wasHighlighting) {
-        wasHighlighting = false
-        const hlOut = (decodedTail ? hl.highlight(decodedTail) : '') + hl.reset()
-        if (writeTail && hlOut) queuedWrite(hlOut)
-      } else if (writeTail && decodedTail) {
-        queuedWrite(decodedTail)
+        if (decodedTail) queuedWrite(decodedTail)
       }
     }
 
     const onBufferChange = term.buffer.onBufferChange((buf) => {
+      const isAlt = buf.type === 'alternate'
       if (pendingWrites === 0) {
-        inAltScreen = buf.type === 'alternate'
+        inAltScreen = isAlt
+      }
+      if (isAlt) {
+        cRef.current.inputLineRef.current = ''
+        cRef.current.onResetAutocomplete()
       }
     })
 
@@ -193,7 +228,7 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
       const c = cRef.current
       if (term.buffer.active.type === 'alternate') {
         c.inputLineRef.current = ''
-        c.onClearSuggestions()
+        c.onResetAutocomplete()
         return
       }
       const n = applyTerminalInputToLine(c.inputLineRef.current, d)
@@ -204,11 +239,11 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
     const onResize = term.onResize(({ cols, rows }) => {
       sendResize(cols, rows)
     })
-    const unsub = api.onEvent<{ sessionId: string; data: string }>('terminal:data', (p) => {
-      if (p.sessionId !== sessionId || !p.data) return
-      const b = base64ToUint8Array(p.data)
+    const unsub = attachTerminalListener(sessionId, (data) => {
+      if (!data) return
+      const b = base64ToUint8Array(data)
       if (!sRef.current.keywordHighlightEnabled) {
-        flushPipelineForRawMode(true)
+        flushPipelineForRawMode()
         queuedWrite(b)
         return
       }
@@ -244,8 +279,10 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
           }
         }
         if (match[1] === 'h') {
-          if (!inAltScreen) flushHighlighter(true)
+          if (!inAltScreen) flushHighlighter()
           inAltScreen = true
+          cRef.current.inputLineRef.current = ''
+          cRef.current.onResetAutocomplete()
         } else {
           inAltScreen = false
         }
@@ -302,7 +339,7 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
     syncSize()
     const t = setTimeout(() => {
       syncSize()
-      if (active) {
+      if (active && !isTerminalFocusBlocked(termRef.current?.textarea)) {
         termRef.current?.focus()
         imeRef.current?.(true)
       }
@@ -314,8 +351,10 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
     if (!active) return
     const id = setTimeout(() => {
       syncSize()
-      termRef.current?.focus()
-      imeRef.current?.(true)
+      if (!isTerminalFocusBlocked(termRef.current?.textarea)) {
+        termRef.current?.focus()
+        imeRef.current?.(true)
+      }
     }, 40)
     return () => clearTimeout(id)
   }, [active, showSftp, rightDrawer, settings.monitorBarEnabled, syncSize])

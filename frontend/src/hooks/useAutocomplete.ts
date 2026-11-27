@@ -44,6 +44,7 @@ export function useAutocomplete({ enabled, serverId, sessionId, inputLineRef, on
     if (!enabled || !line.trimStart()) {
       reqSeqRef.current++
       dismissedLineRef.current = null
+      suggestionsRef.current = []
       setSuggestions([])
       return
     }
@@ -54,9 +55,17 @@ export function useAutocomplete({ enabled, serverId, sessionId, inputLineRef, on
       const seq = ++reqSeqRef.current
       try {
         const list = await api.suggestCommandsForSession(line, serverId, sessionId)
-        if (seq === reqSeqRef.current) { setSuggestions((list || []).slice(0, 5)); setSelectedIdx(0) }
+        if (seq === reqSeqRef.current) {
+          const next = (list || []).slice(0, 5)
+          suggestionsRef.current = next
+          setSuggestions(next)
+          setSelectedIdx(0)
+        }
       } catch {
-        if (seq === reqSeqRef.current) setSuggestions([])
+        if (seq === reqSeqRef.current) {
+          suggestionsRef.current = []
+          setSuggestions([])
+        }
       }
     }
 
@@ -66,7 +75,11 @@ export function useAutocomplete({ enabled, serverId, sessionId, inputLineRef, on
   }, [cancelDebounce, enabled, serverId, sessionId])
 
   useEffect(() => { if (!enabled) clearSuggestions(false) }, [enabled, clearSuggestions])
-  useEffect(() => () => cancelDebounce(), [cancelDebounce])
+  useEffect(() => () => {
+    reqSeqRef.current++
+    cancelDebounce()
+    suggestionsRef.current = []
+  }, [cancelDebounce])
 
   const moveSelection = useCallback((delta: number) => {
     setSelectedIdx((p) => {

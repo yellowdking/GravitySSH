@@ -3,6 +3,7 @@ import type { ServerView } from './types'
 import { useAppData } from './hooks/useAppData'
 import { useLayoutState } from './hooks/useLayoutState'
 import { createSessionActions } from './hooks/useSessionActions'
+import type { TerminalActions } from './hooks/terminalStream'
 import { useActionDialogs } from './hooks/useActionDialogs'
 import { Sidebar, type SidebarTab } from './components/Sidebar'
 import { HistoryPanel } from './components/HistoryPanel'
@@ -41,10 +42,16 @@ export default function App() {
   sessionsRef.current = sessions
   const serversRef = useRef(servers)
   serversRef.current = servers
+  const terminalActionsRef = useRef<Map<string, TerminalActions>>(new Map())
+
+  const registerTerminalActions = useCallback((sessionId: string, actions: TerminalActions | null) => {
+    if (actions) terminalActionsRef.current.set(sessionId, actions)
+    else terminalActionsRef.current.delete(sessionId)
+  }, [])
 
   const act = createSessionActions({
     activeNav: nav, setActiveNav: setNav, activeSessionId: sid, setActiveSessionId: data.setActiveSessionId,
-    sessionsRef, closedSessionIdsRef: data.closedSessionIdsRef, setSessions: data.setSessions, setSftpOpenBySession, setShortcuts: data.setShortcuts,
+    sessionsRef, closedSessionIdsRef: data.closedSessionIdsRef, terminalActionsRef, setSessions: data.setSessions, setSftpOpenBySession, setShortcuts: data.setShortcuts,
     settings, setSettings: data.setSettings, reloadServers, confirm, showToast: notify,
     estimatePty: () => lay.estimateInitialPty(wsRef.current, settings.terminalFontSize, settings.autoOpenSftp, drw !== 'none'),
   })
@@ -98,6 +105,7 @@ export default function App() {
                   onToggleRightDrawer={toggleRightDrawer}
                   onToggleAutocomplete={handleToggleAutocomplete}
                   onReconnect={reconn}
+                  onRegisterTerminal={registerTerminalActions}
                   onToast={notify}
                 />
               )

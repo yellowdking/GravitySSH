@@ -20,14 +20,15 @@ export function useSftpState(
   const [showHidden, setShowHidden] = useState(false)
   const [error, setError] = useState('')
   const [transfers, setTransfers] = useState<Record<string, TransferProgress>>({})
-  const [editingFile, setEditingFile] = useState<{ path: string; content: string } | null>(null)
-  const [savingFile, setSavingFile] = useState(false)
+  const [editingFile, setEditingFile] = useState<{ token: number; path: string; content: string } | null>(null)
+  const [savingToken, setSavingToken] = useState<number | null>(null)
 
   const currentPathRef = useRef(currentPath)
   currentPathRef.current = currentPath
   const editingFileRef = useRef(editingFile)
   editingFileRef.current = editingFile
   const editorTokenRef = useRef(0)
+  const savingTokenRef = useRef<number | null>(null)
   const pathFocusedRef = useRef(false)
   const pathDirtyRef = useRef(false)
   const loadSeqRef = useRef(0)
@@ -35,17 +36,33 @@ export function useSftpState(
   const { confirm, prompt, dialogNode } = useActionDialogs()
 
   const setActiveEditingFile = useCallback((file: { path: string; content: string } | null) => {
-    editorTokenRef.current++
-    editingFileRef.current = file
-    setEditingFile(file)
+    const nextToken = ++editorTokenRef.current
+    const next = file ? { token: nextToken, path: file.path, content: file.content } : null
+    editingFileRef.current = next
+    setEditingFile(next)
   }, [])
 
   const updateEditingFileIfCurrent = useCallback((token: number, file: { path: string; content: string }) => {
     if (editorTokenRef.current !== token || !editingFileRef.current || editingFileRef.current.path !== file.path) {
       return
     }
-    editingFileRef.current = file
-    setEditingFile(file)
+    const next = { token, path: file.path, content: file.content }
+    editingFileRef.current = next
+    setEditingFile(next)
+  }, [])
+
+  const beginSaving = useCallback((token: number) => {
+    if (savingTokenRef.current === token) return false
+    savingTokenRef.current = token
+    setSavingToken(token)
+    return true
+  }, [])
+
+  const endSaving = useCallback((token: number) => {
+    if (savingTokenRef.current === token) {
+      savingTokenRef.current = null
+      setSavingToken((prev) => (prev === token ? null : prev))
+    }
   }, [])
 
   const handlePathInputChange = useCallback((next: string) => {
@@ -171,10 +188,14 @@ export function useSftpState(
   useEffect(() => {
     if (!active || !session.sftpReady) return
     return api.onFileDrop(async (paths) => {
+      if (document.querySelector('[role="dialog"]')) return
       try {
         const dest = currentPathRef.current
         const count = await api.sftpUploadFiles(session.sessionId, paths, dest)
-        if (count > 0) { onToast(`已通过拖拽上传 ${count} 个文件到 ${dest}`); void loadDir(dest, false, false) }
+        if (count > 0) {
+          onToast(`已通过拖拽上传 ${count} 个文件到 ${dest}`)
+          if (currentPathRef.current === dest) void loadDir(dest, false, false)
+        }
       } catch (err) { onToast(`拖拽上传失败: ${errMsg(err)}`, 'error') }
     })
   }, [active, session.sftpReady, session.sessionId, loadDir, onToast])
@@ -185,6 +206,7 @@ export function useSftpState(
   )
 
   const transferList = useMemo(() => Object.values(transfers), [transfers])
+  const savingFile = editingFile !== null && savingToken === editingFile.token
 
   const actions = useMemo(
     () =>
@@ -192,19 +214,19 @@ export function useSftpState(
         sessionId: session.sessionId,
         getCurrentPath: () => currentPathRef.current,
         getEditingFile: () => editingFileRef.current,
-        getEditorToken: () => editorTokenRef.current,
         addBusyPath,
         removeBusyPath,
         removeEntryLocally,
         setEditingFile: setActiveEditingFile,
         updateEditingFileIfCurrent,
-        setSavingFile,
+        beginSaving,
+        endSaving,
         loadDir: (p, syncCwd) => loadDir(p, syncCwd, false),
         confirm,
         prompt,
         onToast,
       }),
-    [session.sessionId, addBusyPath, removeBusyPath, removeEntryLocally, setActiveEditingFile, updateEditingFileIfCurrent, loadDir, confirm, prompt, onToast]
+    [session.sessionId, addBusyPath, removeBusyPath, removeEntryLocally, setActiveEditingFile, updateEditingFileIfCurrent, beginSaving, endSaving, loadDir, confirm, prompt, onToast]
   )
 
   return {

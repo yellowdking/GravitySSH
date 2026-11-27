@@ -126,8 +126,29 @@ describe('autocomplete helpers', () => {
     expect(formatBytes(1024 * 1024 * 3.5)).toBe('3.5 MB')
   })
 
-  it('normalizes CRLF/CR and strips bracketed paste escapes for clean nano pasting', () => {
+  it('resets input buffer on readline control keys, unlisted ESC sequences, and embedded ESC', () => {
+    expect(applyTerminalInputToLine('cd /opt', '\x01')).toBe('') // Ctrl+A
+    expect(applyTerminalInputToLine('cd /opt', '\x02')).toBe('') // Ctrl+B
+    expect(applyTerminalInputToLine('cd /opt', '\x05')).toBe('') // Ctrl+E
+    expect(applyTerminalInputToLine('cd /opt', '\x0b')).toBe('') // Ctrl+K
+    expect(applyTerminalInputToLine('cd /opt', '\x12')).toBe('') // Ctrl+R
+    expect(applyTerminalInputToLine('cd /opt', '\x01sudo ')).toBe('')
+    expect(applyTerminalInputToLine('cd /opt', '\x1b[1;5D')).toBe('') // Ctrl+Left
+    expect(applyTerminalInputToLine('cd /opt', '\x1b[3~')).toBe('') // Delete
+    expect(applyTerminalInputToLine('cd /opt', '\x1b\x7f')).toBe('') // Alt+Backspace
+    expect(applyTerminalInputToLine('cd /opt', '\x1bb')).toBe('') // Alt+B
+    expect(applyTerminalInputToLine('cd /opt', 'a\x1b[Db')).toBe('') // embedded ESC
+    expect(applyTerminalInputToLine('cd /opt', '\x9bD')).toBe('') // C1 CSI
+  })
+
+  it('normalizes CRLF/CR and loop-strips nested 7-bit and C1 bracketed paste escapes', () => {
     expect(sanitizePasteText('line1\r\nline2\r\n  indented\rline3')).toBe('line1\nline2\n  indented\nline3')
     expect(sanitizePasteText('a\x1b[201~b\x1b[200~c')).toBe('abc')
+    // Nested breakout payloads must be stripped until fixed point
+    expect(sanitizePasteText('safe\x1b[20\x1b[201~1~\nevil\n')).toBe('safe\nevil\n')
+    expect(sanitizePasteText('safe\x1b\x1b[200~[201~evil')).toBe('safeevil')
+    expect(sanitizePasteText('safe\x9b201~evil\x9b200~')).toBe('safeevil')
+    expect(sanitizePasteText('safe\x9b20\x9b201~1~evil')).toBe('safeevil')
+    expect(sanitizePasteText('x\x1b[20\x1b[20\x1b[201~1~1~y')).toBe('xy')
   })
 })

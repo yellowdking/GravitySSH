@@ -1,22 +1,24 @@
-import type { MutableRefObject } from 'react'
+import type { Dispatch, MutableRefObject, SetStateAction } from 'react'
 import type { AppSettings, CommandShortcut, ServerView, SessionInfo } from '../types'
 import { api } from '../wailsApi'
 import { errMsg } from '../utils/errors'
 import type { ConfirmOptions } from './useActionDialogs'
 import type { SidebarTab } from '../components/Sidebar'
+import { discardTerminalBuffer, type TerminalActions } from './terminalStream'
 
 interface ActionDeps {
   activeNav: SidebarTab
   setActiveNav: (tab: SidebarTab) => void
   activeSessionId: string | null
-  setActiveSessionId: (id: string | null) => void
+  setActiveSessionId: Dispatch<SetStateAction<string | null>>
   sessionsRef: MutableRefObject<SessionInfo[]>
   closedSessionIdsRef: MutableRefObject<Set<string>>
-  setSessions: React.Dispatch<React.SetStateAction<SessionInfo[]>>
-  setSftpOpenBySession: React.Dispatch<React.SetStateAction<Record<string, boolean>>>
-  setShortcuts: React.Dispatch<React.SetStateAction<CommandShortcut[]>>
+  terminalActionsRef: MutableRefObject<Map<string, TerminalActions>>
+  setSessions: Dispatch<SetStateAction<SessionInfo[]>>
+  setSftpOpenBySession: Dispatch<SetStateAction<Record<string, boolean>>>
+  setShortcuts: Dispatch<SetStateAction<CommandShortcut[]>>
   settings: AppSettings
-  setSettings: React.Dispatch<React.SetStateAction<AppSettings>>
+  setSettings: Dispatch<SetStateAction<AppSettings>>
   estimatePty: () => { cols: number; rows: number }
   reloadServers: () => Promise<void>
   confirm: (opts: ConfirmOptions) => Promise<boolean>
@@ -29,10 +31,15 @@ export function createSessionActions(d: ActionDeps) {
       d.setActiveNav('servers')
       const { cols, rows } = d.estimatePty()
       const sess = await api.connectServer(srv.id, cols, rows)
-      d.closedSessionIdsRef.current.delete(sess.sessionId)
+      if (d.closedSessionIdsRef.current.has(sess.sessionId)) {
+        discardTerminalBuffer(sess.sessionId)
+        return
+      }
       d.setSessions((prev) => (prev.some((s) => s.sessionId === sess.sessionId) ? prev : [...prev, sess]))
       d.setActiveSessionId(sess.sessionId)
-      if (d.settings.autoOpenSftp) d.setSftpOpenBySession((prev) => ({ ...prev, [sess.sessionId]: true }))
+      if (d.settings.autoOpenSftp) {
+        d.setSftpOpenBySession((prev) => ({ ...prev, [sess.sessionId]: prev[sess.sessionId] ?? true }))
+      }
     } catch (err) {
       d.showToast(`发起连接失败: ${errMsg(err)}`, 'error')
     }
@@ -46,12 +53,7 @@ export function createSessionActions(d: ActionDeps) {
       const oldest = closed.values().next().value
       if (oldest) closed.delete(oldest)
     }
-    try {
-      await api.disconnectSession(sessionId)
-    } catch (err) {
-      d.showToast(`断开会话失败: ${errMsg(err)}`, 'error')
-    }
-    const remaining = d.sessionsRef.current.filter((s) => s.sessionId !== sessionId)
+    discardTerminalBuffer(sessionId)
     d.setSessions((prev) => prev.filter((s) => s.sessionId !== sessionId))
     d.setSftpOpenBySession((prev) => {
       if (!(sessionId in prev)) return prev
@@ -59,8 +61,17 @@ export function createSessionActions(d: ActionDeps) {
       delete next[sessionId]
       return next
     })
-    if (d.activeSessionId === sessionId) {
-      d.setActiveSessionId(remaining.length > 0 ? remaining[remaining.length - 1].sessionId : null)
+    d.setActiveSessionId((cur) => {
+      if (cur !== sessionId) return cur
+      const remaining = d.sessionsRef.current.filter(
+        (s) => s.sessionId !== sessionId && !closed.has(s.sessionId)
+      )
+      return remaining.length > 0 ? remaining[remaining.length - 1].sessionId : null
+    })
+    try {
+      await api.disconnectSession(sessionId)
+    } catch (err) {
+      d.showToast(`断开会话失败: ${errMsg(err)}`, 'error')
     }
   }
 
@@ -92,13 +103,33 @@ export function createSessionActions(d: ActionDeps) {
     }
   }
 
+  const fillActiveTerminal = (raw: string): boolean => {
+    if (!d.activeSessionId) {
+      d.showToast('请先在左侧连接一台服务器', 'error')
+      return false
+    }
+    const termAct = d.terminalActionsRef.current.get(d.activeSessionId)
+    if (!termAct) {
+      d.showToast('终端尚未就绪，请稍后重试', 'error')
+      return false
+    }
+    const fillText = raw.replace(/[\r\n]+$/, '')
+    if (d.activeNav !== 'servers') d.setActiveNav('servers')
+    if (fillText) termAct.pasteText(fillText)
+    return true
+  }
+
   const handleRunCommand = async (cmd: string, execute: boolean): Promise<boolean> => {
     if (!d.activeSessionId) {
       d.showToast('请先在左侧连接一台服务器', 'error')
       return false
     }
+    if (!execute) {
+      return fillActiveTerminal(cmd)
+    }
     try {
-      await api.writeTerminal(d.activeSessionId, execute && !/[\r\n]$/.test(cmd) ? cmd + '\r' : cmd)
+      d.terminalActionsRef.current.get(d.activeSessionId)?.resetInputLine()
+      await api.writeTerminal(d.activeSessionId, !/[\r\n]$/.test(cmd) ? cmd + '\r' : cmd)
       if (d.activeNav !== 'servers') d.setActiveNav('servers')
       return true
     } catch (err) {
@@ -109,8 +140,13 @@ export function createSessionActions(d: ActionDeps) {
 
   const handleRunShortcut = async (sc: CommandShortcut, execute: boolean) => {
     if (!d.activeSessionId) return d.showToast('请先在左侧连接一台服务器', 'error')
+    if (!execute) {
+      fillActiveTerminal(sc.command)
+      return
+    }
     try {
-      await api.runShortcut(d.activeSessionId, sc.id, execute)
+      d.terminalActionsRef.current.get(d.activeSessionId)?.resetInputLine()
+      await api.runShortcut(d.activeSessionId, sc.id, true)
       if (d.activeNav !== 'servers') d.setActiveNav('servers')
       d.setShortcuts((await api.listShortcuts()) || [])
     } catch (err) {

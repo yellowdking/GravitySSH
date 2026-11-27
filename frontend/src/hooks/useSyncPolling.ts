@@ -3,16 +3,18 @@ import { useEffect, useRef } from 'react'
 interface UseSyncPollingOptions {
   enabled: boolean
   intervalMs?: number
+  resetKey?: string | number | null
   poll: () => Promise<boolean>
 }
 
-export function useSyncPolling({ enabled, intervalMs = 1500, poll }: UseSyncPollingOptions) {
+export function useSyncPolling({ enabled, intervalMs = 1500, resetKey, poll }: UseSyncPollingOptions) {
   const pollRef = useRef(poll)
   pollRef.current = poll
 
   useEffect(() => {
     if (!enabled) return
     let cancelled = false
+    let stopped = false
     let inFlight = false
     let timer: ReturnType<typeof setTimeout> | null = null
 
@@ -25,7 +27,7 @@ export function useSyncPolling({ enabled, intervalMs = 1500, poll }: UseSyncPoll
 
     const schedule = (delay: number) => {
       clearTimer()
-      if (cancelled || document.hidden) return
+      if (cancelled || stopped || document.hidden) return
       timer = setTimeout(() => {
         timer = null
         void runOnce()
@@ -33,7 +35,7 @@ export function useSyncPolling({ enabled, intervalMs = 1500, poll }: UseSyncPoll
     }
 
     const runOnce = async () => {
-      if (cancelled || document.hidden || inFlight) return
+      if (cancelled || stopped || document.hidden || inFlight) return
       inFlight = true
       let shouldContinue = true
       try {
@@ -43,15 +45,20 @@ export function useSyncPolling({ enabled, intervalMs = 1500, poll }: UseSyncPoll
       } finally {
         inFlight = false
       }
-      if (!cancelled && shouldContinue && !document.hidden) {
-        schedule(intervalMs)
+      if (!cancelled) {
+        if (!shouldContinue) {
+          stopped = true
+          clearTimer()
+        } else if (!document.hidden) {
+          schedule(intervalMs)
+        }
       }
     }
 
     const onVisibility = () => {
       if (document.hidden) {
         clearTimer()
-      } else if (!cancelled && !inFlight) {
+      } else if (!cancelled && !stopped && !inFlight) {
         schedule(150)
       }
     }
@@ -64,5 +71,5 @@ export function useSyncPolling({ enabled, intervalMs = 1500, poll }: UseSyncPoll
       clearTimer()
       document.removeEventListener('visibilitychange', onVisibility)
     }
-  }, [enabled, intervalMs])
+  }, [enabled, intervalMs, resetKey])
 }
