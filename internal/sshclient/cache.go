@@ -39,7 +39,12 @@ func (m *Manager) knownHostsPath() string {
 }
 
 func CountKnownHosts(p string) int {
+	if strings.TrimSpace(p) == "" {
+		return 0
+	}
+	knownHostsMu.Lock()
 	raw, err := os.ReadFile(p)
+	knownHostsMu.Unlock()
 	if err != nil {
 		return 0
 	}

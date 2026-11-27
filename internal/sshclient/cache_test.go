@@ -248,3 +248,25 @@ func TestManagerCacheUsesKnownHostsPath(t *testing.T) {
 		t.Fatalf("unexpected ClearAllSSHCache: %+v err=%v", allRes, err)
 	}
 }
+
+func TestKnownHostsBracketedPortWildcardMatcher(t *testing.T) {
+	// Bracketed [host]:port wildcards must treat '[' and ']' literally, NOT as path.Match char classes.
+	if !matchWildcard("[10.0.0.*]:2222", "[10.0.0.5]:2222") {
+		t.Fatal("expected [10.0.0.*]:2222 to match [10.0.0.5]:2222")
+	}
+	if !matchWildcard("[10.0.0.?]:2222", "[10.0.0.5]:2222") {
+		t.Fatal("expected [10.0.0.?]:2222 to match [10.0.0.5]:2222")
+	}
+	if matchWildcard("[10.0.0.?]:2222", "[10.0.0.50]:2222") {
+		t.Fatal("did not expect [10.0.0.?]:2222 to match [10.0.0.50]:2222")
+	}
+	if !matchWildcard("[::1]:*", "[::1]:2222") {
+		t.Fatal("expected [::1]:* to match [::1]:2222")
+	}
+	if !hostFieldMatchesTargets("[10.0.0.*]:2222,![10.0.0.9]:2222", []string{"[10.0.0.5]:2222"}) {
+		t.Fatal("expected positive bracketed wildcard match")
+	}
+	if hostFieldMatchesTargets("[10.0.0.*]:2222,![10.0.0.9]:2222", []string{"[10.0.0.9]:2222"}) {
+		t.Fatal("expected negated bracketed pattern to reject [10.0.0.9]:2222")
+	}
+}

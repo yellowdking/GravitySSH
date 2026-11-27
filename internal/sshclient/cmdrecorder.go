@@ -322,11 +322,10 @@ func (r *CommandRecorder) Feed(data []byte) {
 			r.awaitingSecret = false
 
 		case 0x15: // Ctrl+U (delete to start of line)
-			if r.cursor > 0 {
+			if !r.dirtyHist && r.cursor > 0 {
 				r.buf = r.buf[r.cursor:]
 				r.cursor = 0
 			}
-			r.dirtyHist = false
 
 		case 0x0b: // Ctrl+K (delete to end of line)
 			if r.cursor < len(r.buf) {
@@ -381,13 +380,8 @@ func (r *CommandRecorder) deletePrevWord() {
 }
 
 func (r *CommandRecorder) insertRune(rn rune) {
-	if r.inAltScreen {
+	if r.inAltScreen || r.dirtyHist {
 		return
-	}
-	if r.dirtyHist {
-		r.buf = nil
-		r.cursor = 0
-		r.dirtyHist = false
 	}
 	if len(r.buf) >= maxRecorderBufRunes {
 		return
