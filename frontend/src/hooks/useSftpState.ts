@@ -5,6 +5,54 @@ import { errMsg } from '../utils/errors'
 import { useActionDialogs } from './useActionDialogs'
 import { createSftpActions } from './sftpActions'
 
+export const MAX_ERROR_TRANSFERS = 8
+export const MAX_DONE_TRANSFERS = 6
+
+export function pruneTransferMap(
+  map: Record<string, TransferProgress>,
+  maxErrors = MAX_ERROR_TRANSFERS,
+  maxDone = MAX_DONE_TRANSFERS
+): { next: Record<string, TransferProgress>; evictedIds: string[] } {
+  const entries = Object.entries(map)
+  const errorIds: string[] = []
+  const doneIds: string[] = []
+  for (const [id, tr] of entries) {
+    if (tr.status === 'error') errorIds.push(id)
+    else if (tr.status === 'done') doneIds.push(id)
+  }
+  const evict = new Set<string>()
+  if (errorIds.length > maxErrors) {
+    for (let i = 0; i < errorIds.length - maxErrors; i++) evict.add(errorIds[i])
+  }
+  if (doneIds.length > maxDone) {
+    for (let i = 0; i < doneIds.length - maxDone; i++) evict.add(doneIds[i])
+  }
+  if (evict.size === 0) return { next: map, evictedIds: [] }
+  const next: Record<string, TransferProgress> = {}
+  for (const [id, tr] of entries) {
+    if (!evict.has(id)) next[id] = tr
+  }
+  return { next, evictedIds: Array.from(evict) }
+}
+
+export function markRunningTransfersInterrupted(
+  map: Record<string, TransferProgress>,
+  reason = '连接已断开，传输已中断'
+): Record<string, TransferProgress> {
+  let changed = false
+  const next: Record<string, TransferProgress> = {}
+  for (const [id, tr] of Object.entries(map)) {
+    if (tr.status === 'running') {
+      changed = true
+      next[id] = { ...tr, status: 'error', error: tr.error || reason }
+    } else {
+      next[id] = tr
+    }
+  }
+  if (!changed) return map
+  return pruneTransferMap(next).next
+}
+
 export function useSftpState(
   session: SessionInfo,
   active: boolean,
@@ -91,6 +139,26 @@ export function useSftpState(
     })
   }, [])
 
+  const clearFinishedTransfers = useCallback(() => {
+    setTransfers((prev) => {
+      let changed = false
+      const next: Record<string, TransferProgress> = {}
+      for (const [id, tr] of Object.entries(prev)) {
+        if (tr.status === 'done' || tr.status === 'error') {
+          changed = true
+          const existing = dismissTimersRef.current.get(id)
+          if (existing !== undefined) {
+            clearTimeout(existing)
+            dismissTimersRef.current.delete(id)
+          }
+        } else {
+          next[id] = tr
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [])
+
   useEffect(() => {
     const timers = dismissTimersRef.current
     return () => {
@@ -140,7 +208,7 @@ export function useSftpState(
         }
         setParentPath(res.parent)
         setEntries(res.entries || [])
-        if (syncCwd) void api.setSessionCwd(session.sessionId, res.path)
+        if (syncCwd) void api.setSessionCwd(session.sessionId, res.path).catch(() => {})
       } catch (err) {
         if (seq === loadSeqRef.current) setError(errMsg(err))
       } finally {
@@ -164,9 +232,27 @@ export function useSftpState(
   }, [followTerminal, session.sftpReady, session.sessionId, loadDir])
 
   useEffect(() => {
+    if (session.status === 'connected') return
+    setTransfers((prev) => markRunningTransfersInterrupted(prev))
+  }, [session.status])
+
+  useEffect(() => {
     return api.onEvent<TransferProgress>('sftp:progress', (prog) => {
       if (prog.sessionId !== session.sessionId) return
-      setTransfers((prev) => ({ ...prev, [prog.transferId]: prog }))
+      setTransfers((prev) => {
+        const updated = { ...prev }
+        delete updated[prog.transferId]
+        updated[prog.transferId] = prog
+        const { next, evictedIds } = pruneTransferMap(updated)
+        for (const id of evictedIds) {
+          const t = dismissTimersRef.current.get(id)
+          if (t !== undefined) {
+            clearTimeout(t)
+            dismissTimersRef.current.delete(id)
+          }
+        }
+        return next
+      })
       if (prog.status === 'done') {
         if (prog.direction === 'upload') void loadDir(currentPathRef.current, false, false)
         const existing = dismissTimersRef.current.get(prog.transferId)
@@ -181,6 +267,12 @@ export function useSftpState(
           })
         }, 3500)
         dismissTimersRef.current.set(prog.transferId, timer)
+      } else if (prog.status === 'error') {
+        const existing = dismissTimersRef.current.get(prog.transferId)
+        if (existing !== undefined) {
+          clearTimeout(existing)
+          dismissTimersRef.current.delete(prog.transferId)
+        }
       }
     })
   }, [session.sessionId, loadDir])
@@ -232,7 +324,7 @@ export function useSftpState(
   return {
     currentPath, pathInput, setPathInput: handlePathInputChange, onPathInputFocusChange: handlePathInputFocusChange,
     parentPath, visibleEntries, loading, busyPaths,
-    showHidden, setShowHidden, error, transfers: transferList, dismissTransfer,
+    showHidden, setShowHidden, error, transfers: transferList, dismissTransfer, clearFinishedTransfers,
     editingFile, setEditingFile: setActiveEditingFile, savingFile, loadDir, dialogNode, ...actions,
   }
 }

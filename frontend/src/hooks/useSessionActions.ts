@@ -6,6 +6,13 @@ import type { ConfirmOptions } from './useActionDialogs'
 import type { SidebarTab } from '../components/Sidebar'
 import { discardTerminalBuffer, type TerminalActions } from './terminalStream'
 
+export interface AutocompleteToggleState {
+  seq: number
+  lastConfirmedSeq: number
+  inFlight: number
+  confirmedEnabled: boolean
+}
+
 interface ActionDeps {
   activeNav: SidebarTab
   setActiveNav: (tab: SidebarTab) => void
@@ -18,6 +25,8 @@ interface ActionDeps {
   setSftpOpenBySession: Dispatch<SetStateAction<Record<string, boolean>>>
   setShortcuts: Dispatch<SetStateAction<CommandShortcut[]>>
   settings: AppSettings
+  settingsRef?: MutableRefObject<AppSettings>
+  autocompleteToggleStateRef?: MutableRefObject<AutocompleteToggleState>
   setSettings: Dispatch<SetStateAction<AppSettings>>
   estimatePty: () => { cols: number; rows: number }
   reloadServers: () => Promise<void>
@@ -92,14 +101,41 @@ export function createSessionActions(d: ActionDeps) {
   }
 
   const handleToggleAutocomplete = async () => {
-    const next = { ...d.settings, autocompleteEnabled: !d.settings.autocompleteEnabled }
+    const state = d.autocompleteToggleStateRef?.current ?? {
+      seq: 0,
+      lastConfirmedSeq: 0,
+      inFlight: 0,
+      confirmedEnabled: (d.settingsRef?.current ?? d.settings).autocompleteEnabled,
+    }
+    const baseSettings = d.settingsRef?.current ?? d.settings
+    if (state.inFlight === 0) {
+      state.confirmedEnabled = baseSettings.autocompleteEnabled
+    }
+    const seq = ++state.seq
+    state.inFlight++
+    const next: AppSettings = { ...baseSettings, autocompleteEnabled: !baseSettings.autocompleteEnabled }
+    if (d.settingsRef) d.settingsRef.current = next
     d.setSettings(next)
     try {
       const saved = await api.saveSettings(next)
+      if (seq >= state.lastConfirmedSeq) {
+        state.lastConfirmedSeq = seq
+        state.confirmedEnabled = saved.autocompleteEnabled
+      }
+      if (seq !== state.seq) return
+      if (d.settingsRef) d.settingsRef.current = saved
       d.setSettings(saved)
       d.showToast(saved.autocompleteEnabled ? '已开启智能命令补齐' : '已关闭智能命令补齐')
     } catch (err) {
-      d.showToast(errMsg(err), 'error')
+      if (seq === state.seq) {
+        const cur = d.settingsRef?.current ?? next
+        const rolledBack: AppSettings = { ...cur, autocompleteEnabled: state.confirmedEnabled }
+        if (d.settingsRef) d.settingsRef.current = rolledBack
+        d.setSettings(rolledBack)
+        d.showToast(errMsg(err), 'error')
+      }
+    } finally {
+      state.inFlight = Math.max(0, state.inFlight - 1)
     }
   }
 
