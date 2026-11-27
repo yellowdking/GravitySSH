@@ -82,10 +82,6 @@ func NormalizedCmdPath(eff []string, endsWithSpace bool) string {
 	return strings.Join(parts, " ")
 }
 
-func MatchSubcommands(eff []string, endsWithSpace bool) []SubcmdSpec {
-	return matchSubcommandsForPath(NormalizedCmdPath(eff, endsWithSpace), eff, endsWithSpace)
-}
-
 func matchSubcommandsForPath(cmdPath string, eff []string, endsWithSpace bool) []SubcmdSpec {
 	if cmdPath == "" || len(eff) == 0 || (len(eff) == 1 && !endsWithSpace) {
 		return nil

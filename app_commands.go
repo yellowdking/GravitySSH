@@ -114,10 +114,27 @@ func (a *App) RunShortcut(sessionID, shortcutID string, forceExecute bool) error
 	if err := a.sshMgr.WriteInput(sessionID, lines[0]+"\r"); err != nil || len(lines) == 1 {
 		return err
 	}
+	ctx := a.ctx
+	var ctxDone <-chan struct{}
+	if ctx != nil {
+		ctxDone = ctx.Done()
+	}
+	stopCh := a.sshMgr.SessionStopCh(sessionID)
 	rest := lines[1:]
 	go func() {
-		for _, line := range rest {
-			time.Sleep(35 * time.Millisecond)
+		timer := time.NewTimer(35 * time.Millisecond)
+		defer timer.Stop()
+		for i, line := range rest {
+			if i > 0 {
+				timer.Reset(35 * time.Millisecond)
+			}
+			select {
+			case <-ctxDone:
+				return
+			case <-stopCh:
+				return
+			case <-timer.C:
+			}
 			if err := a.sshMgr.WriteInput(sessionID, line+"\r"); err != nil {
 				return
 			}
@@ -142,10 +159,10 @@ func (a *App) SuggestCommandsForSession(input, serverID, sessionID string) ([]mo
 		homeDir = a.sshMgr.GetSessionHomeDir(sessionID)
 		cwdEntries = a.sshMgr.PeekCachedDirEntries(sessionID, cwd)
 		if targetDir, active := autocomplete.ExtractPathContextWithHome(input, cwd, homeDir); active {
-			if targetDir == cwd && len(cwdEntries) > 0 {
+			if targetDir == cwd {
 				targetEntries = cwdEntries
 			} else {
-				targetEntries = a.sshMgr.CachedDirEntries(sessionID, targetDir)
+				targetEntries = a.sshMgr.PeekCachedDirEntries(sessionID, targetDir)
 			}
 		}
 	}

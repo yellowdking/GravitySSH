@@ -15,7 +15,7 @@ import (
 )
 
 // AppVersion can be overridden at build time via -ldflags "-X main.AppVersion=..."
-var AppVersion = "1.3.5"
+var AppVersion = "1.3.6"
 
 //go:embed all:frontend/dist
 var assets embed.FS

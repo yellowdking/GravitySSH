@@ -52,7 +52,7 @@ func (b *dataBlob) toBytes() []byte {
 
 func (b *dataBlob) zero() {
 	if b.cbData > 0 && b.pbData != nil {
-		ZeroBytes(unsafe.Slice(b.pbData, b.cbData))
+		clear(unsafe.Slice(b.pbData, b.cbData))
 	}
 }
 

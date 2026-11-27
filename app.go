@@ -8,11 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
-	"github.com/yellowdking/GravitySSH/internal/crypto"
 	"github.com/yellowdking/GravitySSH/internal/models"
 	"github.com/yellowdking/GravitySSH/internal/sshclient"
+	"github.com/yellowdking/GravitySSH/internal/syncclient"
 	"github.com/yellowdking/GravitySSH/internal/updater"
 	"github.com/yellowdking/GravitySSH/internal/vault"
 )
@@ -30,16 +31,19 @@ func (w *wailsEventSink) Emit(eventName string, data ...any) {
 }
 
 type App struct {
-	ctx       context.Context
-	store     *vault.Store
-	sshMgr    *sshclient.Manager
-	syncCache *syncPreviewCache
-	initErr   error
+	ctx          context.Context
+	store        *vault.Store
+	sshMgr       *sshclient.Manager
+	syncCache    *syncPreviewCache
+	syncClientMu sync.Mutex
+	syncClients  map[string]*syncclient.Client
+	initErr      error
 }
 
 func NewApp() *App {
 	return &App{
-		syncCache: newSyncPreviewCache(),
+		syncCache:   newSyncPreviewCache(),
+		syncClients: make(map[string]*syncclient.Client),
 	}
 }
 
@@ -61,6 +65,12 @@ func (a *App) shutdown(ctx context.Context) {
 	if a.syncCache != nil {
 		a.syncCache.close()
 	}
+	a.syncClientMu.Lock()
+	for _, cli := range a.syncClients {
+		cli.CloseIdleConnections()
+	}
+	clear(a.syncClients)
+	a.syncClientMu.Unlock()
 	if a.store != nil {
 		_ = a.store.Close()
 	}
@@ -214,7 +224,7 @@ func (a *App) PickAndReadSSHKeyFile() (map[string]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("读取密钥文件失败: %w", err)
 	}
-	defer crypto.ZeroBytes(raw)
+	defer clear(raw)
 	if len(raw) > maxSSHKeyFileSize {
 		return nil, errors.New("文件体积过大，不是有效的 SSH 私钥文件")
 	}

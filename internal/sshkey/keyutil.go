@@ -25,12 +25,6 @@ type ParsedKeyInfo struct {
 	Signer      ssh.Signer
 }
 
-func zeroBytes(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
-}
-
 // SanitizeComment removes carriage returns and newlines from an SSH key comment
 // so it cannot inject extra lines into remote authorized_keys files.
 func SanitizeComment(comment string) string {
@@ -45,7 +39,7 @@ func ParsePrivateKey(pemContent string, passphrase string) (*ParsedKeyInfo, erro
 	}
 
 	raw := []byte(trimmed)
-	defer zeroBytes(raw)
+	defer clear(raw)
 
 	var (
 		signer ssh.Signer
@@ -54,7 +48,7 @@ func ParsePrivateKey(pemContent string, passphrase string) (*ParsedKeyInfo, erro
 
 	if passphrase != "" {
 		passBytes := []byte(passphrase)
-		defer zeroBytes(passBytes)
+		defer clear(passBytes)
 		signer, err = ssh.ParsePrivateKeyWithPassphrase(raw, passBytes)
 	} else {
 		signer, err = ssh.ParsePrivateKey(raw)
@@ -109,7 +103,7 @@ func GenerateKeyPair(algorithm string, comment string, passphrase string) (priva
 	var block *pem.Block
 	if passphrase != "" {
 		passBytes := []byte(passphrase)
-		defer zeroBytes(passBytes)
+		defer clear(passBytes)
 		block, err = ssh.MarshalPrivateKeyWithPassphrase(priv, comment, passBytes)
 	} else {
 		block, err = ssh.MarshalPrivateKey(priv, comment)
@@ -117,10 +111,10 @@ func GenerateKeyPair(algorithm string, comment string, passphrase string) (priva
 	if err != nil {
 		return "", nil, fmt.Errorf("marshal openssh private key: %w", err)
 	}
-	defer zeroBytes(block.Bytes)
+	defer clear(block.Bytes)
 
 	pemBytes := pem.EncodeToMemory(block)
-	defer zeroBytes(pemBytes)
+	defer clear(pemBytes)
 	pemStr := string(pemBytes)
 
 	signer, err := ssh.NewSignerFromKey(priv)

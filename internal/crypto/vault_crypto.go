@@ -96,7 +96,7 @@ func (e *EnvelopeCrypto) IsPasswordProtected(blob []byte) (bool, error) {
 // OpenWithPassword decrypts a GSV1 or GSV2 (Mode 0x01 / Mode 0x02) binary envelope.
 func (e *EnvelopeCrypto) OpenWithPassword(blob []byte, password string) ([]byte, error) {
 	plain, _, pwKey, err := e.OpenWithPasswordAndKey(blob, password)
-	ZeroBytes(pwKey)
+	clear(pwKey)
 	return plain, err
 }
 
@@ -141,7 +141,7 @@ func (e *EnvelopeCrypto) openV1(blob []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrDecryptFailed, err)
 	}
-	defer ZeroBytes(masterKey)
+	defer clear(masterKey)
 	if len(masterKey) != masterKeySize {
 		return nil, ErrDecryptFailed
 	}
@@ -150,7 +150,7 @@ func (e *EnvelopeCrypto) openV1(blob []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer ZeroBytes(dataKey)
+	defer clear(dataKey)
 
 	gcm, err := newAESGCM(dataKey)
 	if err != nil {
@@ -178,11 +178,4 @@ func deriveDataKeyV1(masterKey, salt []byte) ([]byte, error) {
 		return nil, err
 	}
 	return key, nil
-}
-
-// ZeroBytes overwrites a byte slice with zeros to scrub sensitive material from memory.
-func ZeroBytes(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
 }

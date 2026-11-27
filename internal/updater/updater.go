@@ -20,6 +20,14 @@ const (
 	maxReleaseResponseSize = 4 << 20 // 4 MiB
 )
 
+var releaseHTTPClient = &http.Client{
+	Timeout: 15 * time.Second,
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		ResponseHeaderTimeout: 10 * time.Second,
+	},
+}
+
 type ghRelease struct {
 	TagName     string `json:"tag_name"`
 	HTMLURL     string `json:"html_url"`
@@ -66,7 +74,7 @@ func checkReleaseAtURL(ctx context.Context, apiURL, currentVersion string) (mode
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "GravitySSH/"+cur)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := releaseHTTPClient.Do(req)
 	if err != nil {
 		return models.UpdateCheckResult{}, fmt.Errorf("检查更新失败: %w", err)
 	}
