@@ -10,11 +10,11 @@ import (
 
 func TestBuiltinOpsTemplatesCompleteAndSafe(t *testing.T) {
 	tpls := BuiltinOpsTemplates()
-	if len(tpls) != 5 {
-		t.Fatalf("expected 5 curated VPS templates, got %d", len(tpls))
+	if len(tpls) != 6 {
+		t.Fatalf("expected 6 curated VPS templates, got %d", len(tpls))
 	}
 	wantIDs := map[string]bool{
-		"tpl-bbr": false, "tpl-swap": false, "tpl-mirror": false, "tpl-docker": false, "tpl-ssh-port": false,
+		"tpl-bbr": false, "tpl-swap": false, "tpl-mirror": false, "tpl-docker": false, "tpl-ssh-port": false, "tpl-inspect": false,
 	}
 	for _, tpl := range tpls {
 		if _, ok := wantIDs[tpl.ID]; !ok {
@@ -29,6 +29,12 @@ func TestBuiltinOpsTemplatesCompleteAndSafe(t *testing.T) {
 		}
 		if tpl.ID == "tpl-ssh-port" && (!strings.Contains(tpl.Command, "sshd -t") || !strings.Contains(tpl.Command, "600")) {
 			t.Fatal("ssh-port template must validate sshd -t and include rollback safeguard")
+		}
+		if strings.Contains(tpl.Command, "exit 0") || strings.Contains(tpl.Command, "exit 1") {
+			trimmed := strings.TrimSpace(tpl.Command)
+			if !strings.HasPrefix(trimmed, "(") || !strings.HasSuffix(trimmed, ")") {
+				t.Fatalf("template %s uses exit without subshell wrapper", tpl.ID)
+			}
 		}
 	}
 	for id, seen := range wantIDs {
@@ -45,8 +51,8 @@ func TestTemplatesCRUDAndNonOverwritingPresetReload(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 
-	if got := len(s.ListTemplates()); got != 5 {
-		t.Fatalf("expected 5 initial templates, got %d", got)
+	if got := len(s.ListTemplates()); got != 6 {
+		t.Fatalf("expected 6 initial templates, got %d", got)
 	}
 
 	// 1. Add custom template
@@ -70,12 +76,12 @@ func TestTemplatesCRUDAndNonOverwritingPresetReload(t *testing.T) {
 		t.Fatalf("delete preset failed: %v", err)
 	}
 
-	// 4. LoadPresetTemplates: restores ONLY tpl-swap, skips the other 4 (including edited tpl-bbr), keeps custom
+	// 4. LoadPresetTemplates: restores ONLY tpl-swap, skips the other 5 (including edited tpl-bbr), keeps custom
 	res, err := s.LoadPresetTemplates()
 	if err != nil {
 		t.Fatalf("LoadPresetTemplates failed: %v", err)
 	}
-	if res.Added != 1 || res.Skipped != 4 || len(res.Templates) != 6 {
+	if res.Added != 1 || res.Skipped != 5 || len(res.Templates) != 7 {
 		t.Fatalf("unexpected reload result: added=%d skipped=%d total=%d", res.Added, res.Skipped, len(res.Templates))
 	}
 
@@ -95,10 +101,10 @@ func TestTemplatesCRUDAndNonOverwritingPresetReload(t *testing.T) {
 		t.Fatalf("post-reload invariants broken: custom=%v editedBBR=%v restoredSwap=%v", foundCustom, foundEditedBBR, foundRestoredSwap)
 	}
 
-	// 5. Calling LoadPresetTemplates again adds 0 and skips all 5
+	// 5. Calling LoadPresetTemplates again adds 0 and skips all 6
 	res2, err := s.LoadPresetTemplates()
-	if err != nil || res2.Added != 0 || res2.Skipped != 5 {
-		t.Fatalf("second reload should add 0, skip 5; got %+v err=%v", res2, err)
+	if err != nil || res2.Added != 0 || res2.Skipped != 6 {
+		t.Fatalf("second reload should add 0, skip 6; got %+v err=%v", res2, err)
 	}
 
 	// 6. Deleting all templates and reopening stays empty (does NOT auto-reseed v4 vault)

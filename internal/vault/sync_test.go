@@ -136,3 +136,76 @@ func TestVaultSyncOverwritePreservesSettingsAndPassword(t *testing.T) {
 		t.Fatalf("unexpected persisted servers: %+v", store2.ListServers())
 	}
 }
+
+func TestVaultSyncMergePreservesSecretsAndPreventsHijack(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "vault.gsv"), nil)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	srv, err := store.SaveServer(models.ServerSaveRequest{
+		Name: "Prod-API", Host: "10.0.1.1", Port: 22, Username: "ubuntu",
+		AuthType: models.AuthPassword, Password: "local-password",
+		Proxy: models.ProxySaveReq{Type: models.ProxySOCKS5, Host: "127.0.0.1", Port: 1080, Password: "local-proxy-pass"},
+		JumpHost: models.JumpSaveReq{Mode: models.JumpCustom, Host: "10.0.1.254", Port: 22, Username: "jump", Password: "local-jump-pass"},
+	})
+	if err != nil {
+		t.Fatalf("SaveServer failed: %v", err)
+	}
+	store.MarkServerConnected(srv.ID)
+	sc, err := store.SaveShortcut(models.CommandShortcut{Name: "Status", Command: "uptime"})
+	if err != nil {
+		t.Fatalf("SaveShortcut failed: %v", err)
+	}
+	store.IncrementShortcutUse(sc.ID)
+	store.IncrementShortcutUse(sc.ID)
+
+	// Incoming merge has empty passwords, blank-host server, shortcut with UseCount=0,
+	// and a custom template with the same name as a preset ("开启 BBR 网络加速")
+	incoming := models.SyncBundle{
+		SchemaVersion: 1, SourcePlatform: "android", SourceDevice: "Phone",
+		Servers: []models.ServerConfig{
+			{ID: "remote-1", Name: "Prod-API-Synced", Host: "10.0.1.1", Port: 22, Username: "ubuntu", AuthType: models.AuthPassword},
+			{ID: "blank-host", Name: "Invalid", Host: "   ", Port: 22, Username: "root"},
+		},
+		Shortcuts: []models.CommandShortcut{
+			{ID: "remote-sc", Name: "Status", Command: "uptime", UseCount: 0},
+		},
+		Templates: []models.BuiltinTemplate{
+			{ID: "custom-hijack", Name: "开启 BBR 网络加速", Category: "自定义", Command: "echo evil", PresetID: ""},
+		},
+	}
+
+	sum, err := store.ImportSyncBundle(incoming, "merge")
+	if err != nil {
+		t.Fatalf("ImportSyncBundle failed: %v", err)
+	}
+	if sum.ServersAdded != 0 || sum.ServersUpdated != 1 {
+		t.Fatalf("expected blank-host skipped and 1 server updated, got %+v", sum)
+	}
+	gotSrv, err := store.GetServerInternal(srv.ID)
+	if err != nil {
+		t.Fatalf("GetServerInternal failed: %v", err)
+	}
+	if gotSrv.Password != "local-password" || gotSrv.Proxy.Password != "local-proxy-pass" || gotSrv.JumpHost.Password != "local-jump-pass" {
+		t.Fatalf("local passwords were wiped on merge: %+v", gotSrv)
+	}
+	if gotSrv.LastConnectedAt == nil || gotSrv.CreatedAt.IsZero() {
+		t.Fatalf("expected LastConnectedAt and CreatedAt preserved")
+	}
+
+	// Verify shortcut UseCount preserved
+	for _, item := range store.ListShortcuts() {
+		if item.ID == sc.ID && item.UseCount != 2 {
+			t.Fatalf("expected UseCount=2 preserved, got %d", item.UseCount)
+		}
+	}
+
+	// Verify preset tpl-bbr was NOT overwritten by custom template with same Name
+	for _, tpl := range store.ListTemplates() {
+		if tpl.ID == "tpl-bbr" && tpl.Command == "echo evil" {
+			t.Fatal("custom template hijacked preset tpl-bbr via matching name")
+		}
+	}
+}

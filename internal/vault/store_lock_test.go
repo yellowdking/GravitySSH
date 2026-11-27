@@ -32,6 +32,19 @@ func TestVaultPasswordLockUnlockChangeAndRemove(t *testing.T) {
 	if st := reopened.LockState(); !st.Locked || !st.HasPassword || len(reopened.ListServers()) != 0 {
 		t.Fatalf("expected locked empty view, got %+v", st)
 	}
+	// Locked vault must NOT leak fabricated default counts or accept mutations
+	if info := reopened.SecurityInfo(); info.ServerCount != 0 || info.KeyCount != 0 || info.ShortcutCount != 0 {
+		t.Fatalf("expected zero counts while locked, got %+v", info)
+	}
+	if len(reopened.ListShortcuts()) != 0 || len(reopened.ListTemplates()) != 0 {
+		t.Fatalf("expected empty shortcuts/templates while locked")
+	}
+	if _, err := reopened.SaveServer(models.ServerSaveRequest{Name: "Blocked", Host: "10.0.0.9"}); err == nil {
+		t.Fatal("expected SaveServer to fail while locked")
+	}
+	if len(reopened.ListServers()) != 0 {
+		t.Fatal("locked SaveServer must not mutate RAM")
+	}
 	if err := reopened.Unlock("wrong-pass"); err == nil || !reopened.IsLocked() {
 		t.Fatal("expected wrong password to fail and stay locked")
 	}

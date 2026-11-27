@@ -76,6 +76,9 @@ func (s *Store) GetServerInternal(id string) (*models.ServerConfig, error) {
 func (s *Store) SaveServer(req models.ServerSaveRequest) (models.ServerView, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.locked {
+		return models.ServerView{}, errVaultLocked
+	}
 
 	req.Host = strings.TrimSpace(req.Host)
 	req.Username = strings.TrimSpace(req.Username)
@@ -179,6 +182,7 @@ func (s *Store) SaveServer(req models.ServerSaveRequest) (models.ServerView, err
 		UpdatedAt:         now,
 	}
 
+	snapshot := cloneVaultData(s.data)
 	if idx >= 0 {
 		cfg.CreatedAt = existing.CreatedAt
 		cfg.LastConnectedAt = existing.LastConnectedAt
@@ -190,6 +194,7 @@ func (s *Store) SaveServer(req models.ServerSaveRequest) (models.ServerView, err
 	}
 
 	if err := s.saveLocked(); err != nil {
+		s.data = snapshot
 		return models.ServerView{}, err
 	}
 	return toServerView(cfg), nil
@@ -198,8 +203,12 @@ func (s *Store) SaveServer(req models.ServerSaveRequest) (models.ServerView, err
 func (s *Store) DeleteServer(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.locked {
+		return errVaultLocked
+	}
 	for i, srv := range s.data.Servers {
 		if srv.ID == id {
+			snapshot := cloneVaultData(s.data)
 			s.data.Servers = append(s.data.Servers[:i], s.data.Servers[i+1:]...)
 			for j := range s.data.Servers {
 				if s.data.Servers[j].JumpHost.Mode == models.JumpServer && s.data.Servers[j].JumpHost.ServerID == id {
@@ -207,7 +216,11 @@ func (s *Store) DeleteServer(id string) error {
 					s.data.Servers[j].JumpHost.ServerID = ""
 				}
 			}
-			return s.saveLocked()
+			if err := s.saveLocked(); err != nil {
+				s.data = snapshot
+				return err
+			}
+			return nil
 		}
 	}
 	return nil
@@ -216,11 +229,17 @@ func (s *Store) DeleteServer(id string) error {
 func (s *Store) MarkServerConnected(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.locked {
+		return
+	}
 	now := time.Now()
 	for i := range s.data.Servers {
 		if s.data.Servers[i].ID == id {
+			prev := s.data.Servers[i].LastConnectedAt
 			s.data.Servers[i].LastConnectedAt = &now
-			_ = s.saveLocked()
+			if err := s.saveLocked(); err != nil {
+				s.data.Servers[i].LastConnectedAt = prev
+			}
 			return
 		}
 	}

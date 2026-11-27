@@ -18,7 +18,13 @@ func (s *Store) ExportSyncBundle(sourceDevice string) (models.SyncBundle, error)
 		return models.SyncBundle{}, errors.New("配置文件已锁定，请先解锁后再同步")
 	}
 	servers := make([]models.ServerConfig, len(s.data.Servers))
-	copy(servers, s.data.Servers)
+	for i, srv := range s.data.Servers {
+		if srv.LastConnectedAt != nil {
+			t := *srv.LastConnectedAt
+			srv.LastConnectedAt = &t
+		}
+		servers[i] = srv
+	}
 	keys := make([]models.SSHKeyRecord, len(s.data.SSHKeys))
 	copy(keys, s.data.SSHKeys)
 	shortcuts := make([]models.CommandShortcut, len(s.data.Shortcuts))
@@ -57,6 +63,7 @@ func (s *Store) ImportSyncBundle(bundle models.SyncBundle, mode string) (models.
 		return models.SyncImportSummary{}, fmt.Errorf("无效的同步模式: %s", mode)
 	}
 
+	snapshot := cloneVaultData(s.data)
 	var summary models.SyncImportSummary
 	summary.Mode = mode
 
@@ -77,6 +84,7 @@ func (s *Store) ImportSyncBundle(bundle models.SyncBundle, mode string) (models.
 	}
 
 	if err := s.saveLocked(); err != nil {
+		s.data = snapshot
 		return models.SyncImportSummary{}, err
 	}
 	return summary, nil
