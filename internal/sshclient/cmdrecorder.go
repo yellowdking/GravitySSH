@@ -257,10 +257,16 @@ func looksLikeSecretPrompt(line string) bool {
 	return containsASCIIWord(low, "pin") || containsASCIIWord(low, "otp")
 }
 
-// Feed processes raw bytes sent from xterm.js to the SSH PTY stdin.
+// Feed processes raw bytes sent from xterm.js to the SSH PTY stdin and dispatches any completed commands.
 func (r *CommandRecorder) Feed(data []byte) {
+	r.DispatchCommands(r.FeedInput(data))
+}
+
+// FeedInput parses raw stdin bytes into the recorder buffer (preserving byte order)
+// and returns any completed commands without invoking the onCommand callback yet.
+func (r *CommandRecorder) FeedInput(data []byte) []string {
 	if len(data) == 0 {
-		return
+		return nil
 	}
 
 	// Strip bracketed paste wrappers if present (\x1b[200~ ... \x1b[201~)
@@ -356,11 +362,16 @@ func (r *CommandRecorder) Feed(data []byte) {
 		}
 	}
 	r.mu.Unlock()
+	return emitted
+}
 
-	if r.onCommand != nil {
-		for _, cmd := range emitted {
-			r.onCommand(cmd)
-		}
+// DispatchCommands invokes the registered onCommand callback for each completed command.
+func (r *CommandRecorder) DispatchCommands(cmds []string) {
+	if r.onCommand == nil {
+		return
+	}
+	for _, cmd := range cmds {
+		r.onCommand(cmd)
 	}
 }
 
