@@ -67,7 +67,7 @@ export const SessionTabsBar: React.FC<Props> = ({
     {updateInfo?.hasUpdate && (
       <button
         type="button"
-        onClick={() => void api.openExternalURL(updateInfo.releaseUrl || updateInfo.downloadUrl)}
+        onClick={() => void api.openExternalURL(updateInfo.releaseUrl || updateInfo.downloadUrl).catch(() => {})}
         title={`发现新版本 v${updateInfo.latestVersion}，点击前往 GitHub 下载`}
         className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-300 text-[11px] font-medium shrink-0 transition"
       >

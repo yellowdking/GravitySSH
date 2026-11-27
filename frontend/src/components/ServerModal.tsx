@@ -1,10 +1,10 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { AlertCircle, CheckCircle2, Globe, KeyRound, Loader2, Server, Sliders, Waypoints, X } from 'lucide-react'
 import type { ServerSaveRequest, ServerView, SSHKeyMeta } from '../types'
 import { api } from '../wailsApi'
 import { errMsg } from '../utils/errors'
 import { ModalShell } from './ModalShell'
-import { makeInitialServerForm } from './serverForm'
+import { getAvailableJumpServers, isServerConnectionDirty, makeInitialServerForm } from './serverForm'
 import { ServerBasicTab } from './ServerBasicTab'
 import { ServerProxyTab } from './ServerProxyTab'
 import { ServerJumpTab } from './ServerJumpTab'
@@ -29,16 +29,54 @@ export const ServerModal: React.FC<Props> = ({
   const [form, setForm] = useState<ServerSaveRequest>(() => makeInitialServerForm(editingServer, defaultKeepAliveSeconds))
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [deploying, setDeploying] = useState(false)
+  const [deployMsg, setDeployMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null)
 
+  const mountedRef = useRef(true)
+  const sessionGenRef = useRef(0)
+  const savingRef = useRef(false)
+  const testingRef = useRef(false)
+  const deployingRef = useRef(false)
+
   useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      sessionGenRef.current++
+      savingRef.current = false
+      testingRef.current = false
+      deployingRef.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    sessionGenRef.current++
+    savingRef.current = false
+    testingRef.current = false
+    deployingRef.current = false
+    setSaving(false)
+    setTesting(false)
+    setDeploying(false)
+    setDeployMsg(null)
     if (!open) return
     setForm(makeInitialServerForm(editingServer, defaultKeepAliveSeconds))
     setTab('basic')
     setNotice(null)
   }, [open, editingServer, defaultKeepAliveSeconds])
 
-  const jumpServers = allServers.filter((s) => s.id !== editingServer?.id)
+  useEffect(() => {
+    setDeployMsg(null)
+  }, [form.sshKeyId, editingServer?.id])
+
+  const jumpServers = useMemo(
+    () => getAvailableJumpServers(allServers, editingServer?.id),
+    [allServers, editingServer?.id]
+  )
+  const connectionDirty = useMemo(
+    () => isServerConnectionDirty(form, editingServer, defaultKeepAliveSeconds),
+    [form, editingServer, defaultKeepAliveSeconds]
+  )
 
   const isValidInt = (n: number, min: number, max: number) =>
     Number.isInteger(n) && n >= min && n <= max
@@ -54,6 +92,17 @@ export const ServerModal: React.FC<Props> = ({
       setNotice({ ok: false, text: 'SSH 端口必须为 1–65535 之间的整数' })
       return false
     }
+    if (form.authType === 'key') {
+      if (!form.sshKeyId.trim() || !sshKeys.some((k) => k.id === form.sshKeyId)) {
+        setTab('basic')
+        setNotice({ ok: false, text: '请选择有效的 SSH 密钥' })
+        return false
+      }
+    } else if (form.authType === 'both' && form.sshKeyId.trim() && !sshKeys.some((k) => k.id === form.sshKeyId)) {
+      setTab('basic')
+      setNotice({ ok: false, text: '原关联的 SSH 密钥已删除或不可用，请重新选择' })
+      return false
+    }
     if (form.proxy.type !== 'none') {
       if (!form.proxy.host.trim()) {
         setTab('proxy')
@@ -66,6 +115,18 @@ export const ServerModal: React.FC<Props> = ({
         return false
       }
     }
+    if (form.jumpHost.mode === 'server') {
+      if (!form.jumpHost.serverId.trim()) {
+        setTab('jump')
+        setNotice({ ok: false, text: '请选择一台已保存的跳板服务器' })
+        return false
+      }
+      if (!jumpServers.some((s) => s.id === form.jumpHost.serverId)) {
+        setTab('jump')
+        setNotice({ ok: false, text: '所选跳板服务器不可用或会形成循环跳板链路，请重新选择' })
+        return false
+      }
+    }
     if (form.jumpHost.mode === 'custom') {
       if (!form.jumpHost.host.trim()) {
         setTab('jump')
@@ -75,6 +136,21 @@ export const ServerModal: React.FC<Props> = ({
       if (!isValidInt(form.jumpHost.port, 1, 65535)) {
         setTab('jump')
         setNotice({ ok: false, text: '跳板机端口必须为 1–65535 之间的整数' })
+        return false
+      }
+      if (form.jumpHost.authType === 'key') {
+        if (!form.jumpHost.sshKeyId.trim() || !sshKeys.some((k) => k.id === form.jumpHost.sshKeyId)) {
+          setTab('jump')
+          setNotice({ ok: false, text: '请为自定义跳板机选择有效的 SSH 密钥' })
+          return false
+        }
+      } else if (
+        form.jumpHost.authType === 'both' &&
+        form.jumpHost.sshKeyId.trim() &&
+        !sshKeys.some((k) => k.id === form.jumpHost.sshKeyId)
+      ) {
+        setTab('jump')
+        setNotice({ ok: false, text: '跳板机原关联的 SSH 密钥已删除或不可用，请重新选择' })
         return false
       }
     }
@@ -112,31 +188,92 @@ export const ServerModal: React.FC<Props> = ({
     },
   })
 
+  const closeBlocked = saving || deploying
+
+  const handleClose = () => {
+    if (savingRef.current || deployingRef.current) return
+    onClose()
+  }
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (savingRef.current || testingRef.current || deployingRef.current) return
     setNotice(null)
     if (!validateForm()) return
+    const gen = sessionGenRef.current
+    savingRef.current = true
     setSaving(true)
     try {
-      onSaved(await api.saveServer(buildSanitizedPayload()))
+      const saved = await api.saveServer(buildSanitizedPayload())
+      if (!mountedRef.current || sessionGenRef.current !== gen) return
+      onSaved(saved)
+      savingRef.current = false
+      setSaving(false)
       onClose()
     } catch (err) {
-      setNotice({ ok: false, text: errMsg(err) })
+      if (mountedRef.current && sessionGenRef.current === gen) {
+        setNotice({ ok: false, text: errMsg(err) })
+      }
     } finally {
-      setSaving(false)
+      if (sessionGenRef.current === gen) {
+        savingRef.current = false
+        if (mountedRef.current) setSaving(false)
+      }
     }
   }
 
   const handleTest = async () => {
+    if (testingRef.current || savingRef.current || deployingRef.current) return
     setNotice(null)
     if (!validateForm()) return
+    const gen = sessionGenRef.current
+    testingRef.current = true
     setTesting(true)
     try {
-      setNotice({ ok: true, text: await api.testServerConnection(buildSanitizedPayload()) })
+      const text = await api.testServerConnection(buildSanitizedPayload())
+      if (!mountedRef.current || sessionGenRef.current !== gen) return
+      setNotice({ ok: true, text })
     } catch (err) {
-      setNotice({ ok: false, text: errMsg(err) })
+      if (mountedRef.current && sessionGenRef.current === gen) {
+        setNotice({ ok: false, text: errMsg(err) })
+      }
     } finally {
-      setTesting(false)
+      if (sessionGenRef.current === gen) {
+        testingRef.current = false
+        if (mountedRef.current) setTesting(false)
+      }
+    }
+  }
+
+  const handleQuickDeploy = async () => {
+    if (
+      !editingServer ||
+      !form.sshKeyId ||
+      !sshKeys.some((k) => k.id === form.sshKeyId) ||
+      connectionDirty ||
+      deployingRef.current ||
+      savingRef.current ||
+      testingRef.current
+    ) {
+      return
+    }
+    const gen = sessionGenRef.current
+    deployingRef.current = true
+    setDeploying(true)
+    setDeployMsg(null)
+    try {
+      const [first] = await api.deploySSHKeyToServers(form.sshKeyId, [editingServer.id], false)
+      if (!mountedRef.current || sessionGenRef.current !== gen) return
+      setDeployMsg(first ? { ok: first.ok, text: first.message } : { ok: true, text: '密钥部署完成' })
+    } catch (err) {
+      if (mountedRef.current && sessionGenRef.current === gen) {
+        setDeployMsg({ ok: false, text: errMsg(err) })
+      }
+    } finally {
+      if (sessionGenRef.current === gen) {
+        deployingRef.current = false
+        if (mountedRef.current) setDeploying(false)
+      }
     }
   }
 
@@ -147,8 +284,10 @@ export const ServerModal: React.FC<Props> = ({
     { id: 'advanced', label: '高级选项', icon: <Sliders className="w-3.5 h-3.5" /> },
   ] as const
 
+  const anyBusy = saving || testing || deploying
+
   return (
-    <ModalShell open={open} onClose={onClose}>
+    <ModalShell open={open} onClose={handleClose}>
       <div className="w-full max-w-2xl bg-ag-panel border border-ag-borderStrong rounded-2xl shadow-ag overflow-hidden flex flex-col max-h-[90vh]">
         <div className="px-5 py-4 border-b border-ag-border flex items-center justify-between bg-[#11151f]">
           <div className="flex items-center gap-2.5">
@@ -158,7 +297,7 @@ export const ServerModal: React.FC<Props> = ({
               <p className="text-[11px] text-ag-muted">密码 / SSH 密钥 / SOCKS5 & HTTP 代理 / 多级跳板机</p>
             </div>
           </div>
-          <button type="button" onClick={onClose} aria-label="关闭服务器配置窗口" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text"><X className="w-4 h-4" /></button>
+          <button type="button" disabled={closeBlocked} onClick={handleClose} aria-label="关闭服务器配置窗口" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text disabled:opacity-40 disabled:cursor-not-allowed"><X className="w-4 h-4" /></button>
         </div>
 
         <div className="px-5 pt-3 border-b border-ag-border flex items-center gap-1 bg-[#11151f]/60">
@@ -169,8 +308,22 @@ export const ServerModal: React.FC<Props> = ({
           ))}
         </div>
 
-        <form noValidate onSubmit={handleSave} className="flex-1 overflow-y-auto p-5 space-y-4">
-          {tab === 'basic' && <ServerBasicTab form={form} editingServer={editingServer} sshKeys={sshKeys} onChange={setForm} onGoToKeyVault={() => { onClose(); onGoToKeyVault() }} />}
+        <form noValidate onSubmit={(e) => void handleSave(e)} className="flex-1 overflow-y-auto p-5 space-y-4">
+          {tab === 'basic' && (
+            <ServerBasicTab
+              form={form}
+              editingServer={editingServer}
+              sshKeys={sshKeys}
+              deploying={deploying}
+              deployMsg={deployMsg}
+              connectionDirty={connectionDirty}
+              disableQuickDeploy={anyBusy || connectionDirty}
+              disableKeyVaultLink={closeBlocked}
+              onQuickDeploy={() => void handleQuickDeploy()}
+              onChange={setForm}
+              onGoToKeyVault={() => { if (!closeBlocked) { onClose(); onGoToKeyVault() } }}
+            />
+          )}
           {tab === 'proxy' && <ServerProxyTab form={form} editingServer={editingServer} onChange={setForm} />}
           {tab === 'jump' && <ServerJumpTab form={form} editingServer={editingServer} availableJumpServers={jumpServers} sshKeys={sshKeys} onChange={setForm} />}
           {tab === 'advanced' && <ServerAdvancedTab form={form} defaultKeepAliveSeconds={defaultKeepAliveSeconds} onChange={setForm} />}
@@ -184,14 +337,14 @@ export const ServerModal: React.FC<Props> = ({
 
           <div className="pt-3 border-t border-ag-border flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <button type="button" onClick={() => void handleTest()} disabled={testing} className="ag-btn-secondary">
+              <button type="button" onClick={() => void handleTest()} disabled={anyBusy} className="ag-btn-secondary">
                 {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}测试连接
               </button>
               {(editingServer || form.host.trim()) && <ClearHostCacheButton host={form.host} port={isValidInt(form.port, 1, 65535) ? form.port : 22} onResult={setNotice} />}
             </div>
             <div className="flex items-center gap-2">
-              <button type="button" onClick={onClose} className="ag-btn-ghost">取消</button>
-              <button type="submit" disabled={saving} className="ag-btn-primary">{saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}保存服务器</button>
+              <button type="button" disabled={closeBlocked} onClick={handleClose} className="ag-btn-ghost">取消</button>
+              <button type="submit" disabled={anyBusy} className="ag-btn-primary">{saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}保存服务器</button>
             </div>
           </div>
         </form>
