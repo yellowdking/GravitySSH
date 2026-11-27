@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	// CrockfordAlphabet is the 30-character unambiguous Base32 alphabet for gssh-sync-v1.
+	// CrockfordAlphabet is the 30-character unambiguous Base32 alphabet for gssh-sync-v2.
 	CrockfordAlphabet = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
 	SyncCodeLength    = 8
 	ChannelPrefix     = "gssh-sync-channel-v1:"

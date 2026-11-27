@@ -44,14 +44,15 @@ type Client struct {
 	nowFn      func() time.Time
 }
 
-// NewClient builds a sync relay client using SPKI pinning for the default relay,
-// TLS 1.3 self-signed cert acceptance for custom raw IP relays, and system CA for domains.
+// NewClient builds a sync relay client using SPKI pinning for the default relay
+// (or any custom relay with an explicit `#spki=<64-hex>` pin), TLS 1.3 SAN+TOFU
+// pinning for custom raw IP relays, and system CA verification for domains.
 func NewClient(relayURL string) (*Client, error) {
-	cleanURL, mode, err := NormalizeRelayURL(relayURL)
+	cleanURL, mode, pin, err := NormalizeRelayURLWithPin(relayURL)
 	if err != nil {
 		return nil, err
 	}
-	return NewClientWithMode(cleanURL, AppGateKey, PinnedSPKISHA256, mode)
+	return NewClientWithMode(cleanURL, AppGateKey, pin, mode)
 }
 
 // NewClientWithMode creates a client with explicit credentials and TLS mode.
@@ -59,7 +60,7 @@ func NewClientWithMode(relayURL, appGateKey, spkiSHA256 string, mode RelayTLSMod
 	if strings.TrimSpace(appGateKey) == "" {
 		return nil, errors.New("同步客户端未配置 App Gate 密钥")
 	}
-	tlsCfg, err := buildTLSConfig(mode, spkiSHA256)
+	tlsCfg, err := buildTLSConfig(mode, spkiSHA256, relayURL)
 	if err != nil {
 		return nil, err
 	}
