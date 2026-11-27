@@ -17,11 +17,11 @@ export const ServerListItem: React.FC<Props> = ({ server, isLive, onConnect, onE
 
   return (
     <div
-      onDoubleClick={() => onConnect(server)}
+      onClick={() => onConnect(server)}
       className="group relative rounded-lg px-2.5 py-2 bg-transparent hover:bg-ag-elevated/90 border border-transparent hover:border-ag-border transition cursor-pointer"
     >
       <div className="flex items-start justify-between gap-1.5">
-        <div className="flex items-start gap-2 min-w-0 flex-1" onClick={() => onConnect(server)}>
+        <div className="flex items-start gap-2 min-w-0 flex-1">
           <span
             className={`mt-1.5 w-2 h-2 rounded-full shrink-0 ${
               isLive ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : 'bg-ag-subtle/60'
@@ -36,19 +36,19 @@ export const ServerListItem: React.FC<Props> = ({ server, isLive, onConnect, onE
             {(hasProxy || hasJump || hasKey) && (
               <div className="flex flex-wrap items-center gap-1 mt-1.5">
                 {hasKey && (
-                  <span className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.2 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/20">
+                  <span className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/20">
                     <KeyRound className="w-2.5 h-2.5" />
                     Key
                   </span>
                 )}
                 {hasProxy && (
-                  <span className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.2 rounded bg-sky-500/15 text-sky-300 border border-sky-500/20">
+                  <span className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/20">
                     <Globe className="w-2.5 h-2.5" />
                     {server.proxy.type.toUpperCase()}
                   </span>
                 )}
                 {hasJump && (
-                  <span className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/20">
+                  <span className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/20">
                     <Waypoints className="w-2.5 h-2.5" />
                     跳板
                   </span>

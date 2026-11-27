@@ -1,34 +1,36 @@
 import React from 'react'
 import type { ServerSaveRequest } from '../types'
+import { NumericInput } from './NumericInput'
 
 interface Props {
   form: ServerSaveRequest
+  defaultKeepAliveSeconds?: number
   onChange: (next: ServerSaveRequest) => void
 }
 
-export const ServerAdvancedTab: React.FC<Props> = ({ form, onChange }) => (
+export const ServerAdvancedTab: React.FC<Props> = ({ form, defaultKeepAliveSeconds = 30, onChange }) => (
   <div className="space-y-4">
     <div className="grid grid-cols-2 gap-3.5">
       <div>
         <label className="block text-xs text-ag-muted mb-1.5">连接超时 (秒)</label>
-        <input
-          type="number"
+        <NumericInput
           min={5}
           max={120}
+          fallback={15}
           className="ag-input font-mono"
           value={form.timeoutSeconds}
-          onChange={(e) => onChange({ ...form, timeoutSeconds: Number(e.target.value) || 15 })}
+          onChange={(timeoutSeconds) => onChange({ ...form, timeoutSeconds })}
         />
       </div>
       <div>
         <label className="block text-xs text-ag-muted mb-1.5">心跳保活间隔 (秒 · 防止弱网断连)</label>
-        <input
-          type="number"
+        <NumericInput
           min={5}
           max={300}
+          fallback={defaultKeepAliveSeconds > 0 ? defaultKeepAliveSeconds : 30}
           className="ag-input font-mono"
           value={form.keepAliveSeconds}
-          onChange={(e) => onChange({ ...form, keepAliveSeconds: Number(e.target.value) || 30 })}
+          onChange={(keepAliveSeconds) => onChange({ ...form, keepAliveSeconds })}
         />
       </div>
     </div>

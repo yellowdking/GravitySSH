@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { AlertCircle, CheckCircle2, Globe, KeyRound, Loader2, Server, Sliders, Waypoints, X } from 'lucide-react'
 import type { ServerSaveRequest, ServerView, SSHKeyMeta } from '../types'
 import { api } from '../wailsApi'
+import { ModalShell } from './ModalShell'
 import { makeInitialServerForm } from './serverForm'
 import { ServerBasicTab } from './ServerBasicTab'
 import { ServerProxyTab } from './ServerProxyTab'
@@ -14,39 +15,71 @@ interface Props {
   editingServer: ServerView | null
   allServers: ServerView[]
   sshKeys: SSHKeyMeta[]
+  defaultKeepAliveSeconds?: number
   onClose: () => void
   onSaved: (saved: ServerView) => void
   onGoToKeyVault: () => void
 }
 
-export const ServerModal: React.FC<Props> = ({ open, editingServer, allServers, sshKeys, onClose, onSaved, onGoToKeyVault }) => {
+export const ServerModal: React.FC<Props> = ({
+  open, editingServer, allServers, sshKeys, defaultKeepAliveSeconds = 30, onClose, onSaved, onGoToKeyVault,
+}) => {
   const [tab, setTab] = useState<'basic' | 'proxy' | 'jump' | 'advanced'>('basic')
-  const [form, setForm] = useState<ServerSaveRequest>(() => makeInitialServerForm(editingServer))
+  const [form, setForm] = useState<ServerSaveRequest>(() => makeInitialServerForm(editingServer, defaultKeepAliveSeconds))
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null)
 
   useEffect(() => {
     if (!open) return
-    setForm(makeInitialServerForm(editingServer))
-    setTab('basic'); setNotice(null)
-  }, [open, editingServer])
+    setForm(makeInitialServerForm(editingServer, defaultKeepAliveSeconds))
+    setTab('basic')
+    setNotice(null)
+  }, [open, editingServer, defaultKeepAliveSeconds])
 
   if (!open) return null
   const jumpServers = allServers.filter((s) => s.id !== editingServer?.id)
 
+  const validateForm = (): boolean => {
+    if (!form.host.trim()) {
+      setTab('basic')
+      setNotice({ ok: false, text: '请填写主机地址 (IP / 域名)' })
+      return false
+    }
+    if (form.jumpHost.mode === 'custom' && !form.jumpHost.host.trim()) {
+      setTab('jump')
+      setNotice({ ok: false, text: '请填写自定义跳板机地址' })
+      return false
+    }
+    return true
+  }
+
   const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault(); setNotice(null); setSaving(true)
-    try { onSaved(await api.saveServer(form)); onClose() }
-    catch (err) { setNotice({ ok: false, text: String(err) }) }
-    finally { setSaving(false) }
+    e.preventDefault()
+    setNotice(null)
+    if (!validateForm()) return
+    setSaving(true)
+    try {
+      onSaved(await api.saveServer(form))
+      onClose()
+    } catch (err) {
+      setNotice({ ok: false, text: String(err) })
+    } finally {
+      setSaving(false)
+    }
   }
 
   const handleTest = async () => {
-    setTesting(true); setNotice(null)
-    try { setNotice({ ok: true, text: await api.testServerConnection(form) }) }
-    catch (err) { setNotice({ ok: false, text: String(err) }) }
-    finally { setTesting(false) }
+    setNotice(null)
+    if (!validateForm()) return
+    setTesting(true)
+    try {
+      setNotice({ ok: true, text: await api.testServerConnection(form) })
+    } catch (err) {
+      setNotice({ ok: false, text: String(err) })
+    } finally {
+      setTesting(false)
+    }
   }
 
   const tabs = [
@@ -57,7 +90,7 @@ export const ServerModal: React.FC<Props> = ({ open, editingServer, allServers, 
   ] as const
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+    <ModalShell open={open} onClose={onClose}>
       <div className="w-full max-w-2xl bg-ag-panel border border-ag-borderStrong rounded-2xl shadow-ag overflow-hidden flex flex-col max-h-[90vh]">
         <div className="px-5 py-4 border-b border-ag-border flex items-center justify-between bg-[#11151f]">
           <div className="flex items-center gap-2.5">
@@ -67,7 +100,7 @@ export const ServerModal: React.FC<Props> = ({ open, editingServer, allServers, 
               <p className="text-[11px] text-ag-muted">密码 / SSH 密钥 / SOCKS5 & HTTP 代理 / 多级跳板机</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text"><X className="w-4 h-4" /></button>
+          <button type="button" onClick={onClose} className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text"><X className="w-4 h-4" /></button>
         </div>
 
         <div className="px-5 pt-3 border-b border-ag-border flex items-center gap-1 bg-[#11151f]/60">
@@ -78,11 +111,11 @@ export const ServerModal: React.FC<Props> = ({ open, editingServer, allServers, 
           ))}
         </div>
 
-        <form onSubmit={handleSave} className="flex-1 overflow-y-auto p-5 space-y-4">
+        <form noValidate onSubmit={handleSave} className="flex-1 overflow-y-auto p-5 space-y-4">
           {tab === 'basic' && <ServerBasicTab form={form} editingServer={editingServer} sshKeys={sshKeys} onChange={setForm} onGoToKeyVault={() => { onClose(); onGoToKeyVault() }} />}
           {tab === 'proxy' && <ServerProxyTab form={form} editingServer={editingServer} onChange={setForm} />}
           {tab === 'jump' && <ServerJumpTab form={form} editingServer={editingServer} availableJumpServers={jumpServers} sshKeys={sshKeys} onChange={setForm} />}
-          {tab === 'advanced' && <ServerAdvancedTab form={form} onChange={setForm} />}
+          {tab === 'advanced' && <ServerAdvancedTab form={form} defaultKeepAliveSeconds={defaultKeepAliveSeconds} onChange={setForm} />}
 
           {notice && (
             <div className={`flex items-start gap-2 p-3 rounded-xl text-xs border ${notice.ok ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300' : 'bg-rose-500/10 border-rose-500/30 text-rose-300'}`}>
@@ -93,7 +126,7 @@ export const ServerModal: React.FC<Props> = ({ open, editingServer, allServers, 
 
           <div className="pt-3 border-t border-ag-border flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <button type="button" onClick={handleTest} disabled={testing} className="ag-btn-secondary">
+              <button type="button" onClick={() => void handleTest()} disabled={testing} className="ag-btn-secondary">
                 {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}测试连接
               </button>
               {(editingServer || form.host.trim()) && <ClearHostCacheButton host={form.host} port={form.port} onResult={setNotice} />}
@@ -105,6 +138,6 @@ export const ServerModal: React.FC<Props> = ({ open, editingServer, allServers, 
           </div>
         </form>
       </div>
-    </div>
+    </ModalShell>
   )
 }
