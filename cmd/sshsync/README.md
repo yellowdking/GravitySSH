@@ -67,6 +67,36 @@ sshsync init -dir /opt/sshsync -san-ip 你的VPS_IP
 sshsync -healthcheck -listen :54843
 ```
 
+## 零停机 TLS 证书热重载（`SIGHUP`）
+
+`sshsync` 通过 `tls.Config.GetCertificate` 与原子证书存储（`atomic.Pointer[tls.Certificate]`）动态提供 TLS 1.3 证书。在 Linux / macOS 上替换磁盘中的证书与私钥文件后，无需重启进程即可零停机轮换证书：
+
+```bash
+# 宿主机 / systemd 进程零停机重载证书
+kill -HUP <sshsync_pid>
+
+# Docker 容器零停机重载挂载卷证书
+docker kill -s HUP sshsync
+```
+
+重载流程会校验新证书与私钥是否匹配，并验证证书有效期（`NotBefore <= now < NotAfter`）：
+- **校验通过**：原子切换为新证书，后续所有新 TLS 1.3 握手立即生效，并在日志输出新的 SPKI SHA-256 指纹（`sshsync reloaded TLS certificate (SPKI=...)`）。
+- **校验失败**（文件缺失、PEM 损坏、证书与私钥不匹配、已过期或尚未生效）：记录错误日志并**继续保留当前有效证书**，服务零中断。
+- Windows 平台不注册 `SIGHUP`（空实现），证书轮换请重启进程。
+
+## 同步协议版本协商
+
+中继支持同步协议版本范围 **`1..2`**（`MinProtoVersion = 1`，`MaxProtoVersion = 2`），并通过以下 HTTP 响应/请求头实现向前与向后兼容：
+
+| Header | 方向 | 说明 |
+| --- | --- | --- |
+| `X-GSSH-Proto` | 请求（可选） | 客户端声明的协议版本整数（`1` 或 `2`）。省略该头时完全兼容既有 v1.4.x / v1.1.x 客户端。 |
+| `X-GSSH-Proto-Min` | 响应（已鉴权） | 中继支持的最低协议版本，当前固定输出 `1`（覆盖 `/v1/ping` 与 `/v1/pair/*`）。 |
+| `X-GSSH-Proto-Max` | 响应（已鉴权） | 中继支持的最高协议版本，当前固定输出 `2`（覆盖 `/v1/ping` 与 `/v1/pair/*`）。 |
+
+- **未鉴权请求优先返回静默 `404`**：协议版本校验仅在 App Gate HMAC 签名验证通过后执行；未通过鉴权的探测请求仍返回静默空 `404`，不暴露 `426` 或 `X-GSSH-Proto-*` 响应头。
+- **不兼容版本响应**：若已鉴权请求携带超出 `1..2` 范围或非数字的 `X-GSSH-Proto`，中继返回 `426 Upgrade Required` 与 JSON `{"error":"unsupported_protocol","minVersion":1,"maxVersion":2}`（不计入 IP 异常封禁次数）。
+
 ## 本地构建与测试
 
 ```bash
