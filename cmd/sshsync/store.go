@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"net/http"
 	"sync"
 	"time"
 )
@@ -24,6 +23,7 @@ var (
 	errSlotExists   = errors.New("channel already exists")
 	errStoreFull    = errors.New("relay store full")
 	errPairNotFound = errors.New("pair channel not found")
+	errPairAuth     = errors.New("pair channel auth failed")
 	errSlotBusy     = errors.New("pair channel busy")
 )
 
@@ -150,12 +150,15 @@ func (m *memStore) purgeExpiredLocked(now time.Time) int {
 	return removed
 }
 
-func (m *memStore) lookupPairOwnedLocked(channelID string, senderToken []byte) (*slot, bool) {
+func (m *memStore) lookupPairOwnedLocked(channelID string, senderToken []byte) (*slot, error) {
 	s, ok := m.slots[channelID]
-	if !ok || len(s.senderToken) == 0 || subtle.ConstantTimeCompare(s.senderToken, senderToken) != 1 {
-		return nil, false
+	if !ok {
+		return nil, errPairNotFound
 	}
-	return s, true
+	if len(s.senderToken) == 0 || subtle.ConstantTimeCompare(s.senderToken, senderToken) != 1 {
+		return nil, errPairAuth
+	}
+	return s, nil
 }
 
 func matchRequestID(s *slot, requestID string) bool {
@@ -215,21 +218,21 @@ func (m *memStore) PairRequest(channelID, requestID string, salt, nonce, ciphert
 	return s.expiresAt, nil
 }
 
-func (m *memStore) PairPoll(channelID string, senderToken []byte) (state, requestID string, salt, nonce, ct []byte, status int) {
+func (m *memStore) PairPoll(channelID string, senderToken []byte) (state, requestID string, salt, nonce, ct []byte, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	now := m.now().UTC()
 	m.purgeExpiredLocked(now)
 
-	s, ok := m.lookupPairOwnedLocked(channelID, senderToken)
-	if !ok {
-		return "", "", nil, nil, nil, http.StatusNotFound
+	s, err := m.lookupPairOwnedLocked(channelID, senderToken)
+	if err != nil {
+		return "", "", nil, nil, nil, err
 	}
 	if s.state == "requested" {
-		return s.state, s.requestID, bytes.Clone(s.reqSalt), bytes.Clone(s.reqNonce), bytes.Clone(s.reqCiphertext), http.StatusOK
+		return s.state, s.requestID, bytes.Clone(s.reqSalt), bytes.Clone(s.reqNonce), bytes.Clone(s.reqCiphertext), nil
 	}
-	return s.state, s.requestID, nil, nil, nil, http.StatusOK
+	return s.state, s.requestID, nil, nil, nil, nil
 }
 
 func (m *memStore) PairApprove(channelID string, senderToken []byte, requestID string, salt, nonce, ciphertext []byte) error {
@@ -247,9 +250,12 @@ func (m *memStore) pairApprove(channelID string, senderToken []byte, requestID s
 	now := m.now().UTC()
 	m.purgeExpiredLocked(now)
 
-	s, ok := m.lookupPairOwnedLocked(channelID, senderToken)
-	if !ok || !matchRequestID(s, requestID) {
-		return errPairNotFound
+	s, err := m.lookupPairOwnedLocked(channelID, senderToken)
+	if err != nil {
+		return err
+	}
+	if !matchRequestID(s, requestID) {
+		return errPairAuth
 	}
 	if s.state != "requested" {
 		return errSlotBusy
@@ -285,9 +291,12 @@ func (m *memStore) PairReject(channelID string, senderToken []byte, requestID st
 	now := m.now().UTC()
 	m.purgeExpiredLocked(now)
 
-	s, ok := m.lookupPairOwnedLocked(channelID, senderToken)
-	if !ok || !matchRequestID(s, requestID) {
-		return errPairNotFound
+	s, err := m.lookupPairOwnedLocked(channelID, senderToken)
+	if err != nil {
+		return err
+	}
+	if !matchRequestID(s, requestID) {
+		return errPairAuth
 	}
 
 	clearReqPayload(s)
@@ -303,7 +312,7 @@ func (m *memStore) PairReject(channelID string, senderToken []byte, requestID st
 	return nil
 }
 
-func (m *memStore) PairStatus(channelID, requestID string) (state string, entry *slot, status int) {
+func (m *memStore) PairStatus(channelID, requestID string) (state string, entry *slot, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -311,42 +320,45 @@ func (m *memStore) PairStatus(channelID, requestID string) (state string, entry 
 	m.purgeExpiredLocked(now)
 
 	s, ok := m.slots[channelID]
-	if !ok || !matchRequestID(s, requestID) {
-		return "", nil, http.StatusNotFound
+	if !ok {
+		return "", nil, errPairNotFound
+	}
+	if !matchRequestID(s, requestID) {
+		return "", nil, errPairAuth
 	}
 
 	switch s.state {
 	case "waiting", "requested":
-		return "pending", nil, http.StatusOK
+		return "pending", nil, nil
 	case "rejected":
 		delete(m.slots, channelID)
 		m.releaseBytesLocked(s.size)
 		zeroSlot(s)
-		return "rejected", nil, http.StatusOK
+		return "rejected", nil, nil
 	case "approved":
 		delete(m.slots, channelID)
 		m.releaseBytesLocked(s.size)
-		return "approved", s, http.StatusOK
+		return "approved", s, nil
 	default:
-		return "", nil, http.StatusNotFound
+		return "", nil, errPairNotFound
 	}
 }
 
-func (m *memStore) PairCancel(channelID string, senderToken []byte) bool {
+func (m *memStore) PairCancel(channelID string, senderToken []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	now := m.now().UTC()
 	m.purgeExpiredLocked(now)
 
-	s, ok := m.lookupPairOwnedLocked(channelID, senderToken)
-	if !ok {
-		return false
+	s, err := m.lookupPairOwnedLocked(channelID, senderToken)
+	if err != nil {
+		return err
 	}
 	delete(m.slots, channelID)
 	m.releaseBytesLocked(s.size)
 	zeroSlot(s)
-	return true
+	return nil
 }
 
 func (m *memStore) Sweep() int {

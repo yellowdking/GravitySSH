@@ -209,6 +209,22 @@ func (g *ipGuard) RecordStrike(ip string) bool {
 	return false
 }
 
+func (g *ipGuard) ResetStrikes(ip string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	st, ok := g.ips[ip]
+	if !ok {
+		return
+	}
+	now := g.now().UTC()
+	if !st.banUntil.IsZero() && now.Before(st.banUntil) {
+		return
+	}
+	st.strikes = 0
+	st.lastSeen = now
+}
+
 func (g *ipGuard) Sweep() {
 	g.mu.Lock()
 	defer g.mu.Unlock()

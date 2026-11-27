@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -57,9 +58,9 @@ func TestStoreLimitsExpiryAndZeroing(t *testing.T) {
 	if err := st.PairApprove(ch0, tok, reqID0, []byte("salt"), []byte("nonce"), []byte("secret-ct")); err != nil {
 		t.Fatalf("pair approve 0: %v", err)
 	}
-	state, entry, code := st.PairStatus(ch0, reqID0)
-	if code != http.StatusOK || state != "approved" || entry == nil {
-		t.Fatalf("expected approved status hit, got state=%q code=%d", state, code)
+	state, entry, err := st.PairStatus(ch0, reqID0)
+	if err != nil || state != "approved" || entry == nil {
+		t.Fatalf("expected approved status hit, got state=%q err=%v", state, err)
 	}
 	ctRef := entry.ciphertext
 	zeroSlot(entry)
@@ -119,9 +120,9 @@ func TestStoreMaxTotalBytesAndB64Escapes(t *testing.T) {
 	}
 
 	// Reclaim via PairStatus -> new PairRequest succeeds
-	state, entry, code := st.PairStatus(makeTestChannel("big-0"), makeTestHex64("big-req-0"))
-	if code != http.StatusOK || state != "approved" || entry == nil {
-		t.Fatalf("expected approved status of big-0, got state=%q code=%d", state, code)
+	state, entry, err := st.PairStatus(makeTestChannel("big-0"), makeTestHex64("big-req-0"))
+	if err != nil || state != "approved" || entry == nil {
+		t.Fatalf("expected approved status of big-0, got state=%q err=%v", state, err)
 	}
 	zeroSlot(entry)
 	if _, err := st.PairRequest(chOver, reqOver, []byte{1}, []byte{2}, []byte{3}); err != nil {
@@ -188,6 +189,9 @@ func TestRateLimitBurstAndOversizedStealthStrike(t *testing.T) {
 		if rp.Code != http.StatusNotFound {
 			t.Fatalf("poll req %d expected 404 (passed rate limit), got %d", i+1, rp.Code)
 		}
+	}
+	if guard.IsBanned(pollIP) {
+		t.Fatalf("expected missing-slot poll burst from %s not to ban IP", pollIP)
 	}
 
 	// Oversized heavy approve body (> 2 MiB) -> silent 404 + strike (never leaks 413)
@@ -712,8 +716,8 @@ func TestPairStoreMemoryLimitsAndZeroing(t *testing.T) {
 	}
 
 	// Free bigCh -> PairApprove succeeds and zeroes old req* slices
-	if !st.PairCancel(bigCh, bigTok) {
-		t.Fatal("expected PairCancel(bigCh) to succeed")
+	if err := st.PairCancel(bigCh, bigTok); err != nil {
+		t.Fatalf("expected PairCancel(bigCh) to succeed, got %v", err)
 	}
 	sRef := st.slots[pairCh]
 	reqCTRef := sRef.reqCiphertext
@@ -729,9 +733,9 @@ func TestPairStoreMemoryLimitsAndZeroing(t *testing.T) {
 		t.Fatalf("unexpected totalBytes after approve: %d", st.TotalBytes())
 	}
 
-	state, entry, code := st.PairStatus(pairCh, reqID)
-	if code != http.StatusOK || state != "approved" || entry == nil {
-		t.Fatalf("pair status expected approved, got state=%q code=%d", state, code)
+	state, entry, err := st.PairStatus(pairCh, reqID)
+	if err != nil || state != "approved" || entry == nil {
+		t.Fatalf("pair status expected approved, got state=%q err=%v", state, err)
 	}
 	tokRef := entry.senderToken
 	ctRef := entry.ciphertext
@@ -748,5 +752,229 @@ func TestPairStoreMemoryLimitsAndZeroing(t *testing.T) {
 	}
 	if st.Len() != 0 || st.TotalBytes() != 0 {
 		t.Fatalf("expected empty store, len=%d bytes=%d", st.Len(), st.TotalBytes())
+	}
+}
+
+func TestRepeatedV2SyncCyclesNeverBanSameIP(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	store := newMemStore(nowFn)
+	guard := newIPGuard(nowFn)
+	srv := newRelayServer(store, guard, testAppKey, nowFn)
+
+	sameIP := "198.51.100.200"
+	const cycles = 20
+
+	for i := 0; i < cycles; i++ {
+		ch := makeTestHex64(fmt.Sprintf("nat-sync-ch-%d", i))
+		senderTok := makeTestHex64(fmt.Sprintf("nat-sync-tok-%d", i))
+		reqID := makeTestHex64(fmt.Sprintf("nat-sync-req-%d", i))
+
+		// Advance clock enough to refill non-poll rate tokens (4 non-poll calls/cycle @ 10/min = 24s)
+		now = now.Add(30 * time.Second)
+
+		// 1. PairInit
+		initBody := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s","ttlSeconds":300}`, ch, senderTok))
+		rInit := httptest.NewRecorder()
+		srv.ServeHTTP(rInit, signReq(t, http.MethodPost, "/v1/pair/init", initBody, testAppKey, now.Unix(), sameIP))
+		if rInit.Code != http.StatusOK {
+			t.Fatalf("cycle %d pair/init failed: %d %s", i+1, rInit.Code, rInit.Body.String())
+		}
+
+		// 2. PairPoll while waiting
+		pollBody := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s"}`, ch, senderTok))
+		rPollWait := httptest.NewRecorder()
+		srv.ServeHTTP(rPollWait, signReq(t, http.MethodPost, "/v1/pair/poll", pollBody, testAppKey, now.Unix(), sameIP))
+		if rPollWait.Code != http.StatusOK {
+			t.Fatalf("cycle %d pair/poll waiting failed: %d", i+1, rPollWait.Code)
+		}
+
+		// 3. PairRequest
+		reqBody := []byte(fmt.Sprintf(
+			`{"channelId":"%s","requestId":"%s","salt":"AQID","nonce":"BAUG","ciphertext":"BwgJ"}`,
+			ch, reqID,
+		))
+		rReq := httptest.NewRecorder()
+		srv.ServeHTTP(rReq, signReq(t, http.MethodPost, "/v1/pair/request", reqBody, testAppKey, now.Unix(), sameIP))
+		if rReq.Code != http.StatusOK {
+			t.Fatalf("cycle %d pair/request failed: %d", i+1, rReq.Code)
+		}
+
+		// 4. PairStatus pending + PairPoll requested
+		statusBody := []byte(fmt.Sprintf(`{"channelId":"%s","requestId":"%s"}`, ch, reqID))
+		rStatusPend := httptest.NewRecorder()
+		srv.ServeHTTP(rStatusPend, signReq(t, http.MethodPost, "/v1/pair/status", statusBody, testAppKey, now.Unix(), sameIP))
+		if rStatusPend.Code != http.StatusOK {
+			t.Fatalf("cycle %d pair/status pending failed: %d", i+1, rStatusPend.Code)
+		}
+		rPollReq := httptest.NewRecorder()
+		srv.ServeHTTP(rPollReq, signReq(t, http.MethodPost, "/v1/pair/poll", pollBody, testAppKey, now.Unix(), sameIP))
+		if rPollReq.Code != http.StatusOK {
+			t.Fatalf("cycle %d pair/poll requested failed: %d", i+1, rPollReq.Code)
+		}
+
+		// 5. PairApprove
+		appBody := []byte(fmt.Sprintf(
+			`{"channelId":"%s","senderToken":"%s","requestId":"%s","salt":"AQID","nonce":"BAUG","ciphertext":"BwgJ"}`,
+			ch, senderTok, reqID,
+		))
+		rApp := httptest.NewRecorder()
+		srv.ServeHTTP(rApp, signReq(t, http.MethodPost, "/v1/pair/approve", appBody, testAppKey, now.Unix(), sameIP))
+		if rApp.Code != http.StatusOK {
+			t.Fatalf("cycle %d pair/approve failed: %d", i+1, rApp.Code)
+		}
+
+		// 6. PairStatus approved (burn-after-read)
+		rStatusApp := httptest.NewRecorder()
+		srv.ServeHTTP(rStatusApp, signReq(t, http.MethodPost, "/v1/pair/status", statusBody, testAppKey, now.Unix(), sameIP))
+		if rStatusApp.Code != http.StatusOK {
+			t.Fatalf("cycle %d pair/status approved failed: %d", i+1, rStatusApp.Code)
+		}
+
+		// 7. Post-burn PairPoll 404 (normal sender "consumed" check) + post-burn PairStatus 404 + post-burn PairCancel 404
+		rPollGone := httptest.NewRecorder()
+		srv.ServeHTTP(rPollGone, signReq(t, http.MethodPost, "/v1/pair/poll", pollBody, testAppKey, now.Unix(), sameIP))
+		if rPollGone.Code != http.StatusNotFound || rPollGone.Body.Len() != 0 {
+			t.Fatalf("cycle %d post-burn poll expected silent 404, got %d", i+1, rPollGone.Code)
+		}
+		rStatusGone := httptest.NewRecorder()
+		srv.ServeHTTP(rStatusGone, signReq(t, http.MethodPost, "/v1/pair/status", statusBody, testAppKey, now.Unix(), sameIP))
+		if rStatusGone.Code != http.StatusNotFound || rStatusGone.Body.Len() != 0 {
+			t.Fatalf("cycle %d post-burn status expected silent 404, got %d", i+1, rStatusGone.Code)
+		}
+		rCancelGone := httptest.NewRecorder()
+		srv.ServeHTTP(rCancelGone, signReq(t, http.MethodPost, "/v1/pair/cancel", pollBody, testAppKey, now.Unix(), sameIP))
+		if rCancelGone.Code != http.StatusNotFound || rCancelGone.Body.Len() != 0 {
+			t.Fatalf("cycle %d post-burn cancel expected silent 404, got %d", i+1, rCancelGone.Code)
+		}
+	}
+
+	if guard.IsBanned(sameIP) {
+		t.Fatalf("legitimate IP %s was banned after %d normal v2 sync cycles", sameIP, cycles)
+	}
+
+	// Verify /v1/ping still returns 200 OK
+	rPing := httptest.NewRecorder()
+	srv.ServeHTTP(rPing, signReq(t, http.MethodPost, "/v1/ping", []byte("{}"), testAppKey, now.Unix(), sameIP))
+	if rPing.Code != http.StatusOK {
+		t.Fatalf("expected /v1/ping 200 after %d cycles, got %d", cycles, rPing.Code)
+	}
+
+	// Verify occasional isolated strikes (< strikeLimit) are reset by a valid 200 response
+	resetIP := "198.51.100.201"
+	for i := 0; i < strikeLimit-1; i++ {
+		guard.RecordStrike(resetIP)
+	}
+	rResetPing := httptest.NewRecorder()
+	srv.ServeHTTP(rResetPing, signReq(t, http.MethodPost, "/v1/ping", []byte("{}"), testAppKey, now.Unix(), resetIP))
+	if rResetPing.Code != http.StatusOK {
+		t.Fatalf("expected /v1/ping 200 before strikeLimit, got %d", rResetPing.Code)
+	}
+	// One more strike should NOT ban because strikes were reset on valid 200 response
+	if guard.RecordStrike(resetIP) || guard.IsBanned(resetIP) {
+		t.Fatalf("expected strikes to have been reset after valid 200 response")
+	}
+}
+
+func TestGracefulShutdownWaitsForInFlightAndZeroesStore(t *testing.T) {
+	store := newMemStore(nil)
+	ch := makeTestHex64("shutdown-ch")
+	tok := []byte("0123456789abcdef0123456789abcdef")
+	reqID := makeTestHex64("shutdown-req")
+	if _, err := store.PairInit(ch, tok, 120); err != nil {
+		t.Fatalf("PairInit: %v", err)
+	}
+	if _, err := store.PairRequest(ch, reqID, []byte("s"), []byte("n"), []byte("top-secret-payload")); err != nil {
+		t.Fatalf("PairRequest: %v", err)
+	}
+	secretRef := store.slots[ch].reqCiphertext
+
+	inHandler := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			close(inHandler)
+			<-releaseHandler
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("drained-ok"))
+		}),
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	stopCh := make(chan struct{})
+	sigCh := make(chan os.Signal, 1)
+
+	serveErrCh := make(chan error, 1)
+	go func() {
+		serveErrCh <- serveWithGracefulShutdown(srv, ln, store, stopCh, sigCh, 3*time.Second)
+	}()
+
+	// Start an in-flight HTTP request
+	clientRespCh := make(chan string, 1)
+	clientErrCh := make(chan error, 1)
+	go func() {
+		resp, err := http.Get("http://" + ln.Addr().String() + "/slow")
+		if err != nil {
+			clientErrCh <- err
+			return
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			clientErrCh <- err
+			return
+		}
+		clientRespCh <- string(b)
+	}()
+
+	select {
+	case <-inHandler:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for request to reach handler")
+	}
+
+	// Trigger graceful shutdown while request is still in-flight
+	sigCh <- syscall.SIGTERM
+
+	// serveWithGracefulShutdown must NOT return while the in-flight request is still running
+	select {
+	case err := <-serveErrCh:
+		t.Fatalf("serveWithGracefulShutdown returned prematurely before draining in-flight request: err=%v", err)
+	case <-time.After(80 * time.Millisecond):
+	}
+
+	// Release the in-flight request -> response drains, store zeroes RAM, shutdown completes
+	close(releaseHandler)
+
+	select {
+	case err := <-clientErrCh:
+		t.Fatalf("in-flight HTTP request failed during graceful shutdown: %v", err)
+	case body := <-clientRespCh:
+		if body != "drained-ok" {
+			t.Fatalf("unexpected in-flight body: %q", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for in-flight HTTP response")
+	}
+
+	select {
+	case err := <-serveErrCh:
+		if err != nil {
+			t.Fatalf("serveWithGracefulShutdown returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for serveWithGracefulShutdown to exit")
+	}
+
+	if store.Len() != 0 || store.TotalBytes() != 0 {
+		t.Fatalf("expected store closed and empty, len=%d bytes=%d", store.Len(), store.TotalBytes())
+	}
+	for _, b := range secretRef {
+		if b != 0 {
+			t.Fatalf("expected store RAM zeroed on shutdown, found byte %d", b)
+		}
 	}
 }

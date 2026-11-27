@@ -132,7 +132,7 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch r.URL.Path {
 	case "/v1/ping":
-		s.handlePing(w)
+		s.handlePing(w, ip)
 	case "/v1/pair/init":
 		s.handlePairInit(w, ip, rawBody)
 	case "/v1/pair/request":

@@ -57,8 +57,10 @@ func writeOKExpiry(w http.ResponseWriter, exp time.Time) {
 
 func (s *relayServer) writeStoreErr(w http.ResponseWriter, ip string, err error) {
 	switch {
-	case errors.Is(err, errPairNotFound):
+	case errors.Is(err, errPairAuth):
 		s.guard.RecordStrike(ip)
+		silentNotFound(w)
+	case errors.Is(err, errPairNotFound):
 		silentNotFound(w)
 	case errors.Is(err, errSlotExists):
 		writeJSON(w, http.StatusConflict, []byte(`{"error":"exists"}`))
@@ -83,7 +85,8 @@ func decodeHexToken64(s string) ([]byte, bool) {
 	return b, true
 }
 
-func (s *relayServer) handlePing(w http.ResponseWriter) {
+func (s *relayServer) handlePing(w http.ResponseWriter, ip string) {
+	s.guard.ResetStrikes(ip)
 	writeJSON(w, http.StatusOK, []byte(`{"ok":true,"service":"sshsync","protocol":"gssh-sync-v2"}`))
 }
 
@@ -104,6 +107,7 @@ func (s *relayServer) handlePairInit(w http.ResponseWriter, ip string, rawBody [
 		s.writeStoreErr(w, ip, err)
 		return
 	}
+	s.guard.ResetStrikes(ip)
 	writeOKExpiry(w, exp)
 }
 
@@ -127,6 +131,7 @@ func (s *relayServer) handlePairRequest(w http.ResponseWriter, ip string, rawBod
 		s.writeStoreErr(w, ip, err)
 		return
 	}
+	s.guard.ResetStrikes(ip)
 	writeOKExpiry(w, exp)
 }
 
@@ -142,15 +147,14 @@ func (s *relayServer) handlePairPoll(w http.ResponseWriter, ip string, rawBody [
 		writeJSON(w, http.StatusBadRequest, []byte(`{"error":"invalid_fields"}`))
 		return
 	}
-	state, requestID, salt, nonce, ct, status := s.store.PairPoll(req.ChannelID, tok)
+	state, requestID, salt, nonce, ct, err := s.store.PairPoll(req.ChannelID, tok)
 	defer func() {
 		clear(salt)
 		clear(nonce)
 		clear(ct)
 	}()
-	if status != http.StatusOK {
-		s.guard.RecordStrike(ip)
-		silentNotFound(w)
+	if err != nil {
+		s.writeStoreErr(w, ip, err)
 		return
 	}
 	resp, err := json.Marshal(struct {
@@ -171,6 +175,7 @@ func (s *relayServer) handlePairPoll(w http.ResponseWriter, ip string, rawBody [
 		writeJSON(w, http.StatusInternalServerError, []byte(`{"error":"encode"}`))
 		return
 	}
+	s.guard.ResetStrikes(ip)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -198,6 +203,7 @@ func (s *relayServer) handlePairApprove(w http.ResponseWriter, ip string, rawBod
 	}
 	// Ownership of decoded byte slices transferred to memStore; prevent defer from wiping stored data.
 	req.Salt, req.Nonce, req.Ciphertext = nil, nil, nil
+	s.guard.ResetStrikes(ip)
 	writeJSON(w, http.StatusOK, []byte(`{"ok":true}`))
 }
 
@@ -217,6 +223,7 @@ func (s *relayServer) handlePairReject(w http.ResponseWriter, ip string, rawBody
 		s.writeStoreErr(w, ip, err)
 		return
 	}
+	s.guard.ResetStrikes(ip)
 	writeJSON(w, http.StatusOK, []byte(`{"ok":true}`))
 }
 
@@ -230,11 +237,10 @@ func (s *relayServer) handlePairStatus(w http.ResponseWriter, ip string, rawBody
 		writeJSON(w, http.StatusBadRequest, []byte(`{"error":"invalid_fields"}`))
 		return
 	}
-	state, entry, status := s.store.PairStatus(req.ChannelID, req.RequestID)
+	state, entry, err := s.store.PairStatus(req.ChannelID, req.RequestID)
 	defer zeroSlot(entry)
-	if status != http.StatusOK {
-		s.guard.RecordStrike(ip)
-		silentNotFound(w)
+	if err != nil {
+		s.writeStoreErr(w, ip, err)
 		return
 	}
 	out := struct {
@@ -256,6 +262,7 @@ func (s *relayServer) handlePairStatus(w http.ResponseWriter, ip string, rawBody
 		writeJSON(w, http.StatusInternalServerError, []byte(`{"error":"encode"}`))
 		return
 	}
+	s.guard.ResetStrikes(ip)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -271,10 +278,10 @@ func (s *relayServer) handlePairCancel(w http.ResponseWriter, ip string, rawBody
 		writeJSON(w, http.StatusBadRequest, []byte(`{"error":"invalid_fields"}`))
 		return
 	}
-	if !s.store.PairCancel(req.ChannelID, tok) {
-		s.guard.RecordStrike(ip)
-		silentNotFound(w)
+	if err := s.store.PairCancel(req.ChannelID, tok); err != nil {
+		s.writeStoreErr(w, ip, err)
 		return
 	}
+	s.guard.ResetStrikes(ip)
 	writeJSON(w, http.StatusOK, []byte(`{"ok":true}`))
 }

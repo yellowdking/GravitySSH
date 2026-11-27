@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -105,19 +106,46 @@ func main() {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		close(stopCh)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := srv.Shutdown(ctx); err != nil {
-			_ = srv.Close()
-		}
-		store.Close()
-	}()
+	defer signal.Stop(sigCh)
 
 	log.Printf("sshsync listening on %s (TLS 1.3, SPKI=%s)", *listenAddr, spkiHex)
-	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+	if err := serveWithGracefulShutdown(srv, ln, store, stopCh, sigCh, 5*time.Second); err != nil {
 		log.Fatalf("serve error: %v", err)
 	}
+}
+
+func serveWithGracefulShutdown(
+	srv *http.Server,
+	ln net.Listener,
+	store *memStore,
+	stopCh chan struct{},
+	sigCh <-chan os.Signal,
+	shutdownTimeout time.Duration,
+) error {
+	serveDone := make(chan struct{})
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer close(shutdownDone)
+		select {
+		case <-sigCh:
+			close(stopCh)
+			ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			if err := srv.Shutdown(ctx); err != nil {
+				_ = srv.Close()
+			}
+			store.Close()
+		case <-serveDone:
+			close(stopCh)
+			store.Close()
+		}
+	}()
+
+	err := srv.Serve(ln)
+	close(serveDone)
+	<-shutdownDone
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
