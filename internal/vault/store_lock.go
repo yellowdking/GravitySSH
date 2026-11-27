@@ -32,6 +32,38 @@ func (s *Store) IsLocked() bool {
 	return s.locked
 }
 
+// Lock flushes any pending debounced changes, zeroes cached master key material
+// and in-memory secrets, and returns the store to the locked state.
+func (s *Store) Lock() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errVaultClosed
+	}
+	if !s.hasPassword {
+		return errors.New("未设置解锁密码，无法手动锁定配置文件")
+	}
+	if s.locked {
+		return nil
+	}
+	if s.flushTimer != nil {
+		s.flushTimer.Stop()
+		s.flushTimer = nil
+	}
+	if s.dirty {
+		if err := s.saveLocked(); err != nil {
+			return err
+		}
+	}
+	clear(s.pwKey)
+	clear(s.pwSalt)
+	s.pwKey = nil
+	s.pwSalt = nil
+	clearVaultDataSecrets(&s.data)
+	s.locked = true
+	return nil
+}
+
 // Unlock decrypts a password-protected vault into memory using the user's password.
 func (s *Store) Unlock(password string) error {
 	s.mu.Lock()

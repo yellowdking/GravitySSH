@@ -126,3 +126,57 @@ func TestUnlockResetsHasPasswordWhenVaultFileReplacedWithNoPasswordMode(t *testi
 		t.Fatalf("SaveServer failed after Mode 0x01 unlock: %v", err)
 	}
 }
+
+func TestVaultManualLockFlushesClearsSecretsAndReunlocks(t *testing.T) {
+	vaultPath := filepath.Join(t.TempDir(), "vault.gsv")
+	store, err := Open(vaultPath, nil)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	// Lock without password must fail cleanly.
+	if err := store.Lock(); err == nil {
+		t.Fatal("expected Lock() to fail when vault has no password")
+	}
+
+	if _, err := store.SaveServer(models.ServerSaveRequest{Name: "LockSrv", Host: "10.0.5.5", Username: "root", Password: "pw"}); err != nil {
+		t.Fatalf("SaveServer failed: %v", err)
+	}
+	if err := store.SetPassword("", "manual-lock-pass"); err != nil {
+		t.Fatalf("SetPassword failed: %v", err)
+	}
+	// Record a debounced command right before Lock() -> Lock() must flush dirty state first.
+	if _, err := store.RecordCommand("srv-1", "LockSrv", "sess-1", "uptime"); err != nil {
+		t.Fatalf("RecordCommand failed: %v", err)
+	}
+
+	if err := store.Lock(); err != nil {
+		t.Fatalf("Lock failed: %v", err)
+	}
+	// Idempotent second Lock() succeeds.
+	if err := store.Lock(); err != nil {
+		t.Fatalf("second Lock failed: %v", err)
+	}
+	if !store.IsLocked() || !store.LockState().HasPassword {
+		t.Fatalf("expected locked state with password, got %+v", store.LockState())
+	}
+	if len(store.ListServers()) != 0 || len(store.ListHistory("", 10)) != 0 || store.pwKey != nil || store.pwSalt != nil {
+		t.Fatal("expected secrets and cached password key cleared on Lock()")
+	}
+	if _, err := store.SaveServer(models.ServerSaveRequest{Name: "Blocked", Host: "10.0.5.6"}); err == nil {
+		t.Fatal("expected mutations rejected after Lock()")
+	}
+
+	// Re-unlocking restores both saved server and the flushed debounced command history.
+	if err := store.Unlock("manual-lock-pass"); err != nil {
+		t.Fatalf("Unlock after Lock failed: %v", err)
+	}
+	if len(store.ListServers()) != 1 {
+		t.Fatalf("expected 1 server restored after unlock, got %d", len(store.ListServers()))
+	}
+	hist := store.ListHistory("srv-1", 10)
+	if len(hist) != 1 || hist[0].Command != "uptime" {
+		t.Fatalf("expected flushed history 'uptime' restored after Lock+Unlock, got %+v", hist)
+	}
+}
