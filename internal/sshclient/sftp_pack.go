@@ -32,7 +32,20 @@ func (m *Manager) SFTPDownloadPacked(sessionID, remotePath, localDir string) (in
 	parentDir := path.Dir(clean)
 	baseName := path.Base(clean)
 
-	sshSess, err := client.NewSession()
+	dlCtx, cancel := context.WithTimeout(context.Background(), packedDownloadTimeout)
+	defer cancel()
+	stopCh := m.SessionStopCh(sessionID)
+	if stopCh != nil {
+		go func() {
+			select {
+			case <-stopCh:
+				cancel()
+			case <-dlCtx.Done():
+			}
+		}()
+	}
+
+	sshSess, err := newSessionWithContext(dlCtx, client)
 	if err != nil {
 		return 0, fmt.Errorf("创建打包传输会话失败: %w", err)
 	}
@@ -45,24 +58,15 @@ func (m *Manager) SFTPDownloadPacked(sessionID, remotePath, localDir string) (in
 	var stderr bytes.Buffer
 	sshSess.Stderr = &stderr
 
-	cmd := fmt.Sprintf("tar -cf - -C %s %s", shellQuote(parentDir), shellQuote(baseName))
+	cmd := buildPackedDownloadCommand(parentDir, baseName)
 	if err := sshSess.Start(cmd); err != nil {
 		return 0, fmt.Errorf("启动远程流式打包失败: %w", err)
 	}
 
-	dlCtx, cancel := context.WithTimeout(context.Background(), packedDownloadTimeout)
-	defer cancel()
-	stopCh := m.SessionStopCh(sessionID)
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-done:
-		case <-stopCh:
-			_ = sshSess.Close()
-		case <-dlCtx.Done():
-			_ = sshSess.Close()
-		}
-	}()
+	stopCancel := context.AfterFunc(dlCtx, func() {
+		_ = sshSess.Close()
+	})
+	defer stopCancel()
 
 	transferID := uuid.NewString()
 	m.emitTransfer(models.TransferProgress{
@@ -82,7 +86,7 @@ func (m *Manager) SFTPDownloadPacked(sessionID, remotePath, localDir string) (in
 		_ = sshSess.Close()
 	}
 	waitErr := sshSess.Wait()
-	close(done)
+	stopCancel()
 
 	if unpackErr != nil || waitErr != nil {
 		errText := ""
@@ -229,6 +233,10 @@ func (m *Manager) SFTPCompress(sessionID, remoteDir string, names []string, form
 	return archiveName, nil
 }
 
+func buildPackedDownloadCommand(parentDir, baseName string) string {
+	return fmt.Sprintf("tar -cf - -C %s -- %s", shellQuote(parentDir), shellQuote(safeRelativeName(baseName)))
+}
+
 func buildCompressCommand(dir string, names []string, format string) (string, string, error) {
 	base := names[0]
 	if len(names) > 1 {
@@ -236,7 +244,7 @@ func buildCompressCommand(dir string, names []string, format string) (string, st
 	}
 	quoted := make([]string, len(names))
 	for i, n := range names {
-		quoted[i] = shellQuote(n)
+		quoted[i] = shellQuote(safeRelativeName(n))
 	}
 	args := strings.Join(quoted, " ")
 	qDir := shellQuote(dir)
@@ -245,11 +253,11 @@ func buildCompressCommand(dir string, names []string, format string) (string, st
 	case "zip":
 		archive := base + ".zip"
 		install := autoInstallSnippet("zip", "zip", "zip", "zip", "zip", "zip")
-		cmd := fmt.Sprintf("cd %s && { if ! command -v zip >/dev/null 2>&1; then %s; fi; zip -rq %s %s; }", qDir, install, shellQuote(archive), args)
+		cmd := fmt.Sprintf("cd -- %s && { if ! command -v zip >/dev/null 2>&1; then %s; fi; zip -rq -- %s %s; }", qDir, install, shellQuote(safeRelativeName(archive)), args)
 		return archive, cmd, nil
 	case "", "tar.gz", "tgz":
 		archive := base + ".tar.gz"
-		cmd := fmt.Sprintf("cd %s && tar -czf %s %s", qDir, shellQuote(archive), args)
+		cmd := fmt.Sprintf("cd -- %s && tar -czf %s -- %s", qDir, shellQuote(safeRelativeName(archive)), args)
 		return archive, cmd, nil
 	default:
 		return "", "", fmt.Errorf("不支持的压缩格式: %s", format)

@@ -53,29 +53,38 @@ func (m *Manager) getSSHClient(sessionID string) (*ssh.Client, error) {
 
 func buildExtractCommand(dir, base string) (string, error) {
 	qDir := shellQuote(dir)
-	qBase := shellQuote(base)
+	qBase := shellQuote(safeRelativeName(base))
 	lower := strings.ToLower(base)
 
 	switch {
 	case strings.HasSuffix(lower, ".zip"):
 		install := autoInstallSnippet("unzip", "unzip", "unzip", "unzip", "unzip", "unzip")
-		return fmt.Sprintf("cd %s && { if ! command -v unzip >/dev/null 2>&1; then %s; fi; unzip -o %s -d .; }", qDir, install, qBase), nil
+		return fmt.Sprintf("cd -- %s && { if ! command -v unzip >/dev/null 2>&1; then %s; fi; unzip -o %s -d .; }", qDir, install, qBase), nil
 	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
-		return fmt.Sprintf("cd %s && tar -xzf %s", qDir, qBase), nil
+		return fmt.Sprintf("cd -- %s && tar -xzf %s", qDir, qBase), nil
 	case strings.HasSuffix(lower, ".tar.bz2"), strings.HasSuffix(lower, ".tbz2"):
-		return fmt.Sprintf("cd %s && tar -xjf %s", qDir, qBase), nil
+		return fmt.Sprintf("cd -- %s && tar -xjf %s", qDir, qBase), nil
 	case strings.HasSuffix(lower, ".tar.xz"), strings.HasSuffix(lower, ".txz"):
-		return fmt.Sprintf("cd %s && tar -xJf %s", qDir, qBase), nil
+		return fmt.Sprintf("cd -- %s && tar -xJf %s", qDir, qBase), nil
 	case strings.HasSuffix(lower, ".tar"):
-		return fmt.Sprintf("cd %s && tar -xf %s", qDir, qBase), nil
+		return fmt.Sprintf("cd -- %s && tar -xf %s", qDir, qBase), nil
 	case strings.HasSuffix(lower, ".7z"):
 		install := autoInstallSnippet("p7zip-full", "p7zip", "p7zip", "p7zip", "7zip", "p7zip")
-		return fmt.Sprintf("cd %s && { if ! command -v 7z >/dev/null 2>&1; then %s; fi; 7z x -y %s; }", qDir, install, qBase), nil
+		return fmt.Sprintf("cd -- %s && { if ! command -v 7z >/dev/null 2>&1; then %s; fi; 7z x -y -- %s; }", qDir, install, qBase), nil
 	case strings.HasSuffix(lower, ".gz"):
-		return fmt.Sprintf("cd %s && gunzip -kf %s", qDir, qBase), nil
+		return fmt.Sprintf("cd -- %s && gunzip -kf -- %s", qDir, qBase), nil
 	default:
 		return "", fmt.Errorf("暂不支持解压该格式: %s", base)
 	}
+}
+
+// safeRelativeName prefixes "./" when a relative filename starts with "-" so
+// CLI tools (tar, zip, unzip, gunzip, 7z) never interpret it as an option flag.
+func safeRelativeName(name string) string {
+	if strings.HasPrefix(name, "-") {
+		return "./" + name
+	}
+	return name
 }
 
 func autoInstallSnippet(aptPkg, apkPkg, dnfPkg, yumPkg, pacmanPkg, zypperPkg string) string {

@@ -2,7 +2,6 @@ package sshclient
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,8 +10,9 @@ import (
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
+var rttProbeTimeout = 5 * time.Second
+
 const (
-	rttProbeTimeout = 5 * time.Second
 
 	linuxMetricsHead = `LC_ALL=C sh -c '
 [ -r /proc/stat ] || { echo "UNSUPPORTED"; exit 0; }
@@ -69,23 +69,27 @@ func (m *Manager) GetSessionMetrics(sessionID string) (models.HostMetrics, error
 	}
 
 	// Measure true single-RTT via global keepalive request before exec-based metrics sampling.
+	// If the probe fails or times out, return early instead of launching a 10s exec on a dead/stalled link.
 	pingStart := time.Now()
 	pingErr := sendKeepAliveProbe(client.Client, stopCh, rttProbeTimeout, &sess.rttProbeInFlight)
-	if errors.Is(pingErr, context.Canceled) {
+	if pingErr != nil {
 		return models.HostMetrics{SessionID: sessionID}, pingErr
 	}
-	hasRTT := pingErr == nil
-	var latencyMs int64
-	if hasRTT {
-		latencyMs = time.Since(pingStart).Milliseconds()
-	}
+	latencyMs := time.Since(pingStart).Milliseconds()
 
 	cmd := buildLinuxMetricsCmd(cachedCores <= 0, gpuChecked, hasGPU)
-	execStart := time.Now()
-	out, runErr := runSSHExec(context.Background(), client.Client, cmd, 10*time.Second, false)
-	if !hasRTT {
-		latencyMs = time.Since(execStart).Milliseconds()
+	execCtx, cancelExec := context.WithCancel(context.Background())
+	defer cancelExec()
+	if stopCh != nil {
+		go func() {
+			select {
+			case <-stopCh:
+				cancelExec()
+			case <-execCtx.Done():
+			}
+		}()
 	}
+	out, runErr := runSSHExec(execCtx, client.Client, cmd, 10*time.Second, false)
 	if runErr != nil {
 		return models.HostMetrics{SessionID: sessionID, LatencyMs: latencyMs}, runErr
 	}

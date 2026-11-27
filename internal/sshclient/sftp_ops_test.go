@@ -28,8 +28,8 @@ func TestBuildExtractCommand(t *testing.T) {
 	for _, tc := range [][3]string{
 		{"/w", "a b.zip", "unzip -o 'a b.zip' -d ."},
 		{"/d", "b.tar.gz", "tar -xzf 'b.tar.gz'"},
-		{"/t", "p.7z", "7z x -y 'p.7z'"},
-		{"/l", "a.gz", "gunzip -kf 'a.gz'"},
+		{"/t", "p.7z", "7z x -y -- 'p.7z'"},
+		{"/l", "a.gz", "gunzip -kf -- 'a.gz'"},
 	} {
 		if c, err := buildExtractCommand(tc[0], tc[1]); err != nil || !strings.Contains(c, tc[2]) {
 			t.Fatalf("%s: %q %v", tc[1], c, err)

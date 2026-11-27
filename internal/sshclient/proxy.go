@@ -116,8 +116,14 @@ func dialViaProxy(ctx context.Context, p models.ProxyConfig, targetAddr string, 
 		if err != nil {
 			return nil, fmt.Errorf("初始化 SOCKS5 代理失败: %w", err)
 		}
+		dialCtx := ctx
+		var cancel context.CancelFunc
+		if timeout > 0 {
+			dialCtx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
 		if ctxDialer, ok := socksDialer.(proxy.ContextDialer); ok {
-			return ctxDialer.DialContext(ctx, "tcp", targetAddr)
+			return ctxDialer.DialContext(dialCtx, "tcp", targetAddr)
 		}
 		return socksDialer.Dial("tcp", targetAddr)
 
@@ -134,20 +140,20 @@ func dialHTTPConnect(ctx context.Context, proxyAddr, username, password, targetA
 	if err != nil {
 		return nil, fmt.Errorf("无法连接 HTTP 代理 %s: %w", proxyAddr, err)
 	}
-	deadline := time.Now().Add(timeout)
-	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
+	if ctxDeadline, ok := ctx.Deadline(); ok && (deadline.IsZero() || ctxDeadline.Before(deadline)) {
 		deadline = ctxDeadline
 	}
-	_ = conn.SetDeadline(deadline)
+	if !deadline.IsZero() {
+		_ = conn.SetDeadline(deadline)
+	}
 
-	stopWatch := make(chan struct{})
-	go func() {
-		select {
-		case <-stopWatch:
-		case <-ctx.Done():
-			_ = conn.Close()
-		}
-	}()
+	stopCancel := context.AfterFunc(ctx, func() {
+		_ = conn.Close()
+	})
 
 	var reqBuilder strings.Builder
 	reqBuilder.WriteString(fmt.Sprintf("CONNECT %s HTTP/1.1\r\n", targetAddr))
@@ -160,29 +166,38 @@ func dialHTTPConnect(ctx context.Context, proxyAddr, username, password, targetA
 	reqBuilder.WriteString("\r\n")
 
 	if _, err := io.WriteString(conn, reqBuilder.String()); err != nil {
-		close(stopWatch)
+		stopped := stopCancel()
 		_ = conn.Close()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if !stopped || ctx.Err() != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, context.Canceled
 		}
 		return nil, fmt.Errorf("发送 HTTP CONNECT 请求失败: %w", err)
 	}
 
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
-	close(stopWatch)
+	stopped := stopCancel()
 	if err != nil {
 		_ = conn.Close()
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if !stopped || ctx.Err() != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, context.Canceled
 		}
 		return nil, fmt.Errorf("读取 HTTP 代理响应失败: %w", err)
 	}
 	_ = resp.Body.Close()
 
-	if ctx.Err() != nil {
+	if !stopped || ctx.Err() != nil {
 		_ = conn.Close()
-		return nil, ctx.Err()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, context.Canceled
 	}
 	if resp.StatusCode != http.StatusOK {
 		_ = conn.Close()
@@ -217,26 +232,27 @@ func upgradeSSHConn(ctx context.Context, conn net.Conn, addr string, cfg *ssh.Cl
 		_ = conn.SetDeadline(deadline)
 	}
 
-	stopWatch := make(chan struct{})
-	go func() {
-		select {
-		case <-stopWatch:
-		case <-ctx.Done():
-			_ = conn.Close()
-		}
-	}()
+	stopCancel := context.AfterFunc(ctx, func() {
+		_ = conn.Close()
+	})
 
 	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
-	close(stopWatch)
+	stopped := stopCancel()
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if !stopped || ctx.Err() != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, context.Canceled
 		}
 		return nil, err
 	}
-	if ctx.Err() != nil {
+	if !stopped || ctx.Err() != nil {
 		_ = c.Close()
-		return nil, ctx.Err()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, context.Canceled
 	}
 	_ = conn.SetDeadline(time.Time{})
 	return ssh.NewClient(c, chans, reqs), nil

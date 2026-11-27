@@ -41,6 +41,7 @@ type sessionState struct {
 	writeMu           sync.Mutex
 	info              models.SessionInfo
 	cancelDial        context.CancelFunc
+	pendingDial       *DialResult
 	dialRes           *DialResult
 	sshSession        *ssh.Session
 	stdin             io.WriteCloser

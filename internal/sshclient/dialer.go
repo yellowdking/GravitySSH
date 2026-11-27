@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yellowdking/GravitySSH/internal/models"
@@ -24,17 +25,23 @@ type DialResult struct {
 	Client      *ssh.Client
 	JumpClients []*ssh.Client
 	ViaSummary  string
+	closeOnce   sync.Once
 }
 
 func (d *DialResult) Close() {
-	if d.Client != nil {
-		_ = d.Client.Close()
+	if d == nil {
+		return
 	}
-	for i := len(d.JumpClients) - 1; i >= 0; i-- {
-		if d.JumpClients[i] != nil {
-			_ = d.JumpClients[i].Close()
+	d.closeOnce.Do(func() {
+		if d.Client != nil {
+			_ = d.Client.Close()
 		}
-	}
+		for i := len(d.JumpClients) - 1; i >= 0; i-- {
+			if d.JumpClients[i] != nil {
+				_ = d.JumpClients[i].Close()
+			}
+		}
+	})
 }
 
 func DialServer(ctx context.Context, cfg *models.ServerConfig, resolver CredentialResolver) (*DialResult, error) {

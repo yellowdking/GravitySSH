@@ -47,8 +47,28 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 		return
 	}
 
-	sh, err := openShellSession(dialRes.Client, ptyCols, ptyRows)
+	sess.mu.Lock()
+	if sess.userClosed || sess.closed {
+		sess.mu.Unlock()
+		dialRes.Close()
+		return
+	}
+	sess.pendingDial = dialRes
+	sess.mu.Unlock()
+
+	shellTimeout := time.Duration(srv.TimeoutSeconds) * time.Second
+	if shellTimeout <= 0 {
+		shellTimeout = 15 * time.Second
+	}
+	shellCtx, cancelShell := context.WithTimeout(ctx, shellTimeout)
+	sh, err := openShellSession(shellCtx, dialRes, ptyCols, ptyRows)
+	cancelShell()
 	if err != nil {
+		sess.mu.Lock()
+		if sess.pendingDial == dialRes {
+			sess.pendingDial = nil
+		}
+		sess.mu.Unlock()
 		dialRes.Close()
 		m.failSession(sess, err.Error())
 		return
@@ -60,7 +80,10 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 	}
 
 	sess.mu.Lock()
-	if sess.userClosed {
+	if sess.pendingDial == dialRes {
+		sess.pendingDial = nil
+	}
+	if sess.userClosed || sess.closed {
 		sess.mu.Unlock()
 		_ = sh.sshSess.Close()
 		dialRes.Close()
@@ -116,10 +139,30 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 	}()
 }
 
-func openShellSession(client *ssh.Client, cols, rows int) (*shellHandles, error) {
-	sshSess, err := client.NewSession()
+func openShellSession(ctx context.Context, dialRes *DialResult, cols, rows int) (*shellHandles, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("打开远程 Shell 已取消: %w", err)
+	}
+	stopCancel := context.AfterFunc(ctx, func() {
+		dialRes.Close()
+	})
+	abort := func(sshSess *ssh.Session, prefix string, err error) (*shellHandles, error) {
+		stopped := stopCancel()
+		if sshSess != nil {
+			_ = sshSess.Close()
+		}
+		if !stopped || ctx.Err() != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("%s: %w", prefix, ctx.Err())
+			}
+			return nil, fmt.Errorf("%s: %w", prefix, context.Canceled)
+		}
+		return nil, fmt.Errorf("%s: %w", prefix, err)
+	}
+
+	sshSess, err := dialRes.Client.NewSession()
 	if err != nil {
-		return nil, fmt.Errorf("创建 SSH 会话失败: %w", err)
+		return abort(nil, "创建 SSH 会话失败", err)
 	}
 	modes := ssh.TerminalModes{
 		ssh.ECHO:          1,
@@ -127,30 +170,36 @@ func openShellSession(client *ssh.Client, cols, rows int) (*shellHandles, error)
 		ssh.TTY_OP_OSPEED: 14400,
 	}
 	if err := sshSess.RequestPty("xterm-256color", rows, cols, modes); err != nil {
-		_ = sshSess.Close()
-		return nil, fmt.Errorf("请求 PTY 终端失败: %w", err)
+		return abort(sshSess, "请求 PTY 终端失败", err)
 	}
 	_ = sshSess.Setenv("LANG", "en_US.UTF-8")
 	_ = sshSess.Setenv("LC_CTYPE", "en_US.UTF-8")
+	if err := ctx.Err(); err != nil {
+		return abort(sshSess, "初始化终端环境失败", err)
+	}
 
 	stdin, err := sshSess.StdinPipe()
 	if err != nil {
-		_ = sshSess.Close()
-		return nil, fmt.Errorf("获取 stdin 失败: %w", err)
+		return abort(sshSess, "获取 stdin 失败", err)
 	}
 	stdout, err := sshSess.StdoutPipe()
 	if err != nil {
-		_ = sshSess.Close()
-		return nil, fmt.Errorf("获取 stdout 失败: %w", err)
+		return abort(sshSess, "获取 stdout 失败", err)
 	}
 	stderr, err := sshSess.StderrPipe()
 	if err != nil {
-		_ = sshSess.Close()
-		return nil, fmt.Errorf("获取 stderr 失败: %w", err)
+		return abort(sshSess, "获取 stderr 失败", err)
 	}
 	if err := sshSess.Shell(); err != nil {
+		return abort(sshSess, "启动远程 Shell 失败", err)
+	}
+	stopped := stopCancel()
+	if !stopped || ctx.Err() != nil {
 		_ = sshSess.Close()
-		return nil, fmt.Errorf("启动远程 Shell 失败: %w", err)
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("启动远程 Shell 失败: %w", ctx.Err())
+		}
+		return nil, fmt.Errorf("启动远程 Shell 失败: %w", context.Canceled)
 	}
 	return &shellHandles{sshSess: sshSess, stdin: stdin, stdout: stdout, stderr: stderr}, nil
 }
@@ -261,6 +310,8 @@ func (m *Manager) failSession(sess *sessionState, errMsg string) {
 		return
 	}
 	sess.closed = true
+	pendingDial := sess.pendingDial
+	sess.pendingDial = nil
 	closeStopChLocked(sess)
 	clearSessionRuntimeLocked(sess)
 	sess.info.Status = "error"
@@ -269,6 +320,9 @@ func (m *Manager) failSession(sess *sessionState, errMsg string) {
 	infoSnap := sess.info
 	sess.mu.Unlock()
 
+	if pendingDial != nil {
+		pendingDial.Close()
+	}
 	m.deleteSessionEntry(infoSnap.SessionID, sess)
 	m.sendTerminalText(infoSnap.SessionID, fmt.Sprintf("\r\n\x1b[38;5;203m✗ 连接失败: %s\x1b[0m\r\n", errMsg))
 	m.emit("session:status", infoSnap)
@@ -283,20 +337,16 @@ func (m *Manager) markDisconnected(sess *sessionState, reason string) {
 	sess.closed = true
 	cancelDial := sess.cancelDial
 	sess.cancelDial = nil
+	pendingDial := sess.pendingDial
+	sess.pendingDial = nil
+	sftpClient := sess.sftpClient
+	sess.sftpClient = nil
+	sshSession := sess.sshSession
+	sess.sshSession = nil
+	dialRes := sess.dialRes
+	sess.dialRes = nil
 	closeStopChLocked(sess)
 	clearSessionRuntimeLocked(sess)
-	if sess.sftpClient != nil {
-		_ = sess.sftpClient.Close()
-		sess.sftpClient = nil
-	}
-	if sess.sshSession != nil {
-		_ = sess.sshSession.Close()
-		sess.sshSession = nil
-	}
-	if sess.dialRes != nil {
-		sess.dialRes.Close()
-		sess.dialRes = nil
-	}
 	if sess.info.Status != "error" {
 		sess.info.Status = "disconnected"
 		sess.info.SFTPReady = false
@@ -307,6 +357,18 @@ func (m *Manager) markDisconnected(sess *sessionState, reason string) {
 
 	if cancelDial != nil {
 		cancelDial()
+	}
+	if sftpClient != nil {
+		_ = sftpClient.Close()
+	}
+	if sshSession != nil {
+		_ = sshSession.Close()
+	}
+	if dialRes != nil {
+		dialRes.Close()
+	}
+	if pendingDial != nil && pendingDial != dialRes {
+		pendingDial.Close()
 	}
 	m.deleteSessionEntry(infoSnap.SessionID, sess)
 	m.sendTerminalText(infoSnap.SessionID, fmt.Sprintf("\r\n\x1b[38;5;245m● %s\x1b[0m\r\n", reason))

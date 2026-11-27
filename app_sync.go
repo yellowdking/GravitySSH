@@ -115,6 +115,11 @@ func (a *App) StartSyncSend(relayURL string) (models.SyncSendSession, error) {
 	if err != nil {
 		return models.SyncSendSession{}, err
 	}
+	defer zeroSyncBundle(&bundle)
+	serverCount := len(bundle.Servers)
+	keyCount := len(bundle.SSHKeys)
+	shortcutCount := len(bundle.Shortcuts)
+	templateCount := len(bundle.Templates)
 	code, err := syncclient.GenerateCode()
 	if err != nil {
 		return models.SyncSendSession{}, err
@@ -159,10 +164,10 @@ func (a *App) StartSyncSend(relayURL string) (models.SyncSendSession, error) {
 		QRText:        qrText,
 		ExpiresAt:     expiresAt.UTC().Format(time.RFC3339),
 		RelayURL:      cleanURL,
-		ServerCount:   len(bundle.Servers),
-		KeyCount:      len(bundle.SSHKeys),
-		ShortcutCount: len(bundle.Shortcuts),
-		TemplateCount: len(bundle.Templates),
+		ServerCount:   serverCount,
+		KeyCount:      keyCount,
+		ShortcutCount: shortcutCount,
+		TemplateCount: templateCount,
 	}, nil
 }
 
@@ -248,16 +253,24 @@ func (a *App) ApproveSyncSend(sessionID, requestID, receiverCode string) error {
 	if a.syncCache == nil {
 		return errors.New("同步缓存未初始化")
 	}
-	sess, ok := a.syncCache.getSend(sessionID)
-	if !ok {
-		return errors.New("同步会话已过期，请重新生成同步码")
-	}
-	if sess.approved || !sess.hasBundle {
-		return errors.New("该同步会话已处理，请勿重复发送")
-	}
-	payload, err := syncclient.EncryptBundleDual(sess.sendCode, receiverCode, requestID, sess.bundle)
+	sess, bundleCopy, err := a.syncCache.beginSendApprove(sessionID)
 	if err != nil {
 		return err
+	}
+	defer zeroSyncBundle(&bundleCopy)
+	approved := false
+	defer func() {
+		if !approved {
+			a.syncCache.abortSendApprove(sessionID)
+		}
+	}()
+
+	payload, err := syncclient.EncryptBundleDual(sess.sendCode, receiverCode, requestID, bundleCopy)
+	if err != nil {
+		return err
+	}
+	if !a.syncCache.isSendApproving(sessionID) {
+		return errors.New("同步会话已取消或已过期")
 	}
 	client, _, err := a.syncClient(sess.relayURL)
 	if err != nil {
@@ -268,6 +281,7 @@ func (a *App) ApproveSyncSend(sessionID, requestID, receiverCode string) error {
 	if err := client.PairApprove(ctx, sess.channelID, sess.senderToken, requestID, payload); err != nil {
 		return err
 	}
+	approved = true
 	a.syncCache.markSendApproved(sessionID, requestID)
 	return nil
 }

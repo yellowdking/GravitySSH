@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,7 @@ type pendingSyncSendSession struct {
 	bundle        models.SyncBundle
 	hasBundle     bool
 	expiresAt     time.Time
+	approving     bool
 	approved      bool
 	approvedReqID string
 }
@@ -42,6 +44,33 @@ type pendingSyncReceiveSession struct {
 	requestID string
 	relayURL  string
 	expiresAt time.Time
+}
+
+func cloneSyncBundle(b models.SyncBundle) models.SyncBundle {
+	cp := b
+	if b.Servers != nil {
+		cp.Servers = make([]models.ServerConfig, len(b.Servers))
+		copy(cp.Servers, b.Servers)
+		for i := range cp.Servers {
+			if cp.Servers[i].LastConnectedAt != nil {
+				t := *cp.Servers[i].LastConnectedAt
+				cp.Servers[i].LastConnectedAt = &t
+			}
+		}
+	}
+	if b.SSHKeys != nil {
+		cp.SSHKeys = make([]models.SSHKeyRecord, len(b.SSHKeys))
+		copy(cp.SSHKeys, b.SSHKeys)
+	}
+	if b.Shortcuts != nil {
+		cp.Shortcuts = make([]models.CommandShortcut, len(b.Shortcuts))
+		copy(cp.Shortcuts, b.Shortcuts)
+	}
+	if b.Templates != nil {
+		cp.Templates = make([]models.BuiltinTemplate, len(b.Templates))
+		copy(cp.Templates, b.Templates)
+	}
+	return cp
 }
 
 func zeroSyncBundle(b *models.SyncBundle) {
@@ -140,10 +169,14 @@ func (c *syncPreviewCache) putSend(sess *pendingSyncSendSession) {
 		zeroSendSession(sess)
 		return
 	}
+	stored := *sess
+	if stored.hasBundle {
+		stored.bundle = cloneSyncBundle(sess.bundle)
+	}
 	now := time.Now()
 	c.pruneLocked(now)
 	evictOldest(c.pendingSends, maxPendingSyncSessions, func(s *pendingSyncSendSession) time.Time { return s.expiresAt }, zeroSendSession)
-	c.pendingSends[sess.sessionID] = sess
+	c.pendingSends[stored.sessionID] = &stored
 	c.rescheduleLocked(now)
 }
 
@@ -158,8 +191,57 @@ func (c *syncPreviewCache) getSend(sessionID string) (*pendingSyncSendSession, b
 		return nil, false
 	}
 	cp := *sess
+	cp.bundle = models.SyncBundle{}
 	c.rescheduleLocked(now)
 	return &cp, true
+}
+
+// beginSendApprove atomically marks a pending send session as approving and
+// returns a metadata snapshot plus a private deep-cloned SyncBundle. Callers
+// own the returned bundle copy and must zero it when finished; concurrent
+// cancellation/pruning only zeroes the cache's own copy.
+func (c *syncPreviewCache) beginSendApprove(sessionID string) (*pendingSyncSendSession, models.SyncBundle, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	c.pruneLocked(now)
+	sess, ok := c.pendingSends[sessionID]
+	if !ok {
+		c.rescheduleLocked(now)
+		return nil, models.SyncBundle{}, errors.New("同步会话已过期，请重新生成同步码")
+	}
+	if sess.approved || !sess.hasBundle {
+		c.rescheduleLocked(now)
+		return nil, models.SyncBundle{}, errors.New("该同步会话已处理，请勿重复发送")
+	}
+	if sess.approving {
+		c.rescheduleLocked(now)
+		return nil, models.SyncBundle{}, errors.New("该同步会话正在处理中，请勿重复发送")
+	}
+	sess.approving = true
+	bundleCopy := cloneSyncBundle(sess.bundle)
+	meta := *sess
+	meta.bundle = models.SyncBundle{}
+	c.rescheduleLocked(now)
+	return &meta, bundleCopy, nil
+}
+
+func (c *syncPreviewCache) isSendApproving(sessionID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	c.pruneLocked(now)
+	sess, ok := c.pendingSends[sessionID]
+	c.rescheduleLocked(now)
+	return ok && sess.approving && !sess.approved
+}
+
+func (c *syncPreviewCache) abortSendApprove(sessionID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if sess, ok := c.pendingSends[sessionID]; ok && !sess.approved {
+		sess.approving = false
+	}
 }
 
 func (c *syncPreviewCache) markSendApproved(sessionID, requestID string) bool {
@@ -172,6 +254,7 @@ func (c *syncPreviewCache) markSendApproved(sessionID, requestID string) bool {
 		c.rescheduleLocked(now)
 		return false
 	}
+	sess.approving = false
 	sess.approved = true
 	sess.approvedReqID = requestID
 	// Drop cached plaintext vault bundle once encrypted & uploaded to relay.
@@ -189,6 +272,7 @@ func (c *syncPreviewCache) popSend(sessionIDOrCode string) (*pendingSyncSendSess
 	if sess, ok := c.pendingSends[sessionIDOrCode]; ok {
 		delete(c.pendingSends, sessionIDOrCode)
 		cp := *sess
+		cp.bundle = models.SyncBundle{}
 		zeroSendSession(sess)
 		c.rescheduleLocked(now)
 		return &cp, true
@@ -198,6 +282,7 @@ func (c *syncPreviewCache) popSend(sessionIDOrCode string) (*pendingSyncSendSess
 			if sess.sendCode == canonical {
 				delete(c.pendingSends, k)
 				cp := *sess
+				cp.bundle = models.SyncBundle{}
 				zeroSendSession(sess)
 				c.rescheduleLocked(now)
 				return &cp, true
