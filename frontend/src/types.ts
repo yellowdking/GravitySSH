@@ -2,7 +2,7 @@ export type AuthType = 'password' | 'key' | 'both'
 export type ProxyType = 'none' | 'socks5' | 'http'
 export type JumpMode = 'none' | 'server' | 'custom'
 
-export interface ProxyView {
+interface ProxyView {
   type: ProxyType
   host: string
   port: number
@@ -10,7 +10,7 @@ export interface ProxyView {
   hasPassword: boolean
 }
 
-export interface JumpHostView {
+interface JumpHostView {
   mode: JumpMode
   serverId?: string
   host?: string

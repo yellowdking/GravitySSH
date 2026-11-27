@@ -1,16 +1,19 @@
 package sshclient
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/pkg/sftp"
+	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
 func TestPickDominantMode(t *testing.T) {
@@ -66,6 +69,52 @@ func TestUpdateCWDFromCommand(t *testing.T) {
 	putDirCacheIfGen(s, "/home/u", nil, genBefore)
 	if len(s.dirCache) != 0 {
 		t.Fatal("stale dirCacheGen write should have been ignored")
+	}
+
+	// Mutating command must invalidate only CWD while preserving unrelated dirs.
+	if dirCacheTTL != 20*time.Second {
+		t.Fatalf("expected dirCacheTTL=20s, got %v", dirCacheTTL)
+	}
+	s.dirCache["/home/u"] = dirCacheEntry{fetchedAt: time.Now()}
+	s.dirCache["/etc"] = dirCacheEntry{fetchedAt: time.Now()}
+	m.updateCWDFromCommand(s, "rm -f temp.txt")
+	if _, ok := s.dirCache["/home/u"]; ok {
+		t.Fatal("expected CWD /home/u to be invalidated")
+	}
+	if _, ok := s.dirCache["/etc"]; !ok {
+		t.Fatal("expected unrelated /etc cache entry to be preserved")
+	}
+}
+
+func TestMarkDisconnectedAndKeepAliveGuard(t *testing.T) {
+	m := NewManager(nil, nil)
+	stopCh := make(chan struct{})
+	s := &sessionState{
+		info:         models.SessionInfo{SessionID: "s1", Status: "connected", SFTPReady: true},
+		stopCh:       stopCh,
+		recorder:     NewCommandRecorder(nil),
+		dirCache:     map[string]dirCacheEntry{"/root": {fetchedAt: time.Now()}},
+		prevCPU:      &cpuSample{total: 10, idle: 5},
+		prevNet:      &netSample{rx: 1, tx: 2},
+		prevSampleAt: time.Now(),
+	}
+	m.sessions["s1"] = s
+
+	var inFlight atomic.Bool
+	inFlight.Store(true)
+	if err := sendKeepAliveProbe(nil, stopCh, time.Second, &inFlight); !errors.Is(err, errProbeInFlight) {
+		t.Fatalf("expected errProbeInFlight when probe already running, got %v", err)
+	}
+
+	m.markDisconnected(s, "done")
+	if _, ok := m.sessions["s1"]; ok {
+		t.Fatal("expected disconnected session to be removed from manager")
+	}
+	if s.dirCache != nil || s.recorder != nil || s.prevCPU != nil || s.prevNet != nil {
+		t.Fatal("expected runtime state cleaned up on disconnect")
+	}
+	if err := sendKeepAliveProbe(nil, stopCh, time.Second, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled on closed stopCh, got %v", err)
 	}
 }
 

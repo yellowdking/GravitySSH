@@ -52,7 +52,7 @@ func (m *Manager) SFTPDownloadPacked(sessionID, remotePath, localDir string) (in
 
 	dlCtx, cancel := context.WithTimeout(context.Background(), packedDownloadTimeout)
 	defer cancel()
-	stopCh := m.sessionStopCh(sessionID)
+	stopCh := m.SessionStopCh(sessionID)
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -224,14 +224,7 @@ func (m *Manager) SFTPCompress(sessionID, remoteDir string, names []string, form
 	m.invalidateDirCache(sessionID, dir)
 
 	if runErr != nil {
-		snippet := strings.TrimSpace(string(out))
-		if len(snippet) > 220 {
-			snippet = snippet[len(snippet)-220:]
-		}
-		if snippet != "" {
-			return "", fmt.Errorf("压缩失败: %s", snippet)
-		}
-		return "", fmt.Errorf("压缩失败: %v", runErr)
+		return "", formatExecError("压缩失败", out, runErr, 220)
 	}
 	return archiveName, nil
 }

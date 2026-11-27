@@ -2,6 +2,7 @@ package sshclient
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path"
@@ -33,6 +34,7 @@ type memRWFS struct {
 	nodes        map[string]*memRWNode
 	reportZeroSz bool
 	failRename   bool
+	failMidRead  bool
 }
 
 type memWriterAt struct {
@@ -66,6 +68,9 @@ func (f *memRWFS) Fileread(r *sftp.Request) (io.ReaderAt, error) {
 		return nil, os.ErrNotExist
 	}
 	cp := append([]byte(nil), n.data...)
+	if f.failMidRead {
+		return &failingReaderAt{data: cp}, nil
+	}
 	return bytes.NewReader(cp), nil
 }
 
@@ -88,7 +93,7 @@ func (f *memRWFS) Filecmd(r *sftp.Request) error {
 		}
 		return nil
 	case "Remove":
-		delete(f.nodes, p)
+		delete(f.m, p)
 		return nil
 	case "Rename":
 		return f.renameLocked(p, path.Clean(r.Target))
@@ -245,5 +250,57 @@ func TestSFTPPipelinedUploadDownloadAndEditorLimits(t *testing.T) {
 	fs.reportZeroSz = true
 	if _, err := m.SFTPReadTextFile("s1", "/dir/virtual.log"); err == nil || !strings.Contains(err.Error(), "1 MB") {
 		t.Fatalf("expected >1MB read rejection when Stat reports 0, got %v", err)
+	}
+}
+
+type failingReaderAt struct {
+	data []byte
+}
+
+func (f *failingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off == 0 && len(p) > 0 {
+		n := copy(p, f.data[:min(len(p), 16)])
+		return n, nil
+	}
+	return 0, errors.New("simulated read error")
+}
+
+func TestSFTPDownloadCleanupOnErrorAndOpenFileEvent(t *testing.T) {
+	fs := &memRWFS{
+		nodes: map[string]*memRWNode{
+			"/":          {name: "/", mode: os.ModeDir | 0o755},
+			"/large.bin": {name: "large.bin", mode: 0o644, data: bytes.Repeat([]byte("A"), 128*1024)},
+		},
+		failMidRead: true,
+	}
+	cli := newPipeConcurrentSFTPClient(t, fs)
+
+	sink := &captureSink{}
+	m := NewManager(nil, sink)
+	m.sessions["s1"] = &sessionState{sftpClient: cli, stopCh: make(chan struct{}), dirCache: map[string]dirCacheEntry{}}
+
+	tmpDir := t.TempDir()
+	// 1. OpenFile failure (target is an existing directory) must emit an error event.
+	existingDir := filepath.Join(tmpDir, "already-a-dir")
+	if err := os.MkdirAll(existingDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SFTPDownload("s1", "/large.bin", existingDir); err == nil {
+		t.Fatal("expected error when downloading to directory path")
+	}
+	sink.mu.Lock()
+	gotOpenErrEvent := len(sink.events) > 0 && sink.events[len(sink.events)-1].Status == "error"
+	sink.mu.Unlock()
+	if !gotOpenErrEvent {
+		t.Fatal("expected sftp:progress error event on os.OpenFile failure")
+	}
+
+	// 2. Mid-transfer read failure must remove the truncated local file.
+	partialPath := filepath.Join(tmpDir, "partial.bin")
+	if err := m.SFTPDownload("s1", "/large.bin", partialPath); err == nil {
+		t.Fatal("expected mid-transfer download error")
+	}
+	if _, statErr := os.Stat(partialPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected truncated file %q to be removed on failure, statErr=%v", partialPath, statErr)
 	}
 }

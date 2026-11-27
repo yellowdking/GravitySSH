@@ -1,7 +1,6 @@
 import type {
   SyncImportSummary,
   SyncReceivePollResult,
-  SyncReceivePreview,
   SyncReceiveWaitSession,
   SyncSendPollResult,
   SyncSendSession,
@@ -24,8 +23,6 @@ export const syncApi = {
     callGo<SyncReceiveWaitSession>('StartSyncReceive', sendCode, recvCode, relayUrl),
   pollSyncReceive: (waitId: string) => callGo<SyncReceivePollResult>('PollSyncReceive', waitId),
   cancelSyncReceive: (waitId: string) => callGo<void>('CancelSyncReceive', waitId),
-  previewSyncReceive: (code: string, relayUrl: string) =>
-    callGo<SyncReceivePreview>('PreviewSyncReceive', code, relayUrl),
   applySyncReceive: (previewId: string, mode: 'merge' | 'overwrite') =>
     callGo<SyncImportSummary>('ApplySyncReceive', previewId, mode),
   clearSyncPreview: (previewId: string) => callGo<void>('ClearSyncPreview', previewId),

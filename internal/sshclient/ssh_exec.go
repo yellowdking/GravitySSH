@@ -3,6 +3,9 @@ package sshclient
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -62,4 +65,41 @@ func runSSHExec(ctx context.Context, client *ssh.Client, cmd string, timeout tim
 		return out, execCtx.Err()
 	}
 	return out, err
+}
+
+func formatExecError(prefix string, out []byte, runErr error, maxLen int) error {
+	snippet := strings.TrimSpace(string(out))
+	if maxLen > 0 && len(snippet) > maxLen {
+		snippet = snippet[len(snippet)-maxLen:]
+	}
+	if snippet != "" {
+		return fmt.Errorf("%s: %s", prefix, snippet)
+	}
+	return fmt.Errorf("%s: %v", prefix, runErr)
+}
+
+func runBounded(count, limit int, aborted func() bool, fn func(idx int)) {
+	if count <= 0 {
+		return
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	sem := make(chan struct{}, limit)
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		if aborted != nil && aborted() {
+			break
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int) {
+			defer func() { <-sem; wg.Done() }()
+			if aborted != nil && aborted() {
+				return
+			}
+			fn(idx)
+		}(i)
+	}
+	wg.Wait()
 }

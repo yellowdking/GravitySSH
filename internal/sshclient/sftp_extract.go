@@ -33,14 +33,7 @@ func (m *Manager) SFTPExtractArchive(sessionID, remotePath string) (string, erro
 	m.invalidateDirCache(sessionID, dir)
 
 	if runErr != nil {
-		snippet := strings.TrimSpace(string(out))
-		if len(snippet) > 240 {
-			snippet = snippet[len(snippet)-240:]
-		}
-		if snippet != "" {
-			return "", fmt.Errorf("解压 %s 失败: %s", base, snippet)
-		}
-		return "", fmt.Errorf("解压 %s 失败: %v", base, runErr)
+		return "", formatExecError(fmt.Sprintf("解压 %s 失败", base), out, runErr, 240)
 	}
 	return fmt.Sprintf("已成功解压 %s", base), nil
 }

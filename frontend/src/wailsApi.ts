@@ -11,7 +11,6 @@ declare global {
     go?: { main?: { App?: Record<string, (...args: unknown[]) => Promise<unknown>> } }
     runtime?: {
       EventsOn: (eventName: string, callback: (...data: unknown[]) => void) => () => void
-      EventsOff: (...eventNames: string[]) => void
       OnFileDrop?: (callback: (x: number, y: number, paths: string[]) => void, useDropTarget: boolean) => void
       OnFileDropOff?: () => void
     }

@@ -17,12 +17,37 @@ import (
 
 const transferProgressMinInterval = 50 * time.Millisecond
 
-func (m *Manager) sessionStopCh(sessionID string) <-chan struct{} {
-	if sess := m.getSession(sessionID); sess != nil {
-		sess.mu.Lock()
-		ch := sess.stopCh
-		sess.mu.Unlock()
-		return ch
+func (m *Manager) emitTransferError(prog models.TransferProgress, err error) error {
+	prog.Status = "error"
+	prog.Error = err.Error()
+	m.emitTransfer(prog)
+	return err
+}
+
+func (m *Manager) finishTransfer(
+	sessionID string,
+	usedSC *sftp.Client,
+	tracker *progressTracker,
+	cpErr, closeErr error,
+	invalidateDir string,
+) error {
+	if cpErr != nil || closeErr != nil {
+		finalErr := cpErr
+		if finalErr == nil {
+			finalErr = closeErr
+		}
+		if isSFTPConnError(finalErr) {
+			m.invalidateSFTP(sessionID, usedSC)
+		}
+		return m.emitTransferError(tracker.snapshot(), finalErr)
+	}
+
+	snap := tracker.snapshot()
+	snap.Percent = 100
+	snap.Status = "done"
+	m.emitTransfer(snap)
+	if invalidateDir != "" {
+		m.invalidateDirCache(sessionID, invalidateDir)
 	}
 	return nil
 }
@@ -46,8 +71,16 @@ func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
 	fileName := filepath.Base(localPath)
 	cleanDir := path.Clean(remoteDir)
 	remotePath := path.Join(cleanDir, fileName)
-	transferID := uuid.NewString()
-	total := st.Size()
+	prog := models.TransferProgress{
+		TransferID: uuid.NewString(),
+		SessionID:  sessionID,
+		Direction:  "upload",
+		FileName:   fileName,
+		RemotePath: remotePath,
+		LocalPath:  localPath,
+		Total:      st.Size(),
+		Status:     "running",
+	}
 
 	var (
 		dst    *sftp.File
@@ -63,54 +96,31 @@ func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
 		return nil
 	})
 	if err != nil {
-		emitErr := fmt.Errorf("创建远程文件失败: %w", err)
-		m.emitTransfer(models.TransferProgress{
-			TransferID: transferID, SessionID: sessionID, Direction: "upload",
-			FileName: fileName, RemotePath: remotePath, LocalPath: localPath,
-			Total: total, Status: "error", Error: emitErr.Error(),
-		})
-		return emitErr
+		return m.emitTransferError(prog, fmt.Errorf("创建远程文件失败: %w", err))
 	}
 
-	prog := models.TransferProgress{
-		TransferID: transferID, SessionID: sessionID, Direction: "upload",
-		FileName: fileName, RemotePath: remotePath, LocalPath: localPath,
-		Total: total, Status: "running",
-	}
-	tracker := newProgressTracker(m, &prog, m.sessionStopCh(sessionID))
+	tracker := newProgressTracker(m, &prog, m.SessionStopCh(sessionID))
 	tracker.emitInitial()
 	// Wrap src as plain io.Reader (not io.WriterTo) so io.Copy invokes dst.(*sftp.File).ReadFrom
 	// and engages pkg/sftp pipelined concurrent writes.
 	_, cpErr := io.Copy(dst, &progressReader{r: src, tracker: tracker})
 	closeErr := dst.Close()
-	if cpErr != nil || closeErr != nil {
-		finalErr := cpErr
-		if finalErr == nil {
-			finalErr = closeErr
-		}
-		if isSFTPConnError(finalErr) {
-			m.invalidateSFTP(sessionID, usedSC)
-		}
-		snap := tracker.snapshot()
-		snap.Status = "error"
-		snap.Error = finalErr.Error()
-		m.emitTransfer(snap)
-		return finalErr
-	}
-
-	snap := tracker.snapshot()
-	snap.Percent = 100
-	snap.Status = "done"
-	m.emitTransfer(snap)
-	m.invalidateDirCache(sessionID, cleanDir)
-	return nil
+	return m.finishTransfer(sessionID, usedSC, tracker, cpErr, closeErr, cleanDir)
 }
 
 // SFTPDownload streams a remote file directly to localPath (rebuilding a stale SFTP client on open error).
 func (m *Manager) SFTPDownload(sessionID, remotePath, localPath string) error {
 	cleanRemote := path.Clean(remotePath)
 	fileName := path.Base(cleanRemote)
-	transferID := uuid.NewString()
+	prog := models.TransferProgress{
+		TransferID: uuid.NewString(),
+		SessionID:  sessionID,
+		Direction:  "download",
+		FileName:   fileName,
+		RemotePath: cleanRemote,
+		LocalPath:  localPath,
+		Status:     "running",
+	}
 
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		return err
@@ -141,51 +151,26 @@ func (m *Manager) SFTPDownload(sessionID, remotePath, localPath string) error {
 		return nil
 	})
 	if err != nil {
-		m.emitTransfer(models.TransferProgress{
-			TransferID: transferID, SessionID: sessionID, Direction: "download",
-			FileName: fileName, RemotePath: cleanRemote, LocalPath: localPath,
-			Status: "error", Error: err.Error(),
-		})
-		return err
+		return m.emitTransferError(prog, err)
 	}
 	defer src.Close()
 
+	prog.Total = total
 	dst, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
-		return fmt.Errorf("创建本地文件失败: %w", err)
+		return m.emitTransferError(prog, fmt.Errorf("创建本地文件失败: %w", err))
 	}
 
-	prog := models.TransferProgress{
-		TransferID: transferID, SessionID: sessionID, Direction: "download",
-		FileName: fileName, RemotePath: cleanRemote, LocalPath: localPath,
-		Total: total, Status: "running",
-	}
-	tracker := newProgressTracker(m, &prog, m.sessionStopCh(sessionID))
+	tracker := newProgressTracker(m, &prog, m.SessionStopCh(sessionID))
 	tracker.emitInitial()
 	// Wrap dst as plain io.Writer (not io.ReaderFrom) so io.Copy invokes src.(*sftp.File).WriteTo
 	// and engages pkg/sftp pipelined concurrent reads.
 	_, cpErr := io.Copy(&progressWriter{w: dst, tracker: tracker}, src)
 	closeErr := dst.Close()
 	if cpErr != nil || closeErr != nil {
-		finalErr := cpErr
-		if finalErr == nil {
-			finalErr = closeErr
-		}
-		if isSFTPConnError(finalErr) {
-			m.invalidateSFTP(sessionID, usedSC)
-		}
-		snap := tracker.snapshot()
-		snap.Status = "error"
-		snap.Error = finalErr.Error()
-		m.emitTransfer(snap)
-		return finalErr
+		_ = os.Remove(localPath)
 	}
-
-	snap := tracker.snapshot()
-	snap.Percent = 100
-	snap.Status = "done"
-	m.emitTransfer(snap)
-	return nil
+	return m.finishTransfer(sessionID, usedSC, tracker, cpErr, closeErr, "")
 }
 
 type progressTracker struct {

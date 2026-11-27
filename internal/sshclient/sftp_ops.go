@@ -35,46 +35,34 @@ func (m *Manager) SFTPRename(sessionID, oldPath, newPath string) error {
 		return nil
 	}
 
-	sc, err := m.getSFTP(sessionID)
+	hadOld := false
+	err := m.withSFTP(sessionID, func(sc *sftp.Client) error {
+		if !hadOld {
+			_, preErr := sc.Lstat(cleanOld)
+			if isSFTPConnError(preErr) {
+				return preErr
+			}
+			if errors.Is(preErr, os.ErrNotExist) {
+				return preErr
+			}
+			hadOld = preErr == nil
+		} else {
+			_, oErr := sc.Lstat(cleanOld)
+			_, nErr := sc.Lstat(cleanNew)
+			if isSFTPConnError(oErr) {
+				return oErr
+			}
+			if isSFTPConnError(nErr) {
+				return nErr
+			}
+			if errors.Is(oErr, os.ErrNotExist) && nErr == nil {
+				return nil
+			}
+		}
+		return renameRemote(sc, cleanOld, cleanNew, hadOld)
+	})
 	if err != nil {
 		return err
-	}
-	_, preErr := sc.Lstat(cleanOld)
-	if isSFTPConnError(preErr) {
-		m.invalidateSFTP(sessionID, sc)
-		sc, err = m.getSFTP(sessionID)
-		if err != nil {
-			return preErr
-		}
-		_, preErr = sc.Lstat(cleanOld)
-	}
-	hadOld := preErr == nil
-	if errors.Is(preErr, os.ErrNotExist) {
-		return preErr
-	}
-
-	if err := renameRemote(sc, cleanOld, cleanNew, hadOld); err != nil {
-		if isSFTPConnError(err) {
-			m.invalidateSFTP(sessionID, sc)
-			sc2, err2 := m.getSFTP(sessionID)
-			if err2 != nil {
-				return err
-			}
-			if hadOld {
-				_, oErr := sc2.Lstat(cleanOld)
-				_, nErr := sc2.Lstat(cleanNew)
-				if errors.Is(oErr, os.ErrNotExist) && nErr == nil {
-					m.invalidateDirTreeCache(sessionID, cleanOld)
-					m.invalidateDirCache(sessionID, path.Dir(cleanNew))
-					return nil
-				}
-			}
-			if rErr := renameRemote(sc2, cleanOld, cleanNew, hadOld); rErr != nil {
-				return rErr
-			}
-		} else {
-			return err
-		}
 	}
 	m.invalidateDirTreeCache(sessionID, cleanOld)
 	m.invalidateDirCache(sessionID, path.Dir(cleanNew))
