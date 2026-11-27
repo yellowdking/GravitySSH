@@ -14,7 +14,8 @@ interface SftpActionDeps {
   updateEditingFileIfCurrent: (token: number, f: { path: string; content: string }) => void
   beginSaving: (token: number) => boolean
   endSaving: (token: number) => void
-  loadDir: (path: string, syncCwd?: boolean) => Promise<void>
+  loadDir: (path: string, syncCwd?: boolean, force?: boolean) => Promise<void>
+  scheduleUploadRefresh?: (destDir: string) => void
   confirm: (opts: ConfirmOptions) => Promise<boolean>
   prompt: (opts: PromptOptions) => Promise<string | null>
   onToast: (msg: string, type?: 'info' | 'error') => void
@@ -47,14 +48,19 @@ export function createSftpActions(d: SftpActionDeps) {
     try { await fn() } finally { inFlightPaths.delete(key); d.removeBusyPath(path) }
   }
 
-  const reload = () => d.loadDir(d.getCurrentPath(), false)
+  const reload = () => d.loadDir(d.getCurrentPath(), false, true)
   const fail = (label: string, err: unknown) => d.onToast(`${label}: ${errMsg(err)}`, 'error')
 
   return {
     handleUpload: async () => {
       try {
-        const count = await api.sftpUploadDialog(d.sessionId, d.getCurrentPath())
-        if (count > 0) { d.onToast(`已成功上传 ${count} 个文件`); void reload() }
+        const dest = d.getCurrentPath()
+        const count = await api.sftpUploadDialog(d.sessionId, dest)
+        if (count > 0) {
+          d.onToast(`已成功上传 ${count} 个文件`)
+          if (d.scheduleUploadRefresh) d.scheduleUploadRefresh(dest)
+          else if (d.getCurrentPath() === dest) void reload()
+        }
       } catch (err) { fail('上传失败', err) }
     },
     handleDownload: async (entry: SFTPFileEntry) => {

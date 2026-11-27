@@ -169,3 +169,60 @@ export function isServerConnectionDirty(
   }
   return false
 }
+
+export function isServerFormDirty(
+  form: ServerSaveRequest,
+  editingServer: ServerView | null,
+  defaultKeepAliveSeconds = 30
+): boolean {
+  const init = makeInitialServerForm(editingServer, defaultKeepAliveSeconds)
+  if (
+    form.name !== init.name ||
+    form.group !== init.group ||
+    form.color !== init.color ||
+    form.host !== init.host ||
+    form.port !== init.port ||
+    form.username !== init.username ||
+    form.authType !== init.authType ||
+    form.password !== init.password ||
+    form.keepExistingPassword !== init.keepExistingPassword ||
+    form.sshKeyId !== init.sshKeyId ||
+    form.timeoutSeconds !== init.timeoutSeconds ||
+    form.keepAliveSeconds !== init.keepAliveSeconds ||
+    form.defaultRemotePath !== init.defaultRemotePath ||
+    form.startupCommand !== init.startupCommand ||
+    form.notes !== init.notes
+  ) {
+    return true
+  }
+  if (form.proxy.type !== init.proxy.type) return true
+  if (form.proxy.type !== 'none') {
+    if (
+      form.proxy.host !== init.proxy.host ||
+      form.proxy.port !== init.proxy.port ||
+      form.proxy.username !== init.proxy.username ||
+      form.proxy.password !== init.proxy.password ||
+      form.proxy.keepExistingPassword !== init.proxy.keepExistingPassword
+    ) {
+      return true
+    }
+  }
+  if (form.jumpHost.mode !== init.jumpHost.mode) return true
+  if (form.jumpHost.mode === 'server') {
+    if (form.jumpHost.serverId !== init.jumpHost.serverId) return true
+  } else if (form.jumpHost.mode === 'custom') {
+    if (
+      form.jumpHost.host !== init.jumpHost.host ||
+      form.jumpHost.port !== init.jumpHost.port ||
+      form.jumpHost.username !== init.jumpHost.username ||
+      form.jumpHost.authType !== init.jumpHost.authType ||
+      form.jumpHost.password !== init.jumpHost.password ||
+      form.jumpHost.keepExistingPassword !== init.jumpHost.keepExistingPassword ||
+      form.jumpHost.sshKeyId !== init.jumpHost.sshKeyId ||
+      form.jumpHost.useMainProxy !== init.jumpHost.useMainProxy
+    ) {
+      return true
+    }
+  }
+  return false
+}
