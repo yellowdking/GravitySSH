@@ -739,3 +739,46 @@ func TestDisconnectDuringEstablishNeverEmitsConnectedAfterDisconnected(t *testin
 		t.Fatalf("expected final status 'disconnected', got %v", statuses)
 	}
 }
+
+func TestKeepAliveLoopTimerNoDoubleCountWhenIntervalShort(t *testing.T) {
+	cli, _, _ := startStallingSSHServer(t, true, false, false, nil, nil)
+
+	prevTimeout := keepAliveProbeTimeout
+	keepAliveProbeTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { keepAliveProbeTimeout = prevTimeout })
+
+	m := NewManager(nil, nil)
+	stopCh := make(chan struct{})
+	sess := &sessionState{
+		info:     models.SessionInfo{SessionID: "ka-1", Status: "connected"},
+		dialRes:  &DialResult{Client: cli},
+		stopCh:   stopCh,
+		dirCache: map[string]dirCacheEntry{},
+	}
+	m.sessions["ka-1"] = sess
+
+	// interval (40ms) < keepAliveProbeTimeout (100ms):
+	// Previously time.Ticker buffered a tick during the 100ms probe and fired at 0ms later
+	// (double-counting errProbeInFlight so disconnect happened after ~140ms).
+	// With a resettable time.Timer, 3 failures require:
+	//   wait 40ms + probe 100ms (fail 1) + wait 40ms + probe 0ms (inFlight fail 2) + wait 40ms + probe 0ms (inFlight fail 3) >= 220ms
+	// (specifically 3 full intervals + probe timeout, never 0ms immediate double-count!).
+	start := time.Now()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.keepAliveLoop(sess, stopCh, 50*time.Millisecond)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		close(stopCh)
+		t.Fatal("keepAliveLoop did not disconnect after maxKeepAliveFailures")
+	}
+	elapsed := time.Since(start)
+	// With 3 intervals of 50ms + 1st probe timeout 100ms = ~250ms minimum; old ticker bug disconnected at ~150ms.
+	if elapsed < 200*time.Millisecond {
+		t.Fatalf("keepAliveLoop disconnected too quickly (%v), indicating buffered tick double-counted errProbeInFlight", elapsed)
+	}
+}
