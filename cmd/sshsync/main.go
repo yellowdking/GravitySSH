@@ -70,14 +70,15 @@ func main() {
 		Certificates: []tls.Certificate{cert},
 	}
 
+	store := newMemStore(nil)
+	guard := newIPGuard(nil)
+
 	rawLn, err := net.Listen("tcp", *listenAddr)
 	if err != nil {
 		log.Fatalf("listen %s: %v", *listenAddr, err)
 	}
-	ln := tls.NewListener(newLimitListener(rawLn, maxActiveConns, maxConnsPerIP), tlsCfg)
+	ln := tls.NewListener(newLimitListener(rawLn, maxActiveConns, maxConnsPerIP, guard), tlsCfg)
 
-	store := newMemStore(nil)
-	guard := newIPGuard(nil)
 	stopCh := make(chan struct{})
 	store.StartSweeper(stopCh)
 	go func() {

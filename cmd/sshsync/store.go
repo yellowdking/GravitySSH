@@ -12,7 +12,7 @@ import (
 
 const (
 	maxSlots      = 64
-	maxTotalBytes = 24 << 20
+	maxTotalBytes = 16 * 1024 * 1024
 	minTTLSeconds = 60
 	maxTTLSeconds = 600
 	defaultTTLSec = 300
@@ -25,6 +25,7 @@ var (
 	errPairNotFound = errors.New("pair channel not found")
 	errPairAuth     = errors.New("pair channel auth failed")
 	errSlotBusy     = errors.New("pair channel busy")
+	errRelayBusy    = errors.New("relay heavy handler busy")
 )
 
 type b64Bytes []byte
@@ -313,6 +314,10 @@ func (m *memStore) PairReject(channelID string, senderToken []byte, requestID st
 }
 
 func (m *memStore) PairStatus(channelID, requestID string) (state string, entry *slot, err error) {
+	return m.PairStatusGated(channelID, requestID, nil)
+}
+
+func (m *memStore) PairStatusGated(channelID, requestID string, tryAcquireHeavy func() bool) (state string, entry *slot, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -336,6 +341,9 @@ func (m *memStore) PairStatus(channelID, requestID string) (state string, entry 
 		zeroSlot(s)
 		return "rejected", nil, nil
 	case "approved":
+		if tryAcquireHeavy != nil && !tryAcquireHeavy() {
+			return "", nil, errRelayBusy
+		}
 		delete(m.slots, channelID)
 		m.releaseBytesLocked(s.size)
 		return "approved", s, nil

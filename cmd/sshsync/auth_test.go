@@ -25,6 +25,9 @@ func TestSilent404AndAutoBan(t *testing.T) {
 	if rec.Header().Get("Server") != "" || rec.Header().Get("X-Powered-By") != "" {
 		t.Fatalf("unexpected server headers: %+v", rec.Header())
 	}
+	if rec.Header().Get("Connection") != "close" {
+		t.Fatalf("expected Connection: close on silent 404, got %q", rec.Header().Get("Connection"))
+	}
 
 	body := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s"}`, makeTestChannel("skew"), makeTestHex64("skew-tok")))
 	recSkew := httptest.NewRecorder()

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,14 +12,16 @@ import (
 )
 
 const (
-	clientHeaderName   = "X-GSSH-Client"
-	clientHeaderValue  = "GravitySSH/1"
-	tsHeaderName       = "X-GSSH-TS"
-	sigHeaderName      = "X-GSSH-Sig"
-	maxClockSkewSec    = 120
+	clientHeaderName      = "X-GSSH-Client"
+	clientHeaderValue     = "GravitySSH/1"
+	tsHeaderName          = "X-GSSH-TS"
+	sigHeaderName         = "X-GSSH-Sig"
+	maxClockSkewSec       = 120
 	maxBodyBytes          = 2 << 20
 	maxSmallBodyBytes     = 4096
 	maxConcurrentApproves = 4
+	initialBodyBufBytes   = 4096
+	readBodyChunkBytes    = 16 * 1024
 )
 
 type relayServer struct {
@@ -48,6 +49,7 @@ func silentNotFound(w http.ResponseWriter) {
 	h := w.Header()
 	delete(h, "Server")
 	delete(h, "X-Powered-By")
+	h.Set("Connection", "close")
 	h.Set("Content-Length", "0")
 	w.WriteHeader(http.StatusNotFound)
 }
@@ -61,6 +63,11 @@ func writeJSON(w http.ResponseWriter, status int, payload []byte) {
 	h.Set("Content-Length", strconv.Itoa(len(payload)))
 	w.WriteHeader(status)
 	_, _ = w.Write(payload)
+}
+
+func writeJSONClose(w http.ResponseWriter, status int, payload []byte) {
+	w.Header().Set("Connection", "close")
+	writeJSON(w, status, payload)
 }
 
 func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -94,12 +101,25 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rateChecked := false
 	if isHeavy {
+		if !s.guard.AllowToken(ip) {
+			writeJSONClose(w, http.StatusTooManyRequests, []byte(`{"error":"rate_limited"}`))
+			return
+		}
+		rateChecked = true
+
+		if !s.guard.TryAcquireHeavy(ip) {
+			writeJSONClose(w, http.StatusTooManyRequests, []byte(`{"error":"busy"}`))
+			return
+		}
+		defer s.guard.ReleaseHeavy(ip)
+
 		select {
 		case s.heavyBodySem <- struct{}{}:
 			defer func() { <-s.heavyBodySem }()
-		case <-r.Context().Done():
-			silentNotFound(w)
+		default:
+			writeJSONClose(w, http.StatusTooManyRequests, []byte(`{"error":"busy"}`))
 			return
 		}
 	}
@@ -118,16 +138,18 @@ func (s *relayServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isPollEndpoint := r.URL.Path == "/v1/ping" || r.URL.Path == "/v1/pair/poll" || r.URL.Path == "/v1/pair/status"
-	allowed := false
-	if isPollEndpoint {
-		allowed = s.guard.AllowPollToken(ip)
-	} else {
-		allowed = s.guard.AllowToken(ip)
-	}
-	if !allowed {
-		writeJSON(w, http.StatusTooManyRequests, []byte(`{"error":"rate_limited"}`))
-		return
+	if !rateChecked {
+		isPollEndpoint := r.URL.Path == "/v1/ping" || r.URL.Path == "/v1/pair/poll" || r.URL.Path == "/v1/pair/status"
+		allowed := false
+		if isPollEndpoint {
+			allowed = s.guard.AllowPollToken(ip)
+		} else {
+			allowed = s.guard.AllowToken(ip)
+		}
+		if !allowed {
+			writeJSON(w, http.StatusTooManyRequests, []byte(`{"error":"rate_limited"}`))
+			return
+		}
 	}
 
 	switch r.URL.Path {
@@ -202,72 +224,52 @@ func (s *relayServer) verifySignature(method, path, tsStr string, rawBody, gotSi
 var errBodyTooLarge = errors.New("body too large")
 
 func readBoundedBody(rc io.ReadCloser, contentLength, limit int64) ([]byte, error) {
-	defer rc.Close()
+	if rc != nil {
+		defer rc.Close()
+	}
 	if contentLength > limit {
 		return nil, errBodyTooLarge
 	}
+	if rc == nil {
+		return nil, nil
+	}
 
-	if contentLength > 0 {
-		buf := make([]byte, contentLength)
-		n, err := io.ReadFull(rc, buf)
+	lr := io.LimitReader(rc, limit+1)
+	var out []byte
+	var tmp [readBodyChunkBytes]byte
+	defer clear(tmp[:])
+
+	for {
+		n, err := lr.Read(tmp[:])
+		if n > 0 {
+			if int64(len(out)+n) > limit {
+				clear(out)
+				return nil, errBodyTooLarge
+			}
+			if cap(out)-len(out) < n {
+				newCap := cap(out) * 2
+				if newCap < initialBodyBufBytes {
+					newCap = initialBodyBufBytes
+				}
+				if newCap < len(out)+n {
+					newCap = len(out) + n
+				}
+				if int64(newCap) > limit {
+					newCap = int(limit)
+				}
+				next := make([]byte, len(out), newCap)
+				copy(next, out)
+				clear(out)
+				out = next
+			}
+			out = append(out, tmp[:n]...)
+		}
 		if err != nil {
-			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-				return buf[:n], nil
+			if errors.Is(err, io.EOF) {
+				return out, nil
 			}
-			clear(buf)
+			clear(out)
 			return nil, err
 		}
-		var extra [1]byte
-		en, eerr := rc.Read(extra[:])
-		if en > 0 {
-			if contentLength+int64(en) > limit {
-				clear(buf)
-				return nil, errBodyTooLarge
-			}
-			var rest bytes.Buffer
-			rest.Write(buf)
-			clear(buf)
-			rest.Write(extra[:en])
-			if _, rerr := io.Copy(&rest, io.LimitReader(rc, limit-int64(rest.Len())+1)); rerr != nil {
-				clear(rest.Bytes())
-				return nil, rerr
-			}
-			b := rest.Bytes()
-			if int64(len(b)) > limit {
-				clear(b)
-				return nil, errBodyTooLarge
-			}
-			return b, nil
-		}
-		if eerr != nil && !errors.Is(eerr, io.EOF) {
-			clear(buf)
-			return nil, eerr
-		}
-		return buf, nil
 	}
-
-	var r io.Reader = rc
-	if contentLength == 0 {
-		var probe [1]byte
-		n, err := rc.Read(probe[:])
-		if n == 0 {
-			if err == nil || errors.Is(err, io.EOF) {
-				return nil, nil
-			}
-			return nil, err
-		}
-		r = io.MultiReader(bytes.NewReader(probe[:n]), rc)
-	}
-
-	var out bytes.Buffer
-	if _, err := io.Copy(&out, io.LimitReader(r, limit+1)); err != nil {
-		clear(out.Bytes())
-		return nil, err
-	}
-	b := out.Bytes()
-	if int64(len(b)) > limit {
-		clear(b)
-		return nil, errBodyTooLarge
-	}
-	return b, nil
 }

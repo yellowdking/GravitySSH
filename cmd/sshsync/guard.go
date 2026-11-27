@@ -4,22 +4,26 @@ import (
 	"cmp"
 	"net"
 	"net/http"
+	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	ratePerMin     = 10.0
-	rateBurst      = 5.0
-	pollRatePerMin = 120.0
-	pollBurst      = 20.0
-	strikeLimit    = 10
-	banDuration    = 15 * time.Minute
-	maxTrackedIPs  = 4096
-	staleIPTTL     = 30 * time.Minute
-	maxActiveConns = 64
-	maxConnsPerIP  = 8
+	ratePerMin          = 10.0
+	rateBurst           = 5.0
+	pollRatePerMin      = 120.0
+	pollBurst           = 20.0
+	strikeLimit         = 10
+	strikeDecayInterval = time.Minute
+	banDuration         = 15 * time.Minute
+	maxTrackedIPs       = 4096
+	staleIPTTL          = 30 * time.Minute
+	maxActiveConns      = 64
+	maxConnsPerIP       = 8
+	maxHeavyPerIP       = 1
 )
 
 type ipState struct {
@@ -29,15 +33,17 @@ type ipState struct {
 	lastPollRefil time.Time
 	lastSeen      time.Time
 	strikes       int
+	lastStrike    time.Time
 	banUntil      time.Time
 }
 
 type ipGuard struct {
-	mu        sync.Mutex
-	ips       map[string]*ipState
-	now       func() time.Time
-	rateS     float64
-	pollRateS float64
+	mu          sync.Mutex
+	ips         map[string]*ipState
+	heavyActive map[string]int
+	now         func() time.Time
+	rateS       float64
+	pollRateS   float64
 }
 
 func newIPGuard(nowFn func() time.Time) *ipGuard {
@@ -45,11 +51,36 @@ func newIPGuard(nowFn func() time.Time) *ipGuard {
 		nowFn = func() time.Time { return time.Now().UTC() }
 	}
 	return &ipGuard{
-		ips:       make(map[string]*ipState, 128),
-		now:       nowFn,
-		rateS:     ratePerMin / 60.0,
-		pollRateS: pollRatePerMin / 60.0,
+		ips:         make(map[string]*ipState, 128),
+		heavyActive: make(map[string]int, maxConcurrentApproves),
+		now:         nowFn,
+		rateS:       ratePerMin / 60.0,
+		pollRateS:   pollRatePerMin / 60.0,
 	}
+}
+
+func normalizeIPKey(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if len(s) >= 2 && s[0] == '[' && s[len(s)-1] == ']' {
+		s = s[1 : len(s)-1]
+	}
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return s
+	}
+	addr = addr.Unmap()
+	if addr.Is4() {
+		return addr.String()
+	}
+	addr = addr.WithZone("")
+	prefix, err := addr.Prefix(64)
+	if err != nil {
+		return addr.String()
+	}
+	return prefix.String()
 }
 
 func (g *ipGuard) getOrCreateLocked(ip string, now time.Time) *ipState {
@@ -137,7 +168,26 @@ func (g *ipGuard) evictLocked(now time.Time) {
 	}
 }
 
+func (g *ipGuard) decayStrikesLocked(st *ipState, now time.Time) {
+	if st.strikes <= 0 || st.lastStrike.IsZero() {
+		return
+	}
+	elapsed := now.Sub(st.lastStrike)
+	if elapsed < strikeDecayInterval {
+		return
+	}
+	decayed := int(elapsed / strikeDecayInterval)
+	if decayed >= st.strikes {
+		st.strikes = 0
+		st.lastStrike = time.Time{}
+	} else {
+		st.strikes -= decayed
+		st.lastStrike = st.lastStrike.Add(time.Duration(decayed) * strikeDecayInterval)
+	}
+}
+
 func (g *ipGuard) IsBanned(ip string) bool {
+	ip = normalizeIPKey(ip)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -152,6 +202,7 @@ func (g *ipGuard) IsBanned(ip string) bool {
 		}
 		st.banUntil = time.Time{}
 		st.strikes = 0
+		st.lastStrike = time.Time{}
 	}
 	return false
 }
@@ -173,6 +224,7 @@ func consumeToken(tokens *float64, lastRefil *time.Time, now time.Time, rateS, b
 }
 
 func (g *ipGuard) AllowToken(ip string) bool {
+	ip = normalizeIPKey(ip)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -182,6 +234,7 @@ func (g *ipGuard) AllowToken(ip string) bool {
 }
 
 func (g *ipGuard) AllowPollToken(ip string) bool {
+	ip = normalizeIPKey(ip)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -191,38 +244,75 @@ func (g *ipGuard) AllowPollToken(ip string) bool {
 }
 
 func (g *ipGuard) RecordStrike(ip string) bool {
+	ip = normalizeIPKey(ip)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	now := g.now().UTC()
 	st := g.getOrCreateLocked(ip, now)
-	if !st.banUntil.IsZero() && !now.Before(st.banUntil) {
+	if !st.banUntil.IsZero() {
+		if now.Before(st.banUntil) {
+			return true
+		}
 		st.banUntil = time.Time{}
 		st.strikes = 0
+		st.lastStrike = time.Time{}
 	}
+	g.decayStrikesLocked(st, now)
 	st.strikes++
+	st.lastStrike = now
 	if st.strikes >= strikeLimit {
 		st.banUntil = now.Add(banDuration)
 		st.strikes = 0
+		st.lastStrike = time.Time{}
 		return true
 	}
 	return false
 }
 
-func (g *ipGuard) ResetStrikes(ip string) {
+func (g *ipGuard) Strikes(ip string) int {
+	ip = normalizeIPKey(ip)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	st, ok := g.ips[ip]
 	if !ok {
-		return
+		return 0
 	}
 	now := g.now().UTC()
-	if !st.banUntil.IsZero() && now.Before(st.banUntil) {
-		return
+	if !st.banUntil.IsZero() {
+		if now.Before(st.banUntil) {
+			return 0
+		}
+		st.banUntil = time.Time{}
+		st.strikes = 0
+		st.lastStrike = time.Time{}
+		return 0
 	}
-	st.strikes = 0
-	st.lastSeen = now
+	g.decayStrikesLocked(st, now)
+	return st.strikes
+}
+
+func (g *ipGuard) TryAcquireHeavy(ip string) bool {
+	ip = normalizeIPKey(ip)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.heavyActive[ip] >= maxHeavyPerIP {
+		return false
+	}
+	g.heavyActive[ip]++
+	return true
+}
+
+func (g *ipGuard) ReleaseHeavy(ip string) {
+	ip = normalizeIPKey(ip)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if n := g.heavyActive[ip]; n <= 1 {
+		delete(g.heavyActive, ip)
+	} else {
+		g.heavyActive[ip] = n - 1
+	}
 }
 
 func (g *ipGuard) Sweep() {
@@ -234,9 +324,9 @@ func (g *ipGuard) Sweep() {
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		return normalizeIPKey(r.RemoteAddr)
 	}
-	return host
+	return normalizeIPKey(host)
 }
 
 func remoteIP(addr net.Addr) string {
@@ -245,9 +335,9 @@ func remoteIP(addr net.Addr) string {
 	}
 	host, _, err := net.SplitHostPort(addr.String())
 	if err != nil {
-		return addr.String()
+		return normalizeIPKey(addr.String())
 	}
-	return host
+	return normalizeIPKey(host)
 }
 
 type limitListener struct {
@@ -255,13 +345,14 @@ type limitListener struct {
 	sem       chan struct{}
 	closeCh   chan struct{}
 	closeOnce sync.Once
+	guard     *ipGuard
 
 	mu       sync.Mutex
 	perIP    map[string]int
 	maxPerIP int
 }
 
-func newLimitListener(l net.Listener, maxConns, maxPerIP int) net.Listener {
+func newLimitListener(l net.Listener, maxConns, maxPerIP int, guard *ipGuard) net.Listener {
 	if maxPerIP <= 0 {
 		maxPerIP = maxConnsPerIP
 	}
@@ -269,6 +360,7 @@ func newLimitListener(l net.Listener, maxConns, maxPerIP int) net.Listener {
 		Listener: l,
 		sem:      make(chan struct{}, maxConns),
 		closeCh:  make(chan struct{}),
+		guard:    guard,
 		perIP:    make(map[string]int, maxConns),
 		maxPerIP: maxPerIP,
 	}
@@ -325,6 +417,11 @@ func (l *limitListener) Accept() (net.Conn, error) {
 		}
 
 		ip := remoteIP(c.RemoteAddr())
+		if l.guard != nil && ip != "" && l.guard.IsBanned(ip) {
+			_ = c.Close()
+			<-l.sem
+			continue
+		}
 		if !l.acquireIP(ip) {
 			_ = c.Close()
 			<-l.sem

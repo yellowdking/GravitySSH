@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +17,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -249,7 +252,7 @@ func TestLimitListenerCloseUnblocksAcceptAndPerIPCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	ln := newLimitListener(rawLn, 2, 1)
+	ln := newLimitListener(rawLn, 2, 1, nil)
 
 	// Dial 1st connection -> accepted (hits per-IP cap=1 for 127.0.0.1)
 	c1, err := net.Dial("tcp", ln.Addr().String())
@@ -304,7 +307,7 @@ func TestLimitListenerCloseUnblocksAcceptAndPerIPCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen 2: %v", err)
 	}
-	ln2 := newLimitListener(rawLn2, 1, 1)
+	ln2 := newLimitListener(rawLn2, 1, 1, nil)
 	d1, err := net.Dial("tcp", ln2.Addr().String())
 	if err != nil {
 		t.Fatalf("dial full: %v", err)
@@ -860,19 +863,39 @@ func TestRepeatedV2SyncCyclesNeverBanSameIP(t *testing.T) {
 		t.Fatalf("expected /v1/ping 200 after %d cycles, got %d", cycles, rPing.Code)
 	}
 
-	// Verify occasional isolated strikes (< strikeLimit) are reset by a valid 200 response
-	resetIP := "198.51.100.201"
+	// Verify /v1/ping does NOT reset strikes (prevents ban bypass)
+	bypassIP := "198.51.100.201"
 	for i := 0; i < strikeLimit-1; i++ {
-		guard.RecordStrike(resetIP)
+		guard.RecordStrike(bypassIP)
 	}
-	rResetPing := httptest.NewRecorder()
-	srv.ServeHTTP(rResetPing, signReq(t, http.MethodPost, "/v1/ping", []byte("{}"), testAppKey, now.Unix(), resetIP))
-	if rResetPing.Code != http.StatusOK {
-		t.Fatalf("expected /v1/ping 200 before strikeLimit, got %d", rResetPing.Code)
+	rPingNoReset := httptest.NewRecorder()
+	srv.ServeHTTP(rPingNoReset, signReq(t, http.MethodPost, "/v1/ping", []byte("{}"), testAppKey, now.Unix(), bypassIP))
+	if rPingNoReset.Code != http.StatusOK {
+		t.Fatalf("expected /v1/ping 200 before strikeLimit, got %d", rPingNoReset.Code)
 	}
-	// One more strike should NOT ban because strikes were reset on valid 200 response
-	if guard.RecordStrike(resetIP) || guard.IsBanned(resetIP) {
-		t.Fatalf("expected strikes to have been reset after valid 200 response")
+	if !guard.RecordStrike(bypassIP) || !guard.IsBanned(bypassIP) {
+		t.Fatalf("expected 10th strike after /v1/ping to ban IP (ping must not bypass strikes)")
+	}
+
+	// Verify idle time-based strike decay gradually reduces strikes without allowing immediate bypass
+	decayIP := "198.51.100.202"
+	for i := 0; i < strikeLimit-1; i++ {
+		guard.RecordStrike(decayIP)
+	}
+	if got := guard.Strikes(decayIP); got != strikeLimit-1 {
+		t.Fatalf("expected %d strikes, got %d", strikeLimit-1, got)
+	}
+	now = now.Add(strikeDecayInterval)
+	if got := guard.Strikes(decayIP); got != strikeLimit-2 {
+		t.Fatalf("expected %d strikes after 1 decay interval, got %d", strikeLimit-2, got)
+	}
+	// One more strike after 1 decay interval brings count back to strikeLimit-1 (still not banned)
+	if guard.RecordStrike(decayIP) || guard.IsBanned(decayIP) {
+		t.Fatalf("expected IP not to be banned after idle decay")
+	}
+	now = now.Add(time.Duration(strikeLimit) * strikeDecayInterval)
+	if got := guard.Strikes(decayIP); got != 0 {
+		t.Fatalf("expected 0 strikes after full decay window, got %d", got)
 	}
 }
 
@@ -976,5 +999,381 @@ func TestGracefulShutdownWaitsForInFlightAndZeroesStore(t *testing.T) {
 		if b != 0 {
 			t.Fatalf("expected store RAM zeroed on shutdown, found byte %d", b)
 		}
+	}
+}
+
+type blockingBodyReader struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+	reads   atomic.Int32
+	payload []byte
+	pos     int
+}
+
+func (b *blockingBodyReader) Read(p []byte) (int, error) {
+	b.reads.Add(1)
+	b.once.Do(func() {
+		if b.started != nil {
+			close(b.started)
+		}
+	})
+	if b.release != nil {
+		<-b.release
+	}
+	if b.pos >= len(b.payload) {
+		return 0, io.EOF
+	}
+	n := copy(p, b.payload[b.pos:])
+	b.pos += n
+	return n, nil
+}
+
+func (b *blockingBodyReader) Close() error { return nil }
+
+func TestHeavyApprovePreBodyGuardsAndNonBlockingCaps(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	store := newMemStore(nowFn)
+	guard := newIPGuard(nowFn)
+	srv := newRelayServer(store, guard, testAppKey, nowFn)
+
+	body := []byte(`{"bad":"payload"}`)
+
+	// 1. Per-IP concurrent heavy cap (1 per IP) + non-blocking rejection BEFORE reading body
+	ipA := "198.51.100.10"
+	started1 := make(chan struct{})
+	release1 := make(chan struct{})
+	r1 := signReq(t, http.MethodPost, "/v1/pair/approve", body, testAppKey, now.Unix(), ipA)
+	r1.Body = &blockingBodyReader{started: started1, release: release1, payload: body}
+	r1.ContentLength = int64(len(body))
+
+	done1 := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, r1)
+		done1 <- rec.Code
+	}()
+	<-started1
+
+	// Second concurrent heavy request from SAME IP fails fast with 429 and never reads body
+	unreadBody2 := &blockingBodyReader{payload: body}
+	r2 := signReq(t, http.MethodPost, "/v1/pair/approve", body, testAppKey, now.Unix(), ipA)
+	r2.Body = unreadBody2
+	r2.ContentLength = maxBodyBytes
+	rec2 := httptest.NewRecorder()
+	srv.ServeHTTP(rec2, r2)
+	if rec2.Code != http.StatusTooManyRequests || rec2.Header().Get("Connection") != "close" {
+		t.Fatalf("expected 429 + Connection: close on 2nd concurrent heavy req from same IP, got %d conn=%q", rec2.Code, rec2.Header().Get("Connection"))
+	}
+	if unreadBody2.reads.Load() != 0 {
+		t.Fatalf("expected 2nd same-IP heavy request body not to be read, reads=%d", unreadBody2.reads.Load())
+	}
+
+	// Fill remaining 3 global heavyBodySem slots from distinct IPs (total 4 active)
+	releases := []chan struct{}{release1}
+	dones := []chan int{done1}
+	for i := 1; i < maxConcurrentApproves; i++ {
+		st := make(chan struct{})
+		rel := make(chan struct{})
+		releases = append(releases, rel)
+		dn := make(chan int, 1)
+		dones = append(dones, dn)
+		ip := fmt.Sprintf("198.51.100.%d", 10+i)
+		req := signReq(t, http.MethodPost, "/v1/pair/approve", body, testAppKey, now.Unix(), ip)
+		req.Body = &blockingBodyReader{started: st, release: rel, payload: body}
+		req.ContentLength = int64(len(body))
+		go func(q *http.Request, ch chan int) {
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, q)
+			ch <- rec.Code
+		}(req, dn)
+		<-st
+	}
+
+	// 5th distinct IP must fail immediately (non-blocking) with 429 without reading its body
+	unreadBody5 := &blockingBodyReader{payload: body}
+	r5 := signReq(t, http.MethodPost, "/v1/pair/approve", body, testAppKey, now.Unix(), "198.51.100.55")
+	r5.Body = unreadBody5
+	r5.ContentLength = maxBodyBytes
+	rec5 := httptest.NewRecorder()
+	srv.ServeHTTP(rec5, r5)
+	if rec5.Code != http.StatusTooManyRequests || rec5.Header().Get("Connection") != "close" {
+		t.Fatalf("expected non-blocking 429 when global heavyBodySem is full, got %d conn=%q", rec5.Code, rec5.Header().Get("Connection"))
+	}
+	if unreadBody5.reads.Load() != 0 {
+		t.Fatalf("expected 5th heavy request body not to be read, reads=%d", unreadBody5.reads.Load())
+	}
+
+	for _, rel := range releases {
+		close(rel)
+	}
+	for _, dn := range dones {
+		<-dn
+	}
+
+	// 2. Pre-body IP rate limit on /v1/pair/approve blocks BEFORE reading 2 MiB body
+	rlIP := "198.51.100.66"
+	for i := 0; i < int(rateBurst); i++ {
+		if !guard.AllowToken(rlIP) {
+			t.Fatalf("expected token %d to be available", i)
+		}
+	}
+	unreadRL := &blockingBodyReader{payload: body}
+	rRL := signReq(t, http.MethodPost, "/v1/pair/approve", body, testAppKey, now.Unix(), rlIP)
+	rRL.Body = unreadRL
+	rRL.ContentLength = maxBodyBytes
+	recRL := httptest.NewRecorder()
+	srv.ServeHTTP(recRL, rRL)
+	if recRL.Code != http.StatusTooManyRequests || recRL.Header().Get("Connection") != "close" {
+		t.Fatalf("expected pre-body 429 rate_limited, got %d body=%q", recRL.Code, recRL.Body.String())
+	}
+	if unreadRL.reads.Load() != 0 {
+		t.Fatalf("expected rate-limited /v1/pair/approve body not to be read, reads=%d", unreadRL.reads.Load())
+	}
+}
+
+func TestReadBoundedBodyIncrementalNoUpfrontAlloc(t *testing.T) {
+	// Declared Content-Length is 2 MiB, but peer only sends 16 bytes -> must NOT allocate 2 MiB
+	short := []byte("0123456789abcdef")
+	got, err := readBoundedBody(io.NopCloser(bytes.NewReader(short)), maxBodyBytes, maxBodyBytes)
+	if err != nil {
+		t.Fatalf("readBoundedBody short: %v", err)
+	}
+	if !bytes.Equal(got, short) {
+		t.Fatalf("expected %q, got %q", short, got)
+	}
+	if cap(got) > initialBodyBufBytes {
+		t.Fatalf("expected incremental allocation <= %d, got cap=%d (upfront alloc regression)", initialBodyBufBytes, cap(got))
+	}
+
+	// Empty body with large Content-Length -> zero heap allocation
+	empty, err := readBoundedBody(io.NopCloser(bytes.NewReader(nil)), maxBodyBytes, maxBodyBytes)
+	if err != nil || len(empty) != 0 || cap(empty) != 0 {
+		t.Fatalf("expected nil/empty slice on 0-byte read, got len=%d cap=%d err=%v", len(empty), cap(empty), err)
+	}
+
+	// Exact limit succeeds; limit+1 fails with errBodyTooLarge even with deceptive ContentLength
+	exact := bytes.Repeat([]byte("x"), maxSmallBodyBytes)
+	gotExact, err := readBoundedBody(io.NopCloser(bytes.NewReader(exact)), -1, maxSmallBodyBytes)
+	if err != nil || !bytes.Equal(gotExact, exact) {
+		t.Fatalf("exact limit failed: len=%d err=%v", len(gotExact), err)
+	}
+	over := bytes.Repeat([]byte("y"), maxSmallBodyBytes+1)
+	if _, err := readBoundedBody(io.NopCloser(bytes.NewReader(over)), 10, maxSmallBodyBytes); !errors.Is(err, errBodyTooLarge) {
+		t.Fatalf("expected errBodyTooLarge for deceptive Content-Length, got %v", err)
+	}
+}
+
+func TestIPv6Slash64BucketingAndLimitListenerBanReject(t *testing.T) {
+	// 1. Normalization unit checks
+	if got := normalizeIPKey("198.51.100.7"); got != "198.51.100.7" {
+		t.Fatalf("IPv4 altered: %q", got)
+	}
+	if got := normalizeIPKey("::ffff:198.51.100.7"); got != "198.51.100.7" {
+		t.Fatalf("IPv4-mapped IPv6 did not unmap to IPv4: %q", got)
+	}
+	k1 := normalizeIPKey("2001:db8:abcd:1234::1")
+	k2 := normalizeIPKey("2001:db8:abcd:1234:dead:beef:cafe:9999")
+	k3 := normalizeIPKey("2001:db8:abcd:1235::1")
+	if k1 != "2001:db8:abcd:1234::/64" || k1 != k2 {
+		t.Fatalf("IPv6 /64 bucketing mismatch: k1=%q k2=%q", k1, k2)
+	}
+	if k3 == k1 {
+		t.Fatalf("distinct IPv6 /64 collided: %q", k3)
+	}
+	if normalizeIPKey("fe80::1%eth0") != normalizeIPKey("fe80::2%eth1") {
+		t.Fatalf("IPv6 zone stripping failed")
+	}
+
+	// 2. HTTP ban applies across the entire IPv6 /64, not across neighboring /64s
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	guard := newIPGuard(nowFn)
+	srv := newRelayServer(newMemStore(nowFn), guard, testAppKey, nowFn)
+
+	for i := 0; i < strikeLimit; i++ {
+		ip := fmt.Sprintf("2001:db8:1111:2222::%x", i+1)
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, signReq(t, http.MethodPost, "/v1/ping", []byte("{}"), "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", now.Unix(), ip))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("strike %d expected 404, got %d", i+1, rec.Code)
+		}
+	}
+	if !guard.IsBanned("2001:db8:1111:2222:aaaa:bbbb::1") {
+		t.Fatal("expected sibling IPv6 address in same /64 to be banned")
+	}
+	rBanned := httptest.NewRecorder()
+	srv.ServeHTTP(rBanned, signReq(t, http.MethodPost, "/v1/ping", []byte("{}"), testAppKey, now.Unix(), "2001:db8:1111:2222:ffff::9"))
+	if rBanned.Code != http.StatusNotFound || rBanned.Header().Get("Connection") != "close" {
+		t.Fatalf("expected banned /64 peer to get silent 404 + Connection: close, got %d conn=%q", rBanned.Code, rBanned.Header().Get("Connection"))
+	}
+	rOther := httptest.NewRecorder()
+	srv.ServeHTTP(rOther, signReq(t, http.MethodPost, "/v1/ping", []byte("{}"), testAppKey, now.Unix(), "2001:db8:1111:2223::1"))
+	if rOther.Code != http.StatusOK {
+		t.Fatalf("expected other IPv6 /64 to remain allowed, got %d", rOther.Code)
+	}
+
+	// 3. limitListener.Accept() immediately drops TCP connections from banned IPs before HTTP/TLS
+	rawLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var lnNowUnix atomic.Int64
+	lnNowUnix.Store(now.Unix())
+	lnGuard := newIPGuard(func() time.Time { return time.Unix(lnNowUnix.Load(), 0).UTC() })
+	ln := newLimitListener(rawLn, 2, 2, lnGuard)
+	defer ln.Close()
+
+	for i := 0; i < strikeLimit; i++ {
+		lnGuard.RecordStrike("127.0.0.1")
+	}
+	if !lnGuard.IsBanned("127.0.0.1") {
+		t.Fatal("expected 127.0.0.1 to be banned")
+	}
+
+	acceptedCh := make(chan net.Conn, 1)
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr == nil && c != nil {
+			acceptedCh <- c
+		}
+	}()
+
+	bannedDial, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial banned: %v", err)
+	}
+	defer bannedDial.Close()
+	_ = bannedDial.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var probe [1]byte
+	if _, rerr := bannedDial.Read(probe[:]); rerr == nil {
+		t.Fatal("expected banned IP TCP connection to be closed immediately by limitListener.Accept()")
+	}
+	select {
+	case c := <-acceptedCh:
+		_ = c.Close()
+		t.Fatal("limitListener.Accept() must not return a connection from a banned IP")
+	default:
+	}
+
+	// Once ban expires, Accept() lets the next connection through cleanly
+	lnNowUnix.Store(now.Add(banDuration + time.Second).Unix())
+	okDial, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial after ban expiry: %v", err)
+	}
+	defer okDial.Close()
+	select {
+	case sc := <-acceptedCh:
+		_ = sc.Close()
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected Accept() to succeed after ban expiry")
+	}
+
+	// 4. End-to-end HTTP server check: silentNotFound closes keep-alive socket (releases limitListener slot)
+	rawHTTP, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen http: %v", err)
+	}
+	httpGuard := newIPGuard(nowFn)
+	httpLn := newLimitListener(rawHTTP, 1, 1, httpGuard)
+	httpSrv := &http.Server{Handler: newRelayServer(newMemStore(nowFn), httpGuard, testAppKey, nowFn)}
+	go func() { _ = httpSrv.Serve(httpLn) }()
+	defer httpSrv.Close()
+
+	tr := &http.Transport{DisableKeepAlives: false, MaxIdleConnsPerHost: 2}
+	defer tr.CloseIdleConnections()
+	hc := &http.Client{Transport: tr, Timeout: 3 * time.Second}
+	// Two sequential unauthorized requests against maxConns=1: if Connection: close were missing,
+	// the 1st keep-alive socket would hold the sole limitListener slot and deadlock or fail reuse.
+	for i := 0; i < 2; i++ {
+		resp, err := hc.Get("http://" + httpLn.Addr().String() + "/unauth")
+		if err != nil {
+			t.Fatalf("unauth GET %d failed: %v", i+1, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound || !resp.Close {
+			t.Fatalf("unauth GET %d expected 404 with Close=true, got %d Close=%v", i+1, resp.StatusCode, resp.Close)
+		}
+	}
+}
+
+func TestPairStatusHeavyGatePreservesSlotAndStoreCap16MiB(t *testing.T) {
+	if maxTotalBytes != 16*1024*1024 {
+		t.Fatalf("expected maxTotalBytes=16 MiB, got %d", maxTotalBytes)
+	}
+
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	store := newMemStore(nowFn)
+	guard := newIPGuard(nowFn)
+	srv := newRelayServer(store, guard, testAppKey, nowFn)
+
+	tok := []byte("0123456789abcdef0123456789abcdef")
+
+	// Channel A: pending (requested)
+	chPending := makeTestHex64("status-gate-pending")
+	reqPending := makeTestHex64("status-gate-req-pending")
+	if _, err := store.PairInit(chPending, tok, 300); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PairRequest(chPending, reqPending, []byte("s"), []byte("n"), []byte("c")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Channel B: approved with heavy payload
+	chApproved := makeTestHex64("status-gate-approved")
+	reqApproved := makeTestHex64("status-gate-req-approved")
+	if _, err := store.PairInit(chApproved, tok, 300); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PairRequest(chApproved, reqApproved, []byte("s"), []byte("n"), []byte("c")); err != nil {
+		t.Fatal(err)
+	}
+	payloadCT := bytes.Repeat([]byte{0x42}, 16384)
+	if err := store.PairApprove(chApproved, tok, reqApproved, []byte("salt-ok"), []byte("nonce-ok"), payloadCT); err != nil {
+		t.Fatal(err)
+	}
+
+	// Saturate heavyBodySem completely
+	for i := 0; i < cap(srv.heavyBodySem); i++ {
+		srv.heavyBodySem <- struct{}{}
+	}
+
+	// Pending status must STILL succeed while heavyBodySem is full
+	pendBody := []byte(fmt.Sprintf(`{"channelId":"%s","requestId":"%s"}`, chPending, reqPending))
+	rPend := httptest.NewRecorder()
+	srv.ServeHTTP(rPend, signReq(t, http.MethodPost, "/v1/pair/status", pendBody, testAppKey, now.Unix(), "198.51.100.70"))
+	if rPend.Code != http.StatusOK || rPend.Body.String() != `{"state":"pending"}` {
+		t.Fatalf("pending status should not be blocked by heavy gate: got %d %s", rPend.Code, rPend.Body.String())
+	}
+
+	// Approved status must return 429 busy WITHOUT burning/deleting the slot
+	appBody := []byte(fmt.Sprintf(`{"channelId":"%s","requestId":"%s"}`, chApproved, reqApproved))
+	rBusy := httptest.NewRecorder()
+	srv.ServeHTTP(rBusy, signReq(t, http.MethodPost, "/v1/pair/status", appBody, testAppKey, now.Unix(), "198.51.100.71"))
+	if rBusy.Code != http.StatusTooManyRequests || !strings.Contains(rBusy.Body.String(), `"busy"`) {
+		t.Fatalf("expected 429 busy on approved status when heavy gate saturated, got %d %s", rBusy.Code, rBusy.Body.String())
+	}
+	if store.Len() != 2 {
+		t.Fatalf("approved slot must NOT be burned when rejected with 429 busy; store.Len()=%d", store.Len())
+	}
+
+	// Free 1 slot -> retry succeeds and burns the approved slot
+	<-srv.heavyBodySem
+	rOK := httptest.NewRecorder()
+	srv.ServeHTTP(rOK, signReq(t, http.MethodPost, "/v1/pair/status", appBody, testAppKey, now.Unix(), "198.51.100.71"))
+	if rOK.Code != http.StatusOK || !strings.Contains(rOK.Body.String(), `"state":"approved"`) {
+		t.Fatalf("expected 200 approved after heavy gate freed, got %d %s", rOK.Code, rOK.Body.String())
+	}
+	if store.Len() != 1 {
+		t.Fatalf("expected approved slot to be burned after 200 OK; store.Len()=%d", store.Len())
+	}
+
+	// Drain remaining test semaphore tokens
+	for len(srv.heavyBodySem) > 0 {
+		<-srv.heavyBodySem
 	}
 }

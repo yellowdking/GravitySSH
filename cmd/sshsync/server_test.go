@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -23,7 +24,7 @@ func makeTestChannel(tag string) string {
 func signReq(t *testing.T, method, path string, body []byte, key string, ts int64, ip string) *http.Request {
 	t.Helper()
 	req := httptest.NewRequest(method, path, bytes.NewReader(body))
-	req.RemoteAddr = ip + ":44321"
+	req.RemoteAddr = net.JoinHostPort(ip, "44321")
 	tsStr := strconv.FormatInt(ts, 10)
 	bSum := sha256.Sum256(body)
 	mac := hmac.New(sha256.New, []byte(key))
@@ -70,6 +71,9 @@ func TestRemovedV1EndpointsReturnSilent404(t *testing.T) {
 		}
 		if rec.Header().Get("Server") != "" || rec.Header().Get("X-Powered-By") != "" {
 			t.Fatalf("%s leaked server headers: %+v", tc.path, rec.Header())
+		}
+		if rec.Header().Get("Connection") != "close" {
+			t.Fatalf("%s expected Connection: close on silent 404, got %q", tc.path, rec.Header().Get("Connection"))
 		}
 	}
 }

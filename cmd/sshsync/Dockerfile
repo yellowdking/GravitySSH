@@ -13,7 +13,8 @@ COPY --from=builder /out/sshsync /sshsync
 COPY --from=builder --chown=65532:65532 /data /data
 USER 65532:65532
 EXPOSE 54843
-ENV SSHSYNC_LISTEN=:54843 \
+ENV GOMEMLIMIT=48MiB \
+    SSHSYNC_LISTEN=:54843 \
     SSHSYNC_CERT_FILE=/data/cert.pem \
     SSHSYNC_KEY_FILE=/data/key.pem
 ENTRYPOINT ["/sshsync"]
