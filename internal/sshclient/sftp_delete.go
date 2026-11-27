@@ -23,87 +23,75 @@ func (m *Manager) SFTPDelete(sessionID, remotePath string) error {
 		return fmt.Errorf("禁止删除根目录")
 	}
 
-	sc, err := m.getSFTP(sessionID)
-	if err != nil {
-		if m.cachedSSHSameFS(sessionID) {
-			if fbErr := m.deleteViaSSH(sessionID, clean); fbErr == nil {
-				m.invalidateDirTreeCache(sessionID, clean)
-				return nil
+	var (
+		sawTarget bool
+		sshTried  bool
+	)
+	err := m.withSFTP(sessionID, func(sc *sftp.Client) error {
+		info, lerr := sc.Lstat(clean)
+		if lerr != nil {
+			if errors.Is(lerr, os.ErrNotExist) {
+				if sawTarget {
+					return nil
+				}
+				return lerr
 			}
-		}
-		return err
-	}
-
-	info, lerr := sc.Lstat(clean)
-	if lerr != nil && isSFTPConnError(lerr) {
-		m.invalidateSFTP(sessionID, sc)
-		if sc2, err2 := m.getSFTP(sessionID); err2 == nil {
-			sc = sc2
-			info, lerr = sc.Lstat(clean)
-		}
-	}
-	if lerr != nil {
-		if errors.Is(lerr, os.ErrNotExist) {
+			if isSFTPConnError(lerr) {
+				return lerr
+			}
+			if m.cachedSSHSameFS(sessionID) {
+				if fbErr := m.deleteViaSSH(sessionID, clean); fbErr == nil {
+					return nil
+				}
+			}
 			return lerr
 		}
-		if m.cachedSSHSameFS(sessionID) {
+		sawTarget = true
+
+		isRealDir := info.IsDir() && info.Mode()&os.ModeSymlink == 0
+		if !sshTried && isRealDir && m.sshMatchesSFTPRoot(sessionID, sc) {
+			sshTried = true
 			if fbErr := m.deleteViaSSH(sessionID, clean); fbErr == nil {
-				m.invalidateDirTreeCache(sessionID, clean)
 				return nil
+			} else if errors.Is(fbErr, errSSHDeleteNotFound) {
+				if _, chkErr := sc.Lstat(clean); errors.Is(chkErr, os.ErrNotExist) {
+					return nil
+				}
 			}
 		}
-		return lerr
-	}
 
-	isRealDir := info.IsDir() && info.Mode()&os.ModeSymlink == 0
-	var sshTried bool
-	if isRealDir && m.sshMatchesSFTPRoot(sessionID, sc) {
-		sshTried = true
-		if fbErr := m.deleteViaSSH(sessionID, clean); fbErr == nil {
-			m.invalidateDirTreeCache(sessionID, clean)
+		rmErr := removeRemoteNodeWithInfo(sc, clean, info, false)
+		if rmErr == nil {
 			return nil
-		} else if errors.Is(fbErr, errSSHDeleteNotFound) {
-			if _, chkErr := sc.Lstat(clean); errors.Is(chkErr, os.ErrNotExist) {
-				m.invalidateDirTreeCache(sessionID, clean)
-				return nil
-			}
 		}
-	}
-
-	rmErr := removeRemoteNodeWithInfo(sc, clean, info, false)
-	if rmErr != nil && isSFTPConnError(rmErr) {
-		m.invalidateSFTP(sessionID, sc)
-		if sc2, err2 := m.getSFTP(sessionID); err2 == nil {
-			sc = sc2
-			if curInfo, chkErr := sc.Lstat(clean); errors.Is(chkErr, os.ErrNotExist) {
-				m.invalidateDirTreeCache(sessionID, clean)
-				return nil
-			} else if chkErr == nil {
-				rmErr = removeRemoteNodeWithInfo(sc, clean, curInfo, false)
-			}
+		if isSFTPConnError(rmErr) {
+			return rmErr
 		}
-	}
-
-	if rmErr != nil {
 		if _, postErr := sc.Lstat(clean); errors.Is(postErr, os.ErrNotExist) {
-			m.invalidateDirTreeCache(sessionID, clean)
 			return nil
 		}
 		if !sshTried && m.sshMatchesSFTPRoot(sessionID, sc) {
 			fbErr := m.deleteViaSSH(sessionID, clean)
 			if fbErr == nil {
-				m.invalidateDirTreeCache(sessionID, clean)
 				return nil
 			}
 			if errors.Is(fbErr, errSSHDeleteNotFound) {
 				if _, postErr := sc.Lstat(clean); errors.Is(postErr, os.ErrNotExist) {
-					m.invalidateDirTreeCache(sessionID, clean)
 					return nil
 				}
 			}
 			return fmt.Errorf("%w (SSH 回退失败: %v)", rmErr, fbErr)
 		}
 		return rmErr
+	})
+	if err != nil {
+		if !sawTarget && !errors.Is(err, os.ErrNotExist) && m.cachedSSHSameFS(sessionID) {
+			if fbErr := m.deleteViaSSH(sessionID, clean); fbErr == nil {
+				m.invalidateDirTreeCache(sessionID, clean)
+				return nil
+			}
+		}
+		return err
 	}
 
 	m.invalidateDirTreeCache(sessionID, clean)
@@ -174,9 +162,7 @@ func removeRemoteNodeWithInfo(sc *sftp.Client, target string, info os.FileInfo, 
 }
 
 func removeFilesParallel(sc *sftp.Client, parent string, files []os.FileInfo) error {
-	sem := make(chan struct{}, maxDeleteConcurrency)
 	var (
-		wg       sync.WaitGroup
 		errMu    sync.Mutex
 		firstErr error
 		aborted  atomic.Bool
@@ -188,33 +174,21 @@ func removeFilesParallel(sc *sftp.Client, parent string, files []os.FileInfo) er
 		}
 		errMu.Unlock()
 	}
-	for _, f := range files {
-		if aborted.Load() {
-			break
-		}
-		p := path.Join(parent, f.Name())
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(target string) {
-			defer func() { <-sem; wg.Done() }()
-			if aborted.Load() {
+	runBounded(len(files), maxDeleteConcurrency, aborted.Load, func(idx int) {
+		target := path.Join(parent, files[idx].Name())
+		if err := sc.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if isSFTPConnError(err) {
+				aborted.Store(true)
+				recordErr(err)
 				return
 			}
-			if err := sc.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
-				if isSFTPConnError(err) {
+			if _, lerr := sc.Lstat(target); !errors.Is(lerr, os.ErrNotExist) {
+				if isSFTPConnError(lerr) {
 					aborted.Store(true)
-					recordErr(err)
-					return
 				}
-				if _, lerr := sc.Lstat(target); !errors.Is(lerr, os.ErrNotExist) {
-					if isSFTPConnError(lerr) {
-						aborted.Store(true)
-					}
-					recordErr(err)
-				}
+				recordErr(err)
 			}
-		}(p)
-	}
-	wg.Wait()
+		}
+	})
 	return firstErr
 }

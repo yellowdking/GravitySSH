@@ -2,6 +2,8 @@ package sshclient
 
 import (
 	"math"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -78,5 +80,88 @@ cpu  700 0 400 400 0 0 0 0
 	}
 	if m3.DiskMount != "/mnt/My External Drive" || m3.DiskPercent != 91 {
 		t.Fatalf("expected disk mount with spaces preserved, got mount=%q pct=%.1f", m3.DiskMount, m3.DiskPercent)
+	}
+}
+
+func TestBuildLinuxMetricsCmdCaching(t *testing.T) {
+	first := buildLinuxMetricsCmd(true, false, false)
+	if !strings.Contains(first, "df -Pkl") || !strings.Contains(first, "nproc") || !strings.Contains(first, "command -v nvidia-smi") {
+		t.Fatalf("expected first cmd to include df -Pkl, nproc, command -v nvidia-smi; got:\n%s", first)
+	}
+
+	noGPU := buildLinuxMetricsCmd(false, true, false)
+	if strings.Contains(noGPU, "nproc") || strings.Contains(noGPU, "nvidia-smi") || strings.Contains(noGPU, "---GPU---") {
+		t.Fatalf("expected non-GPU cached cmd to skip nproc and nvidia-smi; got:\n%s", noGPU)
+	}
+
+	withGPU := buildLinuxMetricsCmd(false, true, true)
+	if strings.Contains(withGPU, "nproc") || strings.Contains(withGPU, "command -v nvidia-smi") || !strings.Contains(withGPU, "---GPU---") {
+		t.Fatalf("expected GPU cached cmd to query nvidia-smi directly without nproc/command -v; got:\n%s", withGPU)
+	}
+}
+
+func TestGetSessionMetricsTrueRTTAndStaticCache(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		cmds []string
+	)
+	cli := startMockSSHSFTPServer(t, &mFS{m: map[string]*mNode{}}, func(cmd string) (string, uint32) {
+		mu.Lock()
+		cmds = append(cmds, cmd)
+		mu.Unlock()
+		time.Sleep(130 * time.Millisecond)
+		return `---CPU---
+cpu  1000 0 500 8500 0 0 0 0
+---MEM---
+MemTotal: 4194304
+MemAvailable: 2097152
+---DISK---
+30% /
+---NET---
+1024 2048
+---LOAD---
+0.50 0.40 0.30 1/100 42
+4
+---GPU---
+`, 0
+	})
+
+	m := NewManager(nil, nil)
+	s := &sessionState{
+		dialRes:  &DialResult{Client: cli},
+		stopCh:   make(chan struct{}),
+		dirCache: map[string]dirCacheEntry{},
+	}
+	m.sessions["s1"] = s
+
+	m1, err := m.GetSessionMetrics("s1")
+	if err != nil {
+		t.Fatalf("first GetSessionMetrics failed: %v", err)
+	}
+	if !m1.Supported || m1.Cores != 4 || m1.HasGPU {
+		t.Fatalf("unexpected first metrics: %+v", m1)
+	}
+	// True single RTT via keepalive must NOT include the 130ms exec delay.
+	if m1.LatencyMs >= 100 {
+		t.Fatalf("expected true single RTT < 100ms (got %dms)", m1.LatencyMs)
+	}
+
+	m2, err := m.GetSessionMetrics("s1")
+	if err != nil {
+		t.Fatalf("second GetSessionMetrics failed: %v", err)
+	}
+	if m2.Cores != 4 {
+		t.Fatalf("expected cached Cores=4 on second sample, got %d", m2.Cores)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(cmds) != 2 {
+		t.Fatalf("expected 2 exec commands, got %d", len(cmds))
+	}
+	if !strings.Contains(cmds[0], "nproc") || !strings.Contains(cmds[0], "nvidia-smi") {
+		t.Fatalf("expected first cmd to probe nproc and nvidia-smi")
+	}
+	if strings.Contains(cmds[1], "nproc") || strings.Contains(cmds[1], "nvidia-smi") {
+		t.Fatalf("expected second cmd to skip cached nproc and nvidia-smi, got:\n%s", cmds[1])
 	}
 }

@@ -37,37 +37,44 @@ type netSample struct {
 }
 
 type sessionState struct {
-	mu               sync.Mutex
-	writeMu          sync.Mutex
-	info             models.SessionInfo
-	cancelDial       context.CancelFunc
-	dialRes          *DialResult
-	sshSession       *ssh.Session
-	stdin            io.WriteCloser
-	sftpClient       *sftp.Client
-	recorder         *CommandRecorder
-	stopCh           chan struct{}
-	closed           bool
-	userClosed       bool
-	lastCols         int
-	lastRows         int
-	currentDir       string
-	dirCache         map[string]dirCacheEntry
-	dirCacheGen      uint64
-	prevCPU          *cpuSample
-	prevNet          *netSample
-	prevSampleAt     time.Time
-	metricsInFlight  atomic.Bool
-	sshSameFSChecked bool
-	sshSameFS        bool
+	mu                sync.Mutex
+	writeMu           sync.Mutex
+	info              models.SessionInfo
+	cancelDial        context.CancelFunc
+	dialRes           *DialResult
+	sshSession        *ssh.Session
+	stdin             io.WriteCloser
+	sftpClient        *sftp.Client
+	recorder          *CommandRecorder
+	stopCh            chan struct{}
+	closed            bool
+	userClosed        bool
+	lastCols          int
+	lastRows          int
+	currentDir        string
+	dirCache          map[string]dirCacheEntry
+	dirCacheGen       uint64
+	prevCPU           *cpuSample
+	prevNet           *netSample
+	prevSampleAt      time.Time
+	cachedCores       int
+	gpuChecked        bool
+	hasGPU            bool
+	metricsInFlight   atomic.Bool
+	keepAliveInFlight atomic.Bool
+	rttProbeInFlight  atomic.Bool
+	sshSameFSChecked  bool
+	sshSameFS         bool
 }
 
 type Manager struct {
-	mu       sync.RWMutex
-	store    *vault.Store
-	events   EventSink
-	sessions map[string]*sessionState
-	sftpDial func(sessionID string) (*sftp.Client, error)
+	mu                sync.RWMutex
+	store             *vault.Store
+	events            EventSink
+	sessions          map[string]*sessionState
+	dirWarmupInFlight sync.Map
+	sftpDial          func(sessionID string) (*sftp.Client, error)
+	knownHostsPathFn  func() string
 }
 
 func NewManager(store *vault.Store, events EventSink) *Manager {
@@ -86,18 +93,6 @@ func (m *Manager) emit(event string, payload any) {
 
 func (m *Manager) emitTransfer(p models.TransferProgress) {
 	m.emit("sftp:progress", p)
-}
-
-func (m *Manager) ListSessions() []models.SessionInfo {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]models.SessionInfo, 0, len(m.sessions))
-	for _, s := range m.sessions {
-		s.mu.Lock()
-		out = append(out, s.info)
-		s.mu.Unlock()
-	}
-	return out
 }
 
 func (m *Manager) TestConnection(ctx context.Context, req models.ServerSaveRequest) (string, error) {

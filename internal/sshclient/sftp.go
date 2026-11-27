@@ -9,7 +9,6 @@ import (
 	"path"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 
 	"github.com/pkg/sftp"
@@ -207,35 +206,20 @@ func buildSFTPEntries(sc *sftp.Client, dir string, infos []os.FileInfo) []models
 		}
 	}
 	if len(symlinks) > 0 {
-		sem := make(chan struct{}, 8)
-		var (
-			wg         sync.WaitGroup
-			connBroken atomic.Bool
-		)
-		for _, idx := range symlinks {
-			if connBroken.Load() {
-				break
+		var connBroken atomic.Bool
+		runBounded(len(symlinks), 8, connBroken.Load, func(pos int) {
+			i := symlinks[pos]
+			st, err := sc.Stat(entries[i].Path)
+			if err != nil {
+				if isSFTPConnError(err) {
+					connBroken.Store(true)
+				}
+				return
 			}
-			wg.Add(1)
-			sem <- struct{}{}
-			go func(i int) {
-				defer func() { <-sem; wg.Done() }()
-				if connBroken.Load() {
-					return
-				}
-				st, err := sc.Stat(entries[i].Path)
-				if err != nil {
-					if isSFTPConnError(err) {
-						connBroken.Store(true)
-					}
-					return
-				}
-				if st.IsDir() {
-					entries[i].IsDir = true
-				}
-			}(idx)
-		}
-		wg.Wait()
+			if st.IsDir() {
+				entries[i].IsDir = true
+			}
+		})
 	}
 	return entries
 }

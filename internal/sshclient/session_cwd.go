@@ -3,15 +3,12 @@ package sshclient
 import (
 	"path"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
-const dirCacheTTL = 5 * time.Second
-
-var dirWarmupInFlight sync.Map
+const dirCacheTTL = 20 * time.Second
 
 func (m *Manager) getSession(id string) *sessionState {
 	m.mu.RLock()
@@ -127,9 +124,9 @@ func (m *Manager) PeekCachedDirEntries(sid, dirPath string) []models.SFTPFileEnt
 	s.mu.Unlock()
 	if canWarm {
 		key := sid + "\x00" + target
-		if _, loaded := dirWarmupInFlight.LoadOrStore(key, struct{}{}); !loaded {
+		if _, loaded := m.dirWarmupInFlight.LoadOrStore(key, struct{}{}); !loaded {
 			go func() {
-				defer dirWarmupInFlight.Delete(key)
+				defer m.dirWarmupInFlight.Delete(key)
 				_ = m.CachedDirEntries(sid, target)
 			}()
 		}
@@ -137,7 +134,7 @@ func (m *Manager) PeekCachedDirEntries(sid, dirPath string) []models.SFTPFileEnt
 	return nil
 }
 
-// CachedDirEntries returns SFTP entries (including dotfiles) with a 5s cache.
+// CachedDirEntries returns SFTP entries (including dotfiles) with a 20s cache.
 func (m *Manager) CachedDirEntries(sid, dir string) []models.SFTPFileEntry {
 	s := m.getSession(sid)
 	if s == nil {
@@ -254,7 +251,7 @@ func (m *Manager) updateCWDFromCommand(s *sessionState, cmd string) {
 	}
 	if !isReadOnlyCommand(cmd) {
 		s.mu.Lock()
-		clear(s.dirCache)
+		delete(s.dirCache, sessionDirTargetLocked(s, ""))
 		s.dirCacheGen++
 		s.mu.Unlock()
 	}

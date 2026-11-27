@@ -2,6 +2,7 @@ package sshclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -10,15 +11,36 @@ import (
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
-const linuxMetricsCmd = `LC_ALL=C sh -c '
+const (
+	rttProbeTimeout = 5 * time.Second
+
+	linuxMetricsHead = `LC_ALL=C sh -c '
 [ -r /proc/stat ] || { echo "UNSUPPORTED"; exit 0; }
 echo "---CPU---"; head -n1 /proc/stat
 echo "---MEM---"; awk "/^(MemTotal|MemAvailable|MemFree|Buffers|Cached):/{print \$1,\$2}" /proc/meminfo
-echo "---DISK---"; df -Pk 2>/dev/null | awk "NR>1 && \$1 ~ /^\// {pct=\$5; mp=\$6; for(i=7;i<=NF;i++) mp=mp \" \" \$i; print pct, mp}"
+echo "---DISK---"; df -Pkl 2>/dev/null | awk "NR>1 && \$1 ~ /^\// {pct=\$5; mp=\$6; for(i=7;i<=NF;i++) mp=mp \" \" \$i; print pct, mp}"
 echo "---NET---"; awk "NR>2 && \$1 !~ /^lo:/ {gsub(/:/,\" \",\$0); rx+=\$2; tx+=\$10} END{printf \"%.0f %.0f\n\",rx,tx}" /proc/net/dev
-echo "---LOAD---"; cat /proc/loadavg; nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo
-echo "---GPU---"; command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=utilization.gpu,name --format=csv,noheader,nounits 2>/dev/null | head -n1 || true
-'`
+echo "---LOAD---"; cat /proc/loadavg`
+	linuxMetricsCoresSuffix = `; nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo`
+	linuxMetricsGPUProbe    = "\necho \"---GPU---\"; command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=utilization.gpu,name --format=csv,noheader,nounits 2>/dev/null | head -n1 || true"
+	linuxMetricsGPUQuery    = "\necho \"---GPU---\"; nvidia-smi --query-gpu=utilization.gpu,name --format=csv,noheader,nounits 2>/dev/null | head -n1 || true"
+)
+
+func buildLinuxMetricsCmd(needCores, gpuChecked, hasGPU bool) string {
+	var b strings.Builder
+	b.Grow(len(linuxMetricsHead) + len(linuxMetricsCoresSuffix) + len(linuxMetricsGPUProbe) + 4)
+	b.WriteString(linuxMetricsHead)
+	if needCores {
+		b.WriteString(linuxMetricsCoresSuffix)
+	}
+	if !gpuChecked {
+		b.WriteString(linuxMetricsGPUProbe)
+	} else if hasGPU {
+		b.WriteString(linuxMetricsGPUQuery)
+	}
+	b.WriteString("\n'")
+	return b.String()
+}
 
 // GetSessionMetrics samples RTT latency and Linux host resources over the active SSH connection.
 func (m *Manager) GetSessionMetrics(sessionID string) (models.HostMetrics, error) {
@@ -37,14 +59,33 @@ func (m *Manager) GetSessionMetrics(sessionID string) (models.HostMetrics, error
 	if sess.dialRes != nil && sess.dialRes.Client != nil {
 		client = sess.dialRes
 	}
+	stopCh := sess.stopCh
+	cachedCores := sess.cachedCores
+	gpuChecked := sess.gpuChecked
+	hasGPU := sess.hasGPU
 	sess.mu.Unlock()
 	if client == nil {
 		return models.HostMetrics{SessionID: sessionID}, nil
 	}
 
-	start := time.Now()
-	out, runErr := runSSHExec(context.Background(), client.Client, linuxMetricsCmd, 10*time.Second, false)
-	latencyMs := time.Since(start).Milliseconds()
+	// Measure true single-RTT via global keepalive request before exec-based metrics sampling.
+	pingStart := time.Now()
+	pingErr := sendKeepAliveProbe(client.Client, stopCh, rttProbeTimeout, &sess.rttProbeInFlight)
+	if errors.Is(pingErr, context.Canceled) {
+		return models.HostMetrics{SessionID: sessionID}, pingErr
+	}
+	hasRTT := pingErr == nil
+	var latencyMs int64
+	if hasRTT {
+		latencyMs = time.Since(pingStart).Milliseconds()
+	}
+
+	cmd := buildLinuxMetricsCmd(cachedCores <= 0, gpuChecked, hasGPU)
+	execStart := time.Now()
+	out, runErr := runSSHExec(context.Background(), client.Client, cmd, 10*time.Second, false)
+	if !hasRTT {
+		latencyMs = time.Since(execStart).Milliseconds()
+	}
 	if runErr != nil {
 		return models.HostMetrics{SessionID: sessionID, LatencyMs: latencyMs}, runErr
 	}
@@ -57,6 +98,9 @@ func (m *Manager) GetSessionMetrics(sessionID string) (models.HostMetrics, error
 	sess.mu.Unlock()
 
 	metrics, curCPU, curNet := parseMetricsOutput(sessionID, string(out), latencyMs, prevCPU, prevNet, prevAt, now)
+	if cachedCores > 0 {
+		metrics.Cores = cachedCores
+	}
 
 	sess.mu.Lock()
 	if curCPU != nil {
@@ -64,6 +108,15 @@ func (m *Manager) GetSessionMetrics(sessionID string) (models.HostMetrics, error
 	}
 	if curNet != nil {
 		sess.prevNet = curNet
+	}
+	if metrics.Supported {
+		if sess.cachedCores <= 0 && metrics.Cores > 0 {
+			sess.cachedCores = metrics.Cores
+		}
+		if !sess.gpuChecked {
+			sess.gpuChecked = true
+			sess.hasGPU = metrics.HasGPU
+		}
 	}
 	sess.prevSampleAt = now
 	sess.mu.Unlock()
@@ -106,16 +159,8 @@ func parseMetricsOutput(
 		}
 		switch section {
 		case "CPU":
-			if f := strings.Fields(t); len(f) >= 5 && f[0] == "cpu" {
-				var total, idle uint64
-				for i := 1; i < len(f); i++ {
-					v, _ := strconv.ParseUint(f[i], 10, 64)
-					total += v
-					if i == 4 || i == 5 {
-						idle += v
-					}
-				}
-				curCPU = &cpuSample{total: total, idle: idle}
+			if sample, ok := parseCPULine(t); ok {
+				curCPU = sample
 				res.Supported = true
 			}
 		case "MEM":
@@ -125,16 +170,10 @@ func parseMetricsOutput(
 				memMap[k] = v
 			}
 		case "DISK":
-			if idx := strings.IndexAny(t, " \t"); idx > 0 {
-				pctStr := strings.TrimSuffix(t[:idx], "%")
-				mount := strings.TrimSpace(t[idx+1:])
-				if mount != "" {
-					if pct, err := strconv.ParseFloat(pctStr, 64); err == nil && pct >= maxPct {
-						maxPct = pct
-						res.DiskPercent = pct
-						res.DiskMount = mount
-					}
-				}
+			if pct, mount, ok := parseDiskLine(t); ok && pct >= maxPct {
+				maxPct = pct
+				res.DiskPercent = pct
+				res.DiskMount = mount
 			}
 		case "NET":
 			if f := strings.Fields(t); len(f) >= 2 {
@@ -161,49 +200,97 @@ func parseMetricsOutput(
 	}
 
 	if curCPU != nil && prevCPU != nil && curCPU.total > prevCPU.total {
-		dTotal := float64(curCPU.total - prevCPU.total)
-		var dIdle float64
-		if curCPU.idle >= prevCPU.idle {
-			dIdle = float64(curCPU.idle - prevCPU.idle)
-		}
-		pct := (1.0 - dIdle/dTotal) * 100.0
-		if pct < 0 {
-			pct = 0
-		} else if pct > 100 {
-			pct = 100
-		}
-		res.CPUPercent = pct
+		res.CPUPercent = computeCPUPercent(curCPU, prevCPU)
 	}
-
-	if totalKB := memMap["MemTotal"]; totalKB > 0 {
-		availKB := memMap["MemAvailable"]
-		if availKB <= 0 {
-			availKB = memMap["MemFree"] + memMap["Buffers"] + memMap["Cached"]
-		}
-		usedKB := totalKB - availKB
-		if usedKB < 0 {
-			usedKB = 0
-		}
-		res.MemTotalMB = totalKB / 1024
-		res.MemUsedMB = usedKB / 1024
-		res.MemPercent = float64(usedKB) / float64(totalKB) * 100.0
-		res.Supported = true
-	}
-
-	if curNet != nil && prevNet != nil && !prevAt.IsZero() {
-		dt := now.Sub(prevAt).Seconds()
-		if dt > 0.2 {
-			if curNet.rx >= prevNet.rx {
-				res.NetRxKBps = float64(curNet.rx-prevNet.rx) / 1024.0 / dt
-			}
-			if curNet.tx >= prevNet.tx {
-				res.NetTxKBps = float64(curNet.tx-prevNet.tx) / 1024.0 / dt
-			}
-		}
-	}
+	applyMemoryMetrics(&res, memMap)
+	applyNetRates(&res, curNet, prevNet, prevAt, now)
 
 	if res.Cores <= 0 {
 		res.Cores = 1
 	}
 	return res, curCPU, curNet
+}
+
+func parseCPULine(line string) (*cpuSample, bool) {
+	f := strings.Fields(line)
+	if len(f) < 5 || f[0] != "cpu" {
+		return nil, false
+	}
+	var total, idle uint64
+	for i := 1; i < len(f); i++ {
+		v, _ := strconv.ParseUint(f[i], 10, 64)
+		total += v
+		if i == 4 || i == 5 {
+			idle += v
+		}
+	}
+	return &cpuSample{total: total, idle: idle}, true
+}
+
+func parseDiskLine(line string) (float64, string, bool) {
+	idx := strings.IndexAny(line, " \t")
+	if idx <= 0 {
+		return 0, "", false
+	}
+	pctStr := strings.TrimSuffix(line[:idx], "%")
+	mount := strings.TrimSpace(line[idx+1:])
+	if mount == "" {
+		return 0, "", false
+	}
+	pct, err := strconv.ParseFloat(pctStr, 64)
+	if err != nil {
+		return 0, "", false
+	}
+	return pct, mount, true
+}
+
+func computeCPUPercent(curCPU, prevCPU *cpuSample) float64 {
+	dTotal := float64(curCPU.total - prevCPU.total)
+	var dIdle float64
+	if curCPU.idle >= prevCPU.idle {
+		dIdle = float64(curCPU.idle - prevCPU.idle)
+	}
+	pct := (1.0 - dIdle/dTotal) * 100.0
+	if pct < 0 {
+		return 0
+	}
+	if pct > 100 {
+		return 100
+	}
+	return pct
+}
+
+func applyMemoryMetrics(res *models.HostMetrics, memMap map[string]int64) {
+	totalKB := memMap["MemTotal"]
+	if totalKB <= 0 {
+		return
+	}
+	availKB := memMap["MemAvailable"]
+	if availKB <= 0 {
+		availKB = memMap["MemFree"] + memMap["Buffers"] + memMap["Cached"]
+	}
+	usedKB := totalKB - availKB
+	if usedKB < 0 {
+		usedKB = 0
+	}
+	res.MemTotalMB = totalKB / 1024
+	res.MemUsedMB = usedKB / 1024
+	res.MemPercent = float64(usedKB) / float64(totalKB) * 100.0
+	res.Supported = true
+}
+
+func applyNetRates(res *models.HostMetrics, curNet, prevNet *netSample, prevAt, now time.Time) {
+	if curNet == nil || prevNet == nil || prevAt.IsZero() {
+		return
+	}
+	dt := now.Sub(prevAt).Seconds()
+	if dt <= 0.2 {
+		return
+	}
+	if curNet.rx >= prevNet.rx {
+		res.NetRxKBps = float64(curNet.rx-prevNet.rx) / 1024.0 / dt
+	}
+	if curNet.tx >= prevNet.tx {
+		res.NetTxKBps = float64(curNet.tx-prevNet.tx) / 1024.0 / dt
+	}
 }

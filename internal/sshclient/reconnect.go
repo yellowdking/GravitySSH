@@ -2,95 +2,77 @@ package sshclient
 
 import (
 	"context"
-	"encoding/base64"
-	"errors"
-	"io"
+	"fmt"
 	"time"
 
-	"golang.org/x/crypto/ssh"
+	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
-const maxKeepAliveFailures = 3
-
-var keepAliveProbeTimeout = 10 * time.Second
-
-func (m *Manager) pumpOutput(sessionID string, r io.Reader) {
-	buf := make([]byte, 16*1024)
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			m.emit("terminal:data", map[string]string{
-				"sessionId": sessionID,
-				"data":      base64.StdEncoding.EncodeToString(buf[:n]),
-			})
-		}
-		if err != nil {
-			return
-		}
+func (m *Manager) Reconnect(ctx context.Context, sessionID string, cols, rows int) (models.SessionInfo, error) {
+	sess := m.getSession(sessionID)
+	if sess == nil {
+		return models.SessionInfo{}, fmt.Errorf("会话不存在或已关闭")
 	}
-}
-
-func (m *Manager) sendTerminalText(sessionID, text string) {
-	m.emit("terminal:data", map[string]string{
-		"sessionId": sessionID,
-		"data":      base64.StdEncoding.EncodeToString([]byte(text)),
-	})
-}
-
-func sendKeepAliveProbe(client *ssh.Client, stopCh <-chan struct{}, timeout time.Duration) error {
-	errCh := make(chan error, 1)
-	go func() {
-		_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
-		errCh <- err
-	}()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-stopCh:
-		return context.Canceled
-	case err := <-errCh:
-		return err
-	case <-timer.C:
-		return errors.New("keepalive probe timed out")
+	if cols <= 0 {
+		cols = 120
 	}
-}
-
-// keepAliveLoop sends periodic SSH keepalive probes bounded by keepAliveProbeTimeout
-// so blackholed links reliably trip maxKeepAliveFailures without prematurely killing
-// high-latency links on a single transient failure.
-func (m *Manager) keepAliveLoop(sess *sessionState, stopCh chan struct{}, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	failures := 0
-	for {
-		select {
-		case <-stopCh:
-			return
-		case <-ticker.C:
-			sess.mu.Lock()
-			var client *ssh.Client
-			if sess.dialRes != nil {
-				client = sess.dialRes.Client
-			}
-			closed := sess.closed || sess.userClosed
-			sess.mu.Unlock()
-			if closed || client == nil {
-				return
-			}
-			err := sendKeepAliveProbe(client, stopCh, keepAliveProbeTimeout)
-			if errors.Is(err, context.Canceled) {
-				return
-			}
-			if err != nil {
-				failures++
-				if failures >= maxKeepAliveFailures {
-					m.markDisconnected(sess, "连接心跳超时，会话已断开")
-					return
-				}
-			} else {
-				failures = 0
-			}
-		}
+	if rows <= 0 {
+		rows = 32
 	}
+
+	sess.mu.Lock()
+	serverID := sess.info.ServerID
+	oldCancel := sess.cancelDial
+	sess.cancelDial = nil
+	closeStopChLocked(sess)
+	if sess.sftpClient != nil {
+		_ = sess.sftpClient.Close()
+		sess.sftpClient = nil
+	}
+	if sess.sshSession != nil {
+		_ = sess.sshSession.Close()
+		sess.sshSession = nil
+	}
+	if sess.dialRes != nil {
+		sess.dialRes.Close()
+		sess.dialRes = nil
+	}
+	sess.stdin = nil
+	sess.dirCache = make(map[string]dirCacheEntry)
+	sess.dirCacheGen++
+	sess.prevCPU = nil
+	sess.prevNet = nil
+	sess.prevSampleAt = time.Time{}
+	sess.cachedCores = 0
+	sess.gpuChecked = false
+	sess.hasGPU = false
+	sess.sshSameFSChecked = false
+	sess.sshSameFS = false
+	sess.userClosed = false
+	sess.closed = false
+	sess.stopCh = make(chan struct{})
+	sess.lastCols = cols
+	sess.lastRows = rows
+	sess.info.Status = "connecting"
+	sess.info.SFTPReady = false
+	sess.info.Error = ""
+	dialCtx, cancelDial := context.WithCancel(ctx)
+	sess.cancelDial = cancelDial
+	infoSnap := sess.info
+	sess.mu.Unlock()
+
+	if oldCancel != nil {
+		oldCancel()
+	}
+
+	srv, err := m.store.GetServerInternal(serverID)
+	if err != nil {
+		m.failSession(sess, "读取服务器配置失败: "+err.Error())
+		return models.SessionInfo{}, err
+	}
+
+	m.sendTerminalText(sessionID, "\r\n\x1b[38;5;214m↻ 正在重新连接...\x1b[0m\r\n")
+	m.emit("session:status", infoSnap)
+	go m.establishSession(dialCtx, sess, srv, cols, rows)
+	return infoSnap, nil
 }
