@@ -1,8 +1,12 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TransferProgress } from '../types'
 import {
+  createUploadRefreshCoalescer,
   markRunningTransfersInterrupted,
+  normalizeSftpPath,
   pruneTransferMap,
+  shouldIgnoreCwdSync,
+  shouldSkipDuplicateSftpList,
 } from './useSftpState'
 
 function makeTransfer(id: string, status: TransferProgress['status'], error = ''): TransferProgress {
@@ -53,5 +57,57 @@ describe('SFTP transfer pruning & disconnect cleanup', () => {
 
     // No-op when no running transfers remain
     expect(markRunningTransfersInterrupted(updated)).toBe(updated)
+  })
+})
+
+describe('SFTPList dedupe & upload refresh coalescing', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('normalizes paths and deduplicates concurrent SFTPList and session:cwd on connect', () => {
+    expect(normalizeSftpPath('/root/', '/root')).toBe('/root')
+    expect(normalizeSftpPath('', '/root')).toBe('/root')
+    expect(normalizeSftpPath('~', '/home/ubuntu/')).toBe('/home/ubuntu')
+    expect(normalizeSftpPath('/', '/root')).toBe('/')
+
+    // Initial connect loads '/root' while currentPath is still '/'; session:cwd('/root') must be ignored!
+    expect(shouldIgnoreCwdSync('/root', '/', '/root', '/root')).toBe(true)
+    expect(shouldIgnoreCwdSync('/root/', '/', '/root', '/root')).toBe(true)
+    expect(shouldIgnoreCwdSync('/var/log', '/', '/root', '/root')).toBe(false)
+    expect(shouldIgnoreCwdSync('/root', '/root', null, '/root')).toBe(true)
+
+    // Duplicate non-forced SFTPList for the already in-flight path is skipped; force=true bypasses
+    expect(shouldSkipDuplicateSftpList('/root/', '/root', '/root', false)).toBe(true)
+    expect(shouldSkipDuplicateSftpList('/root', '/root', '/root', true)).toBe(false)
+    expect(shouldSkipDuplicateSftpList('/var', '/root', '/root', false)).toBe(false)
+  })
+
+  it('coalesces N upload-done events plus dialog completion into 1 single refresh and supports cancel', () => {
+    const onRefresh = vi.fn()
+    const coalescer = createUploadRefreshCoalescer(150, onRefresh)
+
+    // Simulate 5-file batch upload: 5 sftp:progress done + 1 dialog resolve
+    for (let i = 0; i < 5; i++) {
+      coalescer.schedule('/srv/uploads')
+      vi.advanceTimersByTime(30)
+    }
+    coalescer.schedule('/srv/uploads')
+    expect(onRefresh).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(150)
+    expect(onRefresh).toHaveBeenCalledTimes(1)
+    expect(onRefresh).toHaveBeenCalledWith('/srv/uploads')
+
+    // Navigating away cancels pending upload refresh
+    coalescer.schedule('/srv/uploads')
+    vi.advanceTimersByTime(50)
+    coalescer.cancel()
+    vi.advanceTimersByTime(500)
+    expect(onRefresh).toHaveBeenCalledTimes(1)
   })
 })

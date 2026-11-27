@@ -15,8 +15,10 @@ export interface AutocompleteToggleState {
 
 interface ActionDeps {
   activeNav: SidebarTab
+  activeNavRef?: MutableRefObject<SidebarTab>
   setActiveNav: (tab: SidebarTab) => void
   activeSessionId: string | null
+  activeSessionIdRef?: MutableRefObject<string | null>
   setActiveSessionId: Dispatch<SetStateAction<string | null>>
   sessionsRef: MutableRefObject<SessionInfo[]>
   closedSessionIdsRef: MutableRefObject<Set<string>>
@@ -35,6 +37,10 @@ interface ActionDeps {
 }
 
 export function createSessionActions(d: ActionDeps) {
+  const getActiveNav = () => (d.activeNavRef ? d.activeNavRef.current : d.activeNav)
+  const getActiveSessionId = () => (d.activeSessionIdRef ? d.activeSessionIdRef.current : d.activeSessionId)
+  const getSettings = () => (d.settingsRef ? d.settingsRef.current : d.settings)
+
   const handleConnectServer = async (srv: ServerView) => {
     try {
       d.setActiveNav('servers')
@@ -46,7 +52,7 @@ export function createSessionActions(d: ActionDeps) {
       }
       d.setSessions((prev) => (prev.some((s) => s.sessionId === sess.sessionId) ? prev : [...prev, sess]))
       d.setActiveSessionId(sess.sessionId)
-      if (d.settings.autoOpenSftp) {
+      if (getSettings().autoOpenSftp) {
         d.setSftpOpenBySession((prev) => ({ ...prev, [sess.sessionId]: prev[sess.sessionId] ?? true }))
       }
     } catch (err) {
@@ -140,23 +146,25 @@ export function createSessionActions(d: ActionDeps) {
   }
 
   const fillActiveTerminal = (raw: string): boolean => {
-    if (!d.activeSessionId) {
+    const activeSid = getActiveSessionId()
+    if (!activeSid) {
       d.showToast('请先在左侧连接一台服务器', 'error')
       return false
     }
-    const termAct = d.terminalActionsRef.current.get(d.activeSessionId)
+    const termAct = d.terminalActionsRef.current.get(activeSid)
     if (!termAct) {
       d.showToast('终端尚未就绪，请稍后重试', 'error')
       return false
     }
     const fillText = raw.replace(/[\r\n]+$/, '')
-    if (d.activeNav !== 'servers') d.setActiveNav('servers')
+    if (getActiveNav() !== 'servers') d.setActiveNav('servers')
     if (fillText) termAct.pasteText(fillText)
     return true
   }
 
   const handleRunCommand = async (cmd: string, execute: boolean): Promise<boolean> => {
-    if (!d.activeSessionId) {
+    const activeSid = getActiveSessionId()
+    if (!activeSid) {
       d.showToast('请先在左侧连接一台服务器', 'error')
       return false
     }
@@ -164,9 +172,9 @@ export function createSessionActions(d: ActionDeps) {
       return fillActiveTerminal(cmd)
     }
     try {
-      d.terminalActionsRef.current.get(d.activeSessionId)?.resetInputLine()
-      await api.writeTerminal(d.activeSessionId, !/[\r\n]$/.test(cmd) ? cmd + '\r' : cmd)
-      if (d.activeNav !== 'servers') d.setActiveNav('servers')
+      d.terminalActionsRef.current.get(activeSid)?.resetInputLine()
+      await api.writeTerminal(activeSid, !/[\r\n]$/.test(cmd) ? cmd + '\r' : cmd)
+      if (getActiveNav() !== 'servers') d.setActiveNav('servers')
       return true
     } catch (err) {
       d.showToast(`发送命令失败: ${errMsg(err)}`, 'error')
@@ -175,15 +183,16 @@ export function createSessionActions(d: ActionDeps) {
   }
 
   const handleRunShortcut = async (sc: CommandShortcut, execute: boolean) => {
-    if (!d.activeSessionId) return d.showToast('请先在左侧连接一台服务器', 'error')
+    const activeSid = getActiveSessionId()
+    if (!activeSid) return d.showToast('请先在左侧连接一台服务器', 'error')
     if (!execute) {
       fillActiveTerminal(sc.command)
       return
     }
     try {
-      d.terminalActionsRef.current.get(d.activeSessionId)?.resetInputLine()
-      await api.runShortcut(d.activeSessionId, sc.id, true)
-      if (d.activeNav !== 'servers') d.setActiveNav('servers')
+      d.terminalActionsRef.current.get(activeSid)?.resetInputLine()
+      await api.runShortcut(activeSid, sc.id, true)
+      if (getActiveNav() !== 'servers') d.setActiveNav('servers')
       d.setShortcuts((await api.listShortcuts()) || [])
     } catch (err) {
       d.showToast(errMsg(err), 'error')
