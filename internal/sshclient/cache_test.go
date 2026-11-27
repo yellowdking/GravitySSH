@@ -222,3 +222,29 @@ func TestFindHostFieldSpanUnicodeWhitespaceNoPanic(t *testing.T) {
 		t.Fatalf("unexpected span for unicode-separated @revoked line: ok=%v s=%d e=%d", ok, s, e)
 	}
 }
+
+func TestManagerCacheUsesKnownHostsPath(t *testing.T) {
+	khPath := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(khPath, []byte("10.1.2.3 ssh-ed25519 AAAA1\n10.9.9.9 ssh-ed25519 AAAA2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewManager(nil, nil)
+	mgr.knownHostsPathFn = func() string { return khPath }
+	mgr.sessions["s1"] = &sessionState{
+		info:     models.SessionInfo{SessionID: "s1", Host: "10.1.2.3", Port: 22},
+		dirCache: map[string]dirCacheEntry{"/": {fetchedAt: time.Now()}},
+	}
+
+	info := mgr.GetSSHCacheInfo()
+	if info.KnownHostsPath != khPath || info.KnownHostCount != 2 || info.DirCacheCount != 1 {
+		t.Fatalf("unexpected GetSSHCacheInfo: %+v", info)
+	}
+	res, err := mgr.ClearSSHHostCache("10.1.2.3", 22)
+	if err != nil || res.KnownHostsPath != khPath || res.RemovedKnownHosts != 1 || res.ClearedDirCaches != 1 {
+		t.Fatalf("unexpected ClearSSHHostCache: %+v err=%v", res, err)
+	}
+	allRes, err := mgr.ClearAllSSHCache()
+	if err != nil || allRes.KnownHostsPath != khPath || allRes.RemovedKnownHosts != 1 {
+		t.Fatalf("unexpected ClearAllSSHCache: %+v err=%v", allRes, err)
+	}
+}

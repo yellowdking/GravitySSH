@@ -2,38 +2,54 @@ package vault
 
 import (
 	"fmt"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
+func fillEmptyString(dst *string, fallback string) {
+	if *dst == "" {
+		*dst = fallback
+	}
+}
+
+func preserveZeroTime(dst *time.Time, fallback time.Time) {
+	if dst.IsZero() && !fallback.IsZero() {
+		*dst = fallback
+	}
+}
+
+func remapID(idMap map[string]string, id string) string {
+	if mapped, ok := idMap[id]; ok {
+		return mapped
+	}
+	return id
+}
+
+func recordIDOrNew(id string) string {
+	if strings.TrimSpace(id) == "" {
+		return uuid.NewString()
+	}
+	return id
+}
+
 func (s *Store) mergeSSHKeys(incoming []models.SSHKeyRecord, sum *models.SyncImportSummary) map[string]string {
 	idMap := make(map[string]string, len(incoming))
 	for _, k := range incoming {
 		origID := k.ID
-		if strings.TrimSpace(k.ID) == "" {
-			k.ID = uuid.NewString()
-		}
-		idx := -1
-		for i, cur := range s.data.SSHKeys {
-			if (origID != "" && cur.ID == origID) || (k.Fingerprint != "" && cur.Fingerprint == k.Fingerprint) {
-				idx = i
-				break
-			}
-		}
+		k.ID = recordIDOrNew(k.ID)
+		idx := slices.IndexFunc(s.data.SSHKeys, func(cur models.SSHKeyRecord) bool {
+			return (origID != "" && cur.ID == origID) || (k.Fingerprint != "" && cur.Fingerprint == k.Fingerprint)
+		})
 		if idx >= 0 {
 			local := s.data.SSHKeys[idx]
 			k.ID = local.ID
-			if k.PrivateKeyPEM == "" {
-				k.PrivateKeyPEM = local.PrivateKeyPEM
-			}
-			if k.Passphrase == "" {
-				k.Passphrase = local.Passphrase
-			}
-			if k.CreatedAt.IsZero() && !local.CreatedAt.IsZero() {
-				k.CreatedAt = local.CreatedAt
-			}
+			fillEmptyString(&k.PrivateKeyPEM, local.PrivateKeyPEM)
+			fillEmptyString(&k.Passphrase, local.Passphrase)
+			preserveZeroTime(&k.CreatedAt, local.CreatedAt)
 			s.data.SSHKeys[idx] = k
 			if origID != "" {
 				idMap[origID] = local.ID
@@ -69,39 +85,23 @@ func (s *Store) mergeServers(incoming []models.ServerConfig, keyMap map[string]s
 		if !ok {
 			continue
 		}
-		if mapped, ok := keyMap[srv.SSHKeyID]; ok {
-			srv.SSHKeyID = mapped
-		}
-		if mapped, ok := keyMap[srv.JumpHost.SSHKeyID]; ok {
-			srv.JumpHost.SSHKeyID = mapped
-		}
+		srv.SSHKeyID = remapID(keyMap, srv.SSHKeyID)
+		srv.JumpHost.SSHKeyID = remapID(keyMap, srv.JumpHost.SSHKeyID)
 		ep := serverEndpointKey(srv)
-		idx := -1
-		for j, cur := range s.data.Servers {
-			if (origID != "" && cur.ID == origID) || (srv.Host != "" && serverEndpointKey(cur) == ep) {
-				idx = j
-				break
-			}
-		}
+		idx := slices.IndexFunc(s.data.Servers, func(cur models.ServerConfig) bool {
+			return (origID != "" && cur.ID == origID) || (srv.Host != "" && serverEndpointKey(cur) == ep)
+		})
 		if idx >= 0 {
 			local := s.data.Servers[idx]
 			srv.ID = local.ID
-			if srv.Password == "" && local.Password != "" {
-				srv.Password = local.Password
-			}
-			if srv.Proxy.Password == "" && local.Proxy.Password != "" {
-				srv.Proxy.Password = local.Proxy.Password
-			}
-			if srv.JumpHost.Password == "" && local.JumpHost.Password != "" {
-				srv.JumpHost.Password = local.JumpHost.Password
-			}
+			fillEmptyString(&srv.Password, local.Password)
+			fillEmptyString(&srv.Proxy.Password, local.Proxy.Password)
+			fillEmptyString(&srv.JumpHost.Password, local.JumpHost.Password)
 			if srv.LastConnectedAt == nil && local.LastConnectedAt != nil {
 				t := *local.LastConnectedAt
 				srv.LastConnectedAt = &t
 			}
-			if srv.CreatedAt.IsZero() && !local.CreatedAt.IsZero() {
-				srv.CreatedAt = local.CreatedAt
-			}
+			preserveZeroTime(&srv.CreatedAt, local.CreatedAt)
 			if origID != "" {
 				srvIDMap[origID] = local.ID
 			}
@@ -121,31 +121,23 @@ func (s *Store) mergeServers(incoming []models.ServerConfig, keyMap map[string]s
 	// Only remap JumpHost.ServerID on servers imported in this batch so untouched local servers are never mutated.
 	for _, idx := range importedIndices {
 		if s.data.Servers[idx].JumpHost.Mode == models.JumpServer {
-			if mapped, ok := srvIDMap[s.data.Servers[idx].JumpHost.ServerID]; ok {
-				s.data.Servers[idx].JumpHost.ServerID = mapped
-			}
+			s.data.Servers[idx].JumpHost.ServerID = remapID(srvIDMap, s.data.Servers[idx].JumpHost.ServerID)
 		}
 	}
 }
 
 func (s *Store) mergeShortcuts(incoming []models.CommandShortcut, sum *models.SyncImportSummary) {
 	for _, sc := range sanitizeShortcuts(incoming) {
-		idx := -1
-		for i, cur := range s.data.Shortcuts {
-			if cur.ID == sc.ID || (strings.TrimSpace(cur.Name) == strings.TrimSpace(sc.Name) && strings.TrimSpace(cur.Command) == strings.TrimSpace(sc.Command)) {
-				idx = i
-				break
-			}
-		}
+		idx := slices.IndexFunc(s.data.Shortcuts, func(cur models.CommandShortcut) bool {
+			return cur.ID == sc.ID || (strings.TrimSpace(cur.Name) == strings.TrimSpace(sc.Name) && strings.TrimSpace(cur.Command) == strings.TrimSpace(sc.Command))
+		})
 		if idx >= 0 {
 			local := s.data.Shortcuts[idx]
 			sc.ID = local.ID
 			if sc.UseCount < local.UseCount {
 				sc.UseCount = local.UseCount
 			}
-			if sc.CreatedAt.IsZero() && !local.CreatedAt.IsZero() {
-				sc.CreatedAt = local.CreatedAt
-			}
+			preserveZeroTime(&sc.CreatedAt, local.CreatedAt)
 			s.data.Shortcuts[idx] = sc
 			sum.ShortcutsUpdated++
 		} else {
@@ -160,30 +152,21 @@ func (s *Store) mergeTemplates(incoming []models.BuiltinTemplate, sum *models.Sy
 	for _, tpl := range sanitizeTemplates(incoming) {
 		idx := -1
 		if tpl.PresetID != "" {
-			for i, cur := range s.data.Templates {
-				if cur.PresetID == tpl.PresetID || cur.ID == tpl.PresetID {
-					idx = i
-					break
-				}
-			}
+			idx = slices.IndexFunc(s.data.Templates, func(cur models.BuiltinTemplate) bool {
+				return cur.PresetID == tpl.PresetID || cur.ID == tpl.PresetID
+			})
 		}
 		if idx < 0 {
-			for i, cur := range s.data.Templates {
-				if cur.ID == tpl.ID {
-					idx = i
-					break
-				}
-			}
+			idx = slices.IndexFunc(s.data.Templates, func(cur models.BuiltinTemplate) bool {
+				return cur.ID == tpl.ID
+			})
 		}
 		// Match by Name only between custom templates so a custom template can never hijack a preset (or vice versa).
 		if idx < 0 && tpl.PresetID == "" {
 			name := strings.TrimSpace(tpl.Name)
-			for i, cur := range s.data.Templates {
-				if cur.PresetID == "" && strings.TrimSpace(cur.Name) == name {
-					idx = i
-					break
-				}
-			}
+			idx = slices.IndexFunc(s.data.Templates, func(cur models.BuiltinTemplate) bool {
+				return cur.PresetID == "" && strings.TrimSpace(cur.Name) == name
+			})
 		}
 
 		if idx >= 0 {
@@ -210,45 +193,17 @@ func (s *Store) mergeTemplates(incoming []models.BuiltinTemplate, sum *models.Sy
 func sanitizeKeys(in []models.SSHKeyRecord) []models.SSHKeyRecord {
 	out := make([]models.SSHKeyRecord, 0, len(in))
 	for _, k := range in {
-		if strings.TrimSpace(k.ID) == "" {
-			k.ID = uuid.NewString()
-		}
+		k.ID = recordIDOrNew(k.ID)
 		out = append(out, k)
 	}
 	return out
 }
 
 func sanitizeServer(srv models.ServerConfig, defaultKeepAlive int) (models.ServerConfig, bool) {
-	srv.Host = strings.TrimSpace(srv.Host)
-	if srv.Host == "" {
+	if !normalizeServerConfig(&srv, defaultKeepAlive) {
 		return models.ServerConfig{}, false
 	}
-	srv.Username = strings.TrimSpace(srv.Username)
-	if srv.Username == "" {
-		srv.Username = "root"
-	}
-	srv.Name = strings.TrimSpace(srv.Name)
-	if srv.Name == "" {
-		srv.Name = fmt.Sprintf("%s@%s", srv.Username, srv.Host)
-	}
-	if strings.TrimSpace(srv.ID) == "" {
-		srv.ID = uuid.NewString()
-	}
-	if srv.Port <= 0 || srv.Port > 65535 {
-		srv.Port = 22
-	}
-	if srv.KeepAliveSeconds <= 0 {
-		srv.KeepAliveSeconds = defaultKeepAlive
-	}
-	if srv.TimeoutSeconds <= 0 {
-		srv.TimeoutSeconds = 15
-	}
-	if srv.Proxy.Type == "" {
-		srv.Proxy.Type = models.ProxyNone
-	}
-	if srv.JumpHost.Mode == "" {
-		srv.JumpHost.Mode = models.JumpNone
-	}
+	srv.ID = recordIDOrNew(srv.ID)
 	return srv, true
 }
 
@@ -268,9 +223,7 @@ func sanitizeShortcuts(in []models.CommandShortcut) []models.CommandShortcut {
 		if strings.TrimSpace(sc.Command) == "" {
 			continue
 		}
-		if strings.TrimSpace(sc.ID) == "" {
-			sc.ID = uuid.NewString()
-		}
+		sc.ID = recordIDOrNew(sc.ID)
 		out = append(out, sc)
 	}
 	return out
@@ -284,9 +237,7 @@ func sanitizeTemplates(in []models.BuiltinTemplate) []models.BuiltinTemplate {
 		if strings.TrimSpace(tpl.Name) == "" || strings.TrimSpace(tpl.Command) == "" {
 			continue
 		}
-		if strings.TrimSpace(tpl.ID) == "" {
-			tpl.ID = uuid.NewString()
-		}
+		tpl.ID = recordIDOrNew(tpl.ID)
 		if tpl.PresetID != "" {
 			if !validPresets[tpl.PresetID] || seenPreset[tpl.PresetID] {
 				tpl.PresetID = ""

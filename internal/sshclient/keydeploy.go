@@ -109,15 +109,7 @@ func (m *Manager) deployKeyToOneServer(
 
 	out, runErr := runSSHExec(dialCtx, dialRes.Client, installCmd, 0, true)
 	if runErr != nil {
-		snippet := strings.TrimSpace(string(out))
-		if len(snippet) > 180 {
-			snippet = snippet[len(snippet)-180:]
-		}
-		if snippet != "" {
-			res.Message = fmt.Sprintf("写入公钥失败: %s", snippet)
-		} else {
-			res.Message = fmt.Sprintf("写入公钥失败: %v", runErr)
-		}
+		res.Message = formatExecError("写入公钥失败", out, runErr, 180).Error()
 		return res
 	}
 

@@ -109,17 +109,7 @@ func (r *CommandRecorder) Feed(data []byte) {
 			}
 
 		case 0x17: // Ctrl+W (delete previous word)
-			if r.cursor > 0 {
-				i := r.cursor
-				for i > 0 && r.buf[i-1] == ' ' {
-					i--
-				}
-				for i > 0 && r.buf[i-1] != ' ' {
-					i--
-				}
-				r.buf = append(r.buf[:i], r.buf[r.cursor:]...)
-				r.cursor = i
-			}
+			r.deletePrevWord()
 
 		case 0x01: // Ctrl+A (Home)
 			r.cursor = 0
@@ -133,21 +123,7 @@ func (r *CommandRecorder) Feed(data []byte) {
 
 		default:
 			if rn >= 0x20 {
-				if r.dirtyHist {
-					r.buf = nil
-					r.cursor = 0
-					r.dirtyHist = false
-				}
-				if len(r.buf) < maxRecorderBufRunes {
-					// Insert rune at cursor
-					if r.cursor > len(r.buf) {
-						r.cursor = len(r.buf)
-					}
-					r.buf = append(r.buf, 0)
-					copy(r.buf[r.cursor+1:], r.buf[r.cursor:])
-					r.buf[r.cursor] = rn
-					r.cursor++
-				}
+				r.insertRune(rn)
 			}
 		}
 	}
@@ -158,6 +134,39 @@ func (r *CommandRecorder) Feed(data []byte) {
 			r.onCommand(cmd)
 		}
 	}
+}
+
+func (r *CommandRecorder) deletePrevWord() {
+	if r.cursor <= 0 {
+		return
+	}
+	i := r.cursor
+	for i > 0 && r.buf[i-1] == ' ' {
+		i--
+	}
+	for i > 0 && r.buf[i-1] != ' ' {
+		i--
+	}
+	r.buf = append(r.buf[:i], r.buf[r.cursor:]...)
+	r.cursor = i
+}
+
+func (r *CommandRecorder) insertRune(rn rune) {
+	if r.dirtyHist {
+		r.buf = nil
+		r.cursor = 0
+		r.dirtyHist = false
+	}
+	if len(r.buf) >= maxRecorderBufRunes {
+		return
+	}
+	if r.cursor > len(r.buf) {
+		r.cursor = len(r.buf)
+	}
+	r.buf = append(r.buf, 0)
+	copy(r.buf[r.cursor+1:], r.buf[r.cursor:])
+	r.buf[r.cursor] = rn
+	r.cursor++
 }
 
 func isEscapeSequenceDone(seq string) bool {

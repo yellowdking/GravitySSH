@@ -90,7 +90,7 @@ func Open(filePath string, protector crypto.KeyProtector) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer crypto.ZeroBytes(plain)
+	defer clear(plain)
 
 	var loaded models.VaultData
 	if err := json.Unmarshal(plain, &loaded); err != nil {
@@ -232,7 +232,7 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return fmt.Errorf("marshal vault: %w", err)
 	}
-	defer crypto.ZeroBytes(plain)
+	defer clear(plain)
 
 	var sealed []byte
 	if s.hasPassword {
@@ -366,8 +366,8 @@ func (s *Store) Close() error {
 		err = s.saveLocked()
 	}
 	s.closed = true
-	crypto.ZeroBytes(s.pwKey)
-	crypto.ZeroBytes(s.pwSalt)
+	clear(s.pwKey)
+	clear(s.pwSalt)
 	s.pwKey = nil
 	s.pwSalt = nil
 	return err

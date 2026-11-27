@@ -219,10 +219,12 @@ func (c *countingProtector) Protect(p []byte) ([]byte, error) {
 	c.protectCalls++
 	return append([]byte(nil), p...), nil
 }
-func (c *countingProtector) Unprotect(b []byte) ([]byte, error) { return append([]byte(nil), b...), nil }
-func (c *countingProtector) EngineName() string                 { return "counting-mock" }
-func (c *countingProtector) IsMachineBound() bool               { return false }
-func (c *countingProtector) IsUserBound() bool                  { return false }
+func (c *countingProtector) Unprotect(b []byte) ([]byte, error) {
+	return append([]byte(nil), b...), nil
+}
+func (c *countingProtector) EngineName() string   { return "counting-mock" }
+func (c *countingProtector) IsMachineBound() bool { return false }
+func (c *countingProtector) IsUserBound() bool    { return false }
 
 func TestRecordCommandCoalescingAndCachedPasswordSave(t *testing.T) {
 	cp := &countingProtector{}
@@ -261,5 +263,63 @@ func TestRecordCommandCoalescingAndCachedPasswordSave(t *testing.T) {
 	}
 	if hist := reopened.ListHistory("srv-1", 20); len(hist) != 10 {
 		t.Fatalf("expected 10 persisted history entries, got %d", len(hist))
+	}
+}
+
+func TestMarkServerConnectedAndShortcutUseCoalesceAndBindKey(t *testing.T) {
+	cp := &countingProtector{}
+	vaultPath := filepath.Join(t.TempDir(), "vault.gsv")
+	store, err := Open(vaultPath, cp)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	srv, err := store.SaveServer(models.ServerSaveRequest{Name: "S1", Host: "10.0.0.1", Username: "root", Password: "pw"})
+	if err != nil {
+		t.Fatalf("SaveServer failed: %v", err)
+	}
+	sc, err := store.SaveShortcut(models.CommandShortcut{Name: "Uptime", Command: "uptime"})
+	if err != nil {
+		t.Fatalf("SaveShortcut failed: %v", err)
+	}
+
+	callsBefore := cp.protectCalls
+	store.MarkServerConnected(srv.ID)
+	store.IncrementShortcutUse(sc.ID)
+	store.IncrementShortcutUse(sc.ID)
+	if cp.protectCalls != callsBefore {
+		t.Fatalf("expected MarkServerConnected and IncrementShortcutUse to coalesce instead of immediate disk encryption: before=%d after=%d", callsBefore, cp.protectCalls)
+	}
+
+	if err := store.BindSSHKeyToServer(srv.ID, "key-123"); err != nil {
+		t.Fatalf("BindSSHKeyToServer failed: %v", err)
+	}
+	boundSrv, err := store.GetServerInternal(srv.ID)
+	if err != nil {
+		t.Fatalf("GetServerInternal failed: %v", err)
+	}
+	if boundSrv.SSHKeyID != "key-123" || boundSrv.AuthType != models.AuthBoth || boundSrv.LastConnectedAt == nil {
+		t.Fatalf("unexpected bound server state: %+v", boundSrv)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	reopened, err := Open(vaultPath, cp)
+	if err != nil {
+		t.Fatalf("Reopen failed: %v", err)
+	}
+	defer reopened.Close()
+	gotSrv, err := reopened.GetServerInternal(srv.ID)
+	if err != nil || gotSrv.LastConnectedAt == nil || gotSrv.SSHKeyID != "key-123" {
+		t.Fatalf("persisted server mismatch after coalesce+bind: %+v err=%v", gotSrv, err)
+	}
+	var gotUse int
+	for _, item := range reopened.ListShortcuts() {
+		if item.ID == sc.ID {
+			gotUse = item.UseCount
+		}
+	}
+	if gotUse != 2 {
+		t.Fatalf("expected UseCount=2 persisted, got %d", gotUse)
 	}
 }

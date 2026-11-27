@@ -73,6 +73,51 @@ func (s *Store) GetServerInternal(id string) (*models.ServerConfig, error) {
 	return nil, fmt.Errorf("server not found: %s", id)
 }
 
+func normalizeServerConfig(srv *models.ServerConfig, defaultKeepAlive int) bool {
+	srv.Host = strings.TrimSpace(srv.Host)
+	if srv.Host == "" {
+		return false
+	}
+	srv.Name = strings.TrimSpace(srv.Name)
+	srv.Group = strings.TrimSpace(srv.Group)
+	srv.Username = strings.TrimSpace(srv.Username)
+	if srv.Username == "" {
+		srv.Username = "root"
+	}
+	if srv.Name == "" {
+		srv.Name = fmt.Sprintf("%s@%s", srv.Username, srv.Host)
+	}
+	if srv.Port <= 0 || srv.Port > 65535 {
+		srv.Port = 22
+	}
+	if srv.AuthType == "" {
+		if srv.SSHKeyID != "" {
+			srv.AuthType = models.AuthKey
+		} else {
+			srv.AuthType = models.AuthPassword
+		}
+	}
+	srv.Proxy.Host = strings.TrimSpace(srv.Proxy.Host)
+	srv.Proxy.Username = strings.TrimSpace(srv.Proxy.Username)
+	if srv.Proxy.Type == "" {
+		srv.Proxy.Type = models.ProxyNone
+	}
+	srv.JumpHost.Host = strings.TrimSpace(srv.JumpHost.Host)
+	srv.JumpHost.Username = strings.TrimSpace(srv.JumpHost.Username)
+	if srv.JumpHost.Mode == "" {
+		srv.JumpHost.Mode = models.JumpNone
+	}
+	if srv.TimeoutSeconds <= 0 {
+		srv.TimeoutSeconds = 15
+	}
+	if srv.KeepAliveSeconds <= 0 {
+		srv.KeepAliveSeconds = defaultKeepAlive
+	}
+	srv.DefaultRemotePath = strings.TrimSpace(srv.DefaultRemotePath)
+	srv.StartupCommand = strings.TrimSpace(srv.StartupCommand)
+	return true
+}
+
 func (s *Store) SaveServer(req models.ServerSaveRequest) (models.ServerView, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -80,39 +125,11 @@ func (s *Store) SaveServer(req models.ServerSaveRequest) (models.ServerView, err
 		return models.ServerView{}, errVaultLocked
 	}
 
-	req.Host = strings.TrimSpace(req.Host)
-	req.Username = strings.TrimSpace(req.Username)
-	req.Name = strings.TrimSpace(req.Name)
-	if req.Host == "" {
+	if strings.TrimSpace(req.Host) == "" {
 		return models.ServerView{}, errors.New("服务器地址 (IP / 域名) 不能为空")
 	}
-	if req.Port <= 0 || req.Port > 65535 {
-		req.Port = 22
-	}
-	if req.Username == "" {
-		req.Username = "root"
-	}
-	if req.Name == "" {
-		req.Name = fmt.Sprintf("%s@%s", req.Username, req.Host)
-	}
-	if req.AuthType == "" {
-		if req.SSHKeyID != "" {
-			req.AuthType = models.AuthKey
-		} else {
-			req.AuthType = models.AuthPassword
-		}
-	}
-	if req.Proxy.Type == "" {
-		req.Proxy.Type = models.ProxyNone
-	}
-	if req.JumpHost.Mode == "" {
-		req.JumpHost.Mode = models.JumpNone
-	}
-	if req.TimeoutSeconds <= 0 {
-		req.TimeoutSeconds = 15
-	}
-	if req.KeepAliveSeconds <= 0 {
-		req.KeepAliveSeconds = s.data.Settings.DefaultKeepAliveSeconds
+	if req.JumpHost.Mode == models.JumpServer && req.ID != "" && req.JumpHost.ServerID == req.ID {
+		return models.ServerView{}, errors.New("跳板机不能指向服务器自身")
 	}
 
 	now := time.Now()
@@ -141,14 +158,10 @@ func (s *Store) SaveServer(req models.ServerSaveRequest) (models.ServerView, err
 		jumpPassword = existing.JumpHost.Password
 	}
 
-	if req.JumpHost.Mode == models.JumpServer && req.ID != "" && req.JumpHost.ServerID == req.ID {
-		return models.ServerView{}, errors.New("跳板机不能指向服务器自身")
-	}
-
 	cfg := models.ServerConfig{
 		ID:       req.ID,
 		Name:     req.Name,
-		Group:    strings.TrimSpace(req.Group),
+		Group:    req.Group,
 		Color:    req.Color,
 		Host:     req.Host,
 		Port:     req.Port,
@@ -158,17 +171,17 @@ func (s *Store) SaveServer(req models.ServerSaveRequest) (models.ServerView, err
 		SSHKeyID: req.SSHKeyID,
 		Proxy: models.ProxyConfig{
 			Type:     req.Proxy.Type,
-			Host:     strings.TrimSpace(req.Proxy.Host),
+			Host:     req.Proxy.Host,
 			Port:     req.Proxy.Port,
-			Username: strings.TrimSpace(req.Proxy.Username),
+			Username: req.Proxy.Username,
 			Password: proxyPassword,
 		},
 		JumpHost: models.JumpHostConfig{
 			Mode:         req.JumpHost.Mode,
 			ServerID:     req.JumpHost.ServerID,
-			Host:         strings.TrimSpace(req.JumpHost.Host),
+			Host:         req.JumpHost.Host,
 			Port:         req.JumpHost.Port,
-			Username:     strings.TrimSpace(req.JumpHost.Username),
+			Username:     req.JumpHost.Username,
 			AuthType:     req.JumpHost.AuthType,
 			Password:     jumpPassword,
 			SSHKeyID:     req.JumpHost.SSHKeyID,
@@ -176,11 +189,12 @@ func (s *Store) SaveServer(req models.ServerSaveRequest) (models.ServerView, err
 		},
 		TimeoutSeconds:    req.TimeoutSeconds,
 		KeepAliveSeconds:  req.KeepAliveSeconds,
-		DefaultRemotePath: strings.TrimSpace(req.DefaultRemotePath),
-		StartupCommand:    strings.TrimSpace(req.StartupCommand),
+		DefaultRemotePath: req.DefaultRemotePath,
+		StartupCommand:    req.StartupCommand,
 		Notes:             req.Notes,
 		UpdatedAt:         now,
 	}
+	normalizeServerConfig(&cfg, s.data.Settings.DefaultKeepAliveSeconds)
 
 	snapshot := cloneVaultData(s.data)
 	if idx >= 0 {
@@ -226,6 +240,34 @@ func (s *Store) DeleteServer(id string) error {
 	return nil
 }
 
+// BindSSHKeyToServer attaches keyID to a saved server and switches authType to key/both
+// while preserving any existing passwords.
+func (s *Store) BindSSHKeyToServer(serverID, keyID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.locked {
+		return errors.New("配置文件已锁定")
+	}
+	for i := range s.data.Servers {
+		if s.data.Servers[i].ID == serverID {
+			prev := s.data.Servers[i]
+			s.data.Servers[i].SSHKeyID = keyID
+			if s.data.Servers[i].Password != "" {
+				s.data.Servers[i].AuthType = models.AuthBoth
+			} else {
+				s.data.Servers[i].AuthType = models.AuthKey
+			}
+			s.data.Servers[i].UpdatedAt = time.Now()
+			if err := s.saveLocked(); err != nil {
+				s.data.Servers[i] = prev
+				return err
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("服务器不存在: %s", serverID)
+}
+
 func (s *Store) MarkServerConnected(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -235,11 +277,8 @@ func (s *Store) MarkServerConnected(id string) {
 	now := time.Now()
 	for i := range s.data.Servers {
 		if s.data.Servers[i].ID == id {
-			prev := s.data.Servers[i].LastConnectedAt
 			s.data.Servers[i].LastConnectedAt = &now
-			if err := s.saveLocked(); err != nil {
-				s.data.Servers[i].LastConnectedAt = prev
-			}
+			s.scheduleFlushLocked()
 			return
 		}
 	}

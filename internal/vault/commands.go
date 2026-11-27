@@ -96,11 +96,8 @@ func (s *Store) IncrementShortcutUse(id string) {
 	}
 	for i := range s.data.Shortcuts {
 		if s.data.Shortcuts[i].ID == id {
-			prevCount := s.data.Shortcuts[i].UseCount
 			s.data.Shortcuts[i].UseCount++
-			if err := s.saveLocked(); err != nil {
-				s.data.Shortcuts[i].UseCount = prevCount
-			}
+			s.scheduleFlushLocked()
 			return
 		}
 	}
