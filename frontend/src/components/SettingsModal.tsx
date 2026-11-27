@@ -64,7 +64,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
           <div className="rounded-xl bg-[#0d111a] border border-cyan-500/25 p-3.5 flex items-center justify-between gap-3">
             <div>
-              <div className="text-xs font-semibold text-ag-text">多端零知识同步（Windows / macOS / Linux / Android）</div>
+              <div className="text-xs font-semibold text-ag-text">多端同步</div>
               <p className="text-[11px] text-ag-muted mt-0.5">
                 通过一次性同步码或二维码端到端加密互传 · 当前中继：{settings.syncRelayUrl || '内置默认中继'}
               </p>

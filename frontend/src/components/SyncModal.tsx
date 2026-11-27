@@ -46,8 +46,8 @@ export const SyncModal: React.FC<SyncModalProps> = ({
               <RefreshCw className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-sm font-semibold text-ag-text">多端零知识同步</h2>
-              <p className="text-[11px] text-ag-muted">Windows / macOS / Linux / Android 多端同步 · 端到端加密互传</p>
+              <h2 className="text-sm font-semibold text-ag-text">多端同步</h2>
+              <p className="text-[11px] text-ag-muted">端到端加密配置互传</p>
             </div>
           </div>
           <button type="button" onClick={onClose} aria-label="关闭同步窗口" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text">
