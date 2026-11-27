@@ -23,17 +23,20 @@ func (s *Store) mergeSSHKeys(incoming []models.SSHKeyRecord, sum *models.SyncImp
 			}
 		}
 		if idx >= 0 {
-			localID := s.data.SSHKeys[idx].ID
-			k.ID = localID
+			local := s.data.SSHKeys[idx]
+			k.ID = local.ID
 			if k.PrivateKeyPEM == "" {
-				k.PrivateKeyPEM = s.data.SSHKeys[idx].PrivateKeyPEM
+				k.PrivateKeyPEM = local.PrivateKeyPEM
 			}
 			if k.Passphrase == "" {
-				k.Passphrase = s.data.SSHKeys[idx].Passphrase
+				k.Passphrase = local.Passphrase
+			}
+			if k.CreatedAt.IsZero() && !local.CreatedAt.IsZero() {
+				k.CreatedAt = local.CreatedAt
 			}
 			s.data.SSHKeys[idx] = k
 			if origID != "" {
-				idMap[origID] = localID
+				idMap[origID] = local.ID
 			}
 			sum.KeysUpdated++
 		} else {
@@ -57,43 +60,69 @@ func serverEndpointKey(srv models.ServerConfig) string {
 
 func (s *Store) mergeServers(incoming []models.ServerConfig, keyMap map[string]string, sum *models.SyncImportSummary) {
 	srvIDMap := make(map[string]string, len(incoming))
-	prepared := sanitizeServers(incoming, s.data.Settings.DefaultKeepAliveSeconds)
-	for i := range prepared {
-		if mapped, ok := keyMap[prepared[i].SSHKeyID]; ok {
-			prepared[i].SSHKeyID = mapped
+	importedIndices := make([]int, 0, len(incoming))
+	defaultKeepAlive := s.data.Settings.DefaultKeepAliveSeconds
+
+	for _, rawSrv := range incoming {
+		origID := rawSrv.ID
+		srv, ok := sanitizeServer(rawSrv, defaultKeepAlive)
+		if !ok {
+			continue
 		}
-		if mapped, ok := keyMap[prepared[i].JumpHost.SSHKeyID]; ok {
-			prepared[i].JumpHost.SSHKeyID = mapped
+		if mapped, ok := keyMap[srv.SSHKeyID]; ok {
+			srv.SSHKeyID = mapped
 		}
-		origID := incoming[i].ID
-		ep := serverEndpointKey(prepared[i])
+		if mapped, ok := keyMap[srv.JumpHost.SSHKeyID]; ok {
+			srv.JumpHost.SSHKeyID = mapped
+		}
+		ep := serverEndpointKey(srv)
 		idx := -1
 		for j, cur := range s.data.Servers {
-			if (origID != "" && cur.ID == origID) || (prepared[i].Host != "" && serverEndpointKey(cur) == ep) {
+			if (origID != "" && cur.ID == origID) || (srv.Host != "" && serverEndpointKey(cur) == ep) {
 				idx = j
 				break
 			}
 		}
 		if idx >= 0 {
-			localID := s.data.Servers[idx].ID
-			prepared[i].ID = localID
-			if origID != "" {
-				srvIDMap[origID] = localID
+			local := s.data.Servers[idx]
+			srv.ID = local.ID
+			if srv.Password == "" && local.Password != "" {
+				srv.Password = local.Password
 			}
-			s.data.Servers[idx] = prepared[i]
+			if srv.Proxy.Password == "" && local.Proxy.Password != "" {
+				srv.Proxy.Password = local.Proxy.Password
+			}
+			if srv.JumpHost.Password == "" && local.JumpHost.Password != "" {
+				srv.JumpHost.Password = local.JumpHost.Password
+			}
+			if srv.LastConnectedAt == nil && local.LastConnectedAt != nil {
+				t := *local.LastConnectedAt
+				srv.LastConnectedAt = &t
+			}
+			if srv.CreatedAt.IsZero() && !local.CreatedAt.IsZero() {
+				srv.CreatedAt = local.CreatedAt
+			}
+			if origID != "" {
+				srvIDMap[origID] = local.ID
+			}
+			s.data.Servers[idx] = srv
+			importedIndices = append(importedIndices, idx)
 			sum.ServersUpdated++
 		} else {
 			if origID != "" {
-				srvIDMap[origID] = prepared[i].ID
+				srvIDMap[origID] = srv.ID
 			}
-			s.data.Servers = append(s.data.Servers, prepared[i])
+			s.data.Servers = append(s.data.Servers, srv)
+			importedIndices = append(importedIndices, len(s.data.Servers)-1)
 			sum.ServersAdded++
 		}
 	}
-	for i := range s.data.Servers {
-		if s.data.Servers[i].JumpHost.Mode == models.JumpServer {
-			if mapped, ok := srvIDMap[s.data.Servers[i].JumpHost.ServerID]; ok {
-				s.data.Servers[i].JumpHost.ServerID = mapped
+
+	// Only remap JumpHost.ServerID on servers imported in this batch so untouched local servers are never mutated.
+	for _, idx := range importedIndices {
+		if s.data.Servers[idx].JumpHost.Mode == models.JumpServer {
+			if mapped, ok := srvIDMap[s.data.Servers[idx].JumpHost.ServerID]; ok {
+				s.data.Servers[idx].JumpHost.ServerID = mapped
 			}
 		}
 	}
@@ -109,7 +138,14 @@ func (s *Store) mergeShortcuts(incoming []models.CommandShortcut, sum *models.Sy
 			}
 		}
 		if idx >= 0 {
-			sc.ID = s.data.Shortcuts[idx].ID
+			local := s.data.Shortcuts[idx]
+			sc.ID = local.ID
+			if sc.UseCount < local.UseCount {
+				sc.UseCount = local.UseCount
+			}
+			if sc.CreatedAt.IsZero() && !local.CreatedAt.IsZero() {
+				sc.CreatedAt = local.CreatedAt
+			}
 			s.data.Shortcuts[idx] = sc
 			sum.ShortcutsUpdated++
 		} else {
@@ -120,24 +156,51 @@ func (s *Store) mergeShortcuts(incoming []models.CommandShortcut, sum *models.Sy
 }
 
 func (s *Store) mergeTemplates(incoming []models.BuiltinTemplate, sum *models.SyncImportSummary) {
+	validPresets := builtinPresetIDSet()
 	for _, tpl := range sanitizeTemplates(incoming) {
 		idx := -1
-		for i, cur := range s.data.Templates {
-			if cur.ID == tpl.ID ||
-				(tpl.PresetID != "" && cur.PresetID == tpl.PresetID) ||
-				strings.TrimSpace(cur.Name) == strings.TrimSpace(tpl.Name) {
-				idx = i
-				break
+		if tpl.PresetID != "" {
+			for i, cur := range s.data.Templates {
+				if cur.PresetID == tpl.PresetID || cur.ID == tpl.PresetID {
+					idx = i
+					break
+				}
 			}
 		}
-		if idx >= 0 {
-			tpl.ID = s.data.Templates[idx].ID
-			if tpl.PresetID == "" {
-				tpl.PresetID = s.data.Templates[idx].PresetID
+		if idx < 0 {
+			for i, cur := range s.data.Templates {
+				if cur.ID == tpl.ID {
+					idx = i
+					break
+				}
 			}
+		}
+		// Match by Name only between custom templates so a custom template can never hijack a preset (or vice versa).
+		if idx < 0 && tpl.PresetID == "" {
+			name := strings.TrimSpace(tpl.Name)
+			for i, cur := range s.data.Templates {
+				if cur.PresetID == "" && strings.TrimSpace(cur.Name) == name {
+					idx = i
+					break
+				}
+			}
+		}
+
+		if idx >= 0 {
+			local := s.data.Templates[idx]
+			tpl.ID = local.ID
+			// Always preserve local PresetID so custom templates cannot claim a preset's PresetID
+			// and existing presets never lose their PresetID.
+			tpl.PresetID = local.PresetID
 			s.data.Templates[idx] = tpl
 			sum.TemplatesUpdated++
 		} else {
+			if tpl.PresetID != "" && (!validPresets[tpl.PresetID] || tpl.ID != tpl.PresetID) {
+				tpl.PresetID = ""
+			}
+			if tpl.PresetID == "" && validPresets[tpl.ID] {
+				tpl.ID = uuid.NewString()
+			}
 			s.data.Templates = append(s.data.Templates, tpl)
 			sum.TemplatesAdded++
 		}
@@ -155,28 +218,46 @@ func sanitizeKeys(in []models.SSHKeyRecord) []models.SSHKeyRecord {
 	return out
 }
 
+func sanitizeServer(srv models.ServerConfig, defaultKeepAlive int) (models.ServerConfig, bool) {
+	srv.Host = strings.TrimSpace(srv.Host)
+	if srv.Host == "" {
+		return models.ServerConfig{}, false
+	}
+	srv.Username = strings.TrimSpace(srv.Username)
+	if srv.Username == "" {
+		srv.Username = "root"
+	}
+	srv.Name = strings.TrimSpace(srv.Name)
+	if srv.Name == "" {
+		srv.Name = fmt.Sprintf("%s@%s", srv.Username, srv.Host)
+	}
+	if strings.TrimSpace(srv.ID) == "" {
+		srv.ID = uuid.NewString()
+	}
+	if srv.Port <= 0 || srv.Port > 65535 {
+		srv.Port = 22
+	}
+	if srv.KeepAliveSeconds <= 0 {
+		srv.KeepAliveSeconds = defaultKeepAlive
+	}
+	if srv.TimeoutSeconds <= 0 {
+		srv.TimeoutSeconds = 15
+	}
+	if srv.Proxy.Type == "" {
+		srv.Proxy.Type = models.ProxyNone
+	}
+	if srv.JumpHost.Mode == "" {
+		srv.JumpHost.Mode = models.JumpNone
+	}
+	return srv, true
+}
+
 func sanitizeServers(in []models.ServerConfig, defaultKeepAlive int) []models.ServerConfig {
 	out := make([]models.ServerConfig, 0, len(in))
 	for _, srv := range in {
-		if strings.TrimSpace(srv.ID) == "" {
-			srv.ID = uuid.NewString()
+		if clean, ok := sanitizeServer(srv, defaultKeepAlive); ok {
+			out = append(out, clean)
 		}
-		if srv.Port <= 0 || srv.Port > 65535 {
-			srv.Port = 22
-		}
-		if srv.KeepAliveSeconds <= 0 {
-			srv.KeepAliveSeconds = defaultKeepAlive
-		}
-		if srv.TimeoutSeconds <= 0 {
-			srv.TimeoutSeconds = 15
-		}
-		if srv.Proxy.Type == "" {
-			srv.Proxy.Type = models.ProxyNone
-		}
-		if srv.JumpHost.Mode == "" {
-			srv.JumpHost.Mode = models.JumpNone
-		}
-		out = append(out, srv)
 	}
 	return out
 }
@@ -196,6 +277,8 @@ func sanitizeShortcuts(in []models.CommandShortcut) []models.CommandShortcut {
 }
 
 func sanitizeTemplates(in []models.BuiltinTemplate) []models.BuiltinTemplate {
+	validPresets := builtinPresetIDSet()
+	seenPreset := make(map[string]bool)
 	out := make([]models.BuiltinTemplate, 0, len(in))
 	for _, tpl := range in {
 		if strings.TrimSpace(tpl.Name) == "" || strings.TrimSpace(tpl.Command) == "" {
@@ -203,6 +286,13 @@ func sanitizeTemplates(in []models.BuiltinTemplate) []models.BuiltinTemplate {
 		}
 		if strings.TrimSpace(tpl.ID) == "" {
 			tpl.ID = uuid.NewString()
+		}
+		if tpl.PresetID != "" {
+			if !validPresets[tpl.PresetID] || seenPreset[tpl.PresetID] {
+				tpl.PresetID = ""
+			} else {
+				seenPreset[tpl.PresetID] = true
+			}
 		}
 		out = append(out, tpl)
 	}
