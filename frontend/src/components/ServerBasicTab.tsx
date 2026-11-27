@@ -1,8 +1,6 @@
-import React, { useEffect, useState } from 'react'
+import React from 'react'
 import { AlertCircle, CheckCircle2, Loader2, UploadCloud } from 'lucide-react'
 import type { AuthType, ServerSaveRequest, ServerView, SSHKeyMeta } from '../types'
-import { api } from '../wailsApi'
-import { errMsg } from '../utils/errors'
 import { COLOR_PRESETS } from './serverForm'
 import { NumericInput } from './NumericInput'
 
@@ -10,6 +8,12 @@ interface Props {
   form: ServerSaveRequest
   editingServer: ServerView | null
   sshKeys: SSHKeyMeta[]
+  deploying: boolean
+  deployMsg: { ok: boolean; text: string } | null
+  connectionDirty: boolean
+  disableQuickDeploy: boolean
+  disableKeyVaultLink?: boolean
+  onQuickDeploy: () => void
   onChange: (next: ServerSaveRequest) => void
   onGoToKeyVault: () => void
 }
@@ -20,26 +24,21 @@ const AUTH_OPTIONS: { id: AuthType; label: string }[] = [
   { id: 'both', label: '密钥优先 + 密码备用' },
 ]
 
-export const ServerBasicTab: React.FC<Props> = ({ form, editingServer, sshKeys, onChange, onGoToKeyVault }) => {
-  const [deploying, setDeploying] = useState(false)
-  const [deployMsg, setDeployMsg] = useState<{ ok: boolean; text: string } | null>(null)
+export const ServerBasicTab: React.FC<Props> = ({
+  form,
+  editingServer,
+  sshKeys,
+  deploying,
+  deployMsg,
+  connectionDirty,
+  disableQuickDeploy,
+  disableKeyVaultLink = false,
+  onQuickDeploy,
+  onChange,
+  onGoToKeyVault,
+}) => {
   const patch = (p: Partial<ServerSaveRequest>) => onChange({ ...form, ...p })
-
-  useEffect(() => { setDeployMsg(null) }, [form.sshKeyId, editingServer?.id])
-
-  const handleQuickDeploy = async () => {
-    if (!editingServer || !form.sshKeyId) return
-    setDeploying(true)
-    setDeployMsg(null)
-    try {
-      const [first] = await api.deploySSHKeyToServers(form.sshKeyId, [editingServer.id], false)
-      setDeployMsg(first ? { ok: first.ok, text: first.message } : { ok: true, text: '密钥部署完成' })
-    } catch (err) {
-      setDeployMsg({ ok: false, text: errMsg(err) })
-    } finally {
-      setDeploying(false)
-    }
-  }
+  const hasValidKey = Boolean(form.sshKeyId) && sshKeys.some((k) => k.id === form.sshKeyId)
 
   return (
     <>
@@ -107,27 +106,32 @@ export const ServerBasicTab: React.FC<Props> = ({ form, editingServer, sshKeys, 
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <label className="text-xs text-ag-muted">选择已保存的 SSH 密钥</label>
-            <button type="button" onClick={onGoToKeyVault} className="text-[11px] text-indigo-400 hover:text-indigo-300">+ 去密钥库加载/生成新密钥</button>
+            <button type="button" disabled={disableKeyVaultLink} onClick={onGoToKeyVault} className="text-[11px] text-indigo-400 hover:text-indigo-300 disabled:opacity-40 disabled:cursor-not-allowed">+ 去密钥库加载/生成新密钥</button>
           </div>
           <select className="ag-input" value={form.sshKeyId} onChange={(e) => patch({ sshKeyId: e.target.value })}>
             <option value="">{sshKeys.length === 0 ? '-- 暂无可用 SSH 密钥 --' : '-- 请选择 SSH 密钥 --'}</option>
-            {form.sshKeyId && !sshKeys.some((k) => k.id === form.sshKeyId) && (
+            {form.sshKeyId && !hasValidKey && (
               <option value={form.sshKeyId}>-- 原关联密钥已删除/不可用 --</option>
             )}
             {sshKeys.map((k) => <option key={k.id} value={k.id}>{k.name} ({k.keyType})</option>)}
           </select>
-          {!form.sshKeyId && (form.authType === 'key' || (editingServer && (editingServer.authType === 'key' || editingServer.authType === 'both'))) && (
+          {!hasValidKey && (form.authType === 'key' || Boolean(form.sshKeyId) || (editingServer && (editingServer.authType === 'key' || editingServer.authType === 'both'))) && (
             <p className="text-[11px] text-amber-300/90">
-              尚未关联 SSH 密钥（若原密钥已删除，请重新选择或前往密钥库生成）
+              {form.sshKeyId ? '原关联的 SSH 密钥已删除或不可用，请重新选择或前往密钥库生成' : '尚未关联 SSH 密钥（若原密钥已删除，请重新选择或前往密钥库生成）'}
             </p>
           )}
 
-          {editingServer && form.sshKeyId && (
+          {editingServer && hasValidKey && (
             <div className="space-y-2 pt-0.5">
-              <button type="button" disabled={deploying} onClick={() => void handleQuickDeploy()} className="ag-btn-secondary text-xs py-1.5 px-3">
+              <button type="button" disabled={disableQuickDeploy} onClick={onQuickDeploy} className="ag-btn-secondary text-xs py-1.5 px-3">
                 {deploying ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UploadCloud className="w-3.5 h-3.5 text-indigo-400" />}
                 {deploying ? '正在部署密钥...' : '一键部署该密钥到此服务器'}
               </button>
+              {connectionDirty && (
+                <p className="text-[11px] text-amber-300/90">
+                  连接参数（主机/端口/用户名/密码/代理/跳板机）已修改但尚未保存，请先保存服务器后再部署密钥
+                </p>
+              )}
               {deployMsg && (
                 <div className={`flex items-start gap-2 rounded-lg px-3 py-2 text-xs border ${deployMsg.ok ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-300' : 'bg-rose-500/10 border-rose-500/25 text-rose-300'}`}>
                   {deployMsg.ok ? <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" /> : <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />}

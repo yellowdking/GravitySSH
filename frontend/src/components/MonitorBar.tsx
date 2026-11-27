@@ -48,6 +48,7 @@ export const MonitorBar: React.FC<Props> = ({ sessionId, status, active, enabled
     if (unsupportedSessionRef.current === sessionId) return
 
     let cancelled = false
+    let inFlight = false
     let timer: ReturnType<typeof setTimeout> | null = null
 
     const clearTimer = () => {
@@ -59,7 +60,7 @@ export const MonitorBar: React.FC<Props> = ({ sessionId, status, active, enabled
 
     const schedule = (delayMs: number) => {
       clearTimer()
-      if (cancelled || document.hidden || unsupportedSessionRef.current === sessionId) return
+      if (cancelled || document.hidden || inFlight || unsupportedSessionRef.current === sessionId) return
       timer = setTimeout(() => {
         timer = null
         void poll()
@@ -67,7 +68,8 @@ export const MonitorBar: React.FC<Props> = ({ sessionId, status, active, enabled
     }
 
     const poll = async () => {
-      if (cancelled || document.hidden || unsupportedSessionRef.current === sessionId) return
+      if (cancelled || document.hidden || inFlight || unsupportedSessionRef.current === sessionId) return
+      inFlight = true
       let nextDelay = 3000
       try {
         const res = await api.getSessionMetrics(sessionId)
@@ -81,14 +83,18 @@ export const MonitorBar: React.FC<Props> = ({ sessionId, status, active, enabled
         else if (res.latencyMs >= 250) nextDelay = 4500
       } catch {
         nextDelay = 5000
+      } finally {
+        inFlight = false
       }
-      schedule(nextDelay)
+      if (!cancelled && !document.hidden && unsupportedSessionRef.current !== sessionId) {
+        schedule(nextDelay)
+      }
     }
 
     const onVisibilityChange = () => {
       if (document.hidden) {
         clearTimer()
-      } else if (!cancelled && unsupportedSessionRef.current !== sessionId) {
+      } else if (!cancelled && !inFlight && unsupportedSessionRef.current !== sessionId) {
         schedule(400)
       }
     }

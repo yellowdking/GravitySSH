@@ -17,8 +17,18 @@ export const ServerListItem: React.FC<Props> = ({ server, isLive, onConnect, onE
 
   return (
     <div
+      role="button"
+      tabIndex={0}
+      aria-label={`连接服务器 ${server.name} (${server.username}@${server.host}:${server.port})`}
       onClick={() => onConnect(server)}
-      className="group relative rounded-lg px-2.5 py-2 bg-transparent hover:bg-ag-elevated/90 border border-transparent hover:border-ag-border transition cursor-pointer"
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onConnect(server)
+        }
+      }}
+      className="group relative rounded-lg px-2.5 py-2 bg-transparent hover:bg-ag-elevated/90 border border-transparent hover:border-ag-border focus:outline-none focus-visible:bg-ag-elevated/90 focus-visible:border-indigo-500/50 focus-visible:ring-1 focus-visible:ring-indigo-500/60 transition cursor-pointer"
     >
       <div className="flex items-start justify-between gap-1.5">
         <div className="flex items-start gap-2 min-w-0 flex-1">
@@ -58,23 +68,27 @@ export const ServerListItem: React.FC<Props> = ({ server, isLive, onConnect, onE
           </div>
         </div>
 
-        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition shrink-0">
+        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition shrink-0">
           <button
+            type="button"
             onClick={(e) => {
               e.stopPropagation()
               onEdit(server)
             }}
             title="编辑服务器"
+            aria-label={`编辑服务器 ${server.name}`}
             className="p-1 rounded hover:bg-ag-hover text-ag-muted hover:text-ag-text"
           >
             <Edit3 className="w-3.5 h-3.5" />
           </button>
           <button
+            type="button"
             onClick={(e) => {
               e.stopPropagation()
               onDelete(server)
             }}
             title="删除服务器"
+            aria-label={`删除服务器 ${server.name}`}
             className="p-1 rounded hover:bg-rose-500/20 text-ag-muted hover:text-rose-400"
           >
             <Trash2 className="w-3.5 h-3.5" />

@@ -54,13 +54,18 @@ export const ResizeHandle: React.FC<ResizeHandleProps> = ({
       }
     }
 
+    let finished = false
+
     const teardown = () => {
+      if (finished) return
+      finished = true
       if (rafId) {
         cancelAnimationFrame(rafId)
         rafId = 0
       }
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
+      window.removeEventListener('blur', onUp)
       document.body.style.cursor = prevCursor
       document.body.style.userSelect = prevSelect
       cleanupRef.current = null
@@ -77,6 +82,7 @@ export const ResizeHandle: React.FC<ResizeHandleProps> = ({
     }
 
     const onUp = () => {
+      if (finished) return
       teardown()
       if (pendingWidth !== null) {
         onChange(pendingWidth)
@@ -89,6 +95,7 @@ export const ResizeHandle: React.FC<ResizeHandleProps> = ({
     cleanupRef.current = teardown
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
+    window.addEventListener('blur', onUp)
   }
 
   return (
