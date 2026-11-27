@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   AppSettings,
   CommandRecord,
@@ -16,15 +16,12 @@ import { DEFAULT_TERMINAL_FONT } from '../components/terminalTheme'
 const DEFAULT_SETTINGS: AppSettings = {
   autocompleteEnabled: true,
   autocompleteFromHistory: true,
-  autocompleteFromShortcut: false,
   autoOpenSftp: true,
-  sftpPanelPosition: 'right',
   terminalFontFamily: DEFAULT_TERMINAL_FONT,
   terminalFontSize: 14,
   defaultKeepAliveSeconds: 30,
   maxHistoryEntries: 2000,
   recordCommands: true,
-  language: 'zh',
   monitorBarEnabled: true,
   sftpFollowTerminal: true,
   pasteGuardEnabled: true,
@@ -42,11 +39,14 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
   const [securityInfo, setSecurityInfo] = useState<VaultSecurityInfo | null>(null)
   const [lockState, setLockState] = useState<VaultLockState | null>(null)
-  const [appVersion, setAppVersion] = useState('1.3.3')
+  const [appVersion, setAppVersion] = useState('1.3.4')
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null)
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sftpOpenBySession, setSftpOpenBySession] = useState<Record<string, boolean>>({})
+
+  const autoOpenSftpRef = useRef(settings.autoOpenSftp)
+  autoOpenSftpRef.current = settings.autoOpenSftp
 
   const loadAll = useCallback(async () => {
     try {
@@ -99,7 +99,7 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
         next[idx] = info
         return next
       })
-      if (info.status === 'connected' && info.sftpReady && settings.autoOpenSftp) {
+      if (info.status === 'connected' && info.sftpReady && autoOpenSftpRef.current) {
         setSftpOpenBySession((prev) => ({ ...prev, [info.sessionId]: prev[info.sessionId] ?? true }))
       }
     })
@@ -107,7 +107,7 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
       setHistory((prev) => [rec, ...prev].slice(0, 500))
     })
     return () => { unsubStatus(); unsubCmd() }
-  }, [settings.autoOpenSftp])
+  }, [])
 
   return {
     servers, sshKeys, shortcuts, setShortcuts, history, settings, setSettings,

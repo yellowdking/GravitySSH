@@ -24,6 +24,29 @@ export function useSftpState(
   const currentPathRef = useRef(currentPath)
   currentPathRef.current = currentPath
   const loadSeqRef = useRef(0)
+  const dismissTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
+  const dismissTransfer = useCallback((transferId: string) => {
+    const existing = dismissTimersRef.current.get(transferId)
+    if (existing !== undefined) {
+      clearTimeout(existing)
+      dismissTimersRef.current.delete(transferId)
+    }
+    setTransfers((prev) => {
+      if (!(transferId in prev)) return prev
+      const next = { ...prev }
+      delete next[transferId]
+      return next
+    })
+  }, [])
+
+  useEffect(() => {
+    const timers = dismissTimersRef.current
+    return () => {
+      for (const timer of timers.values()) clearTimeout(timer)
+      timers.clear()
+    }
+  }, [])
 
   const addBusyPath = useCallback((p: string) => {
     setBusyPaths((prev) => {
@@ -90,9 +113,18 @@ export function useSftpState(
       setTransfers((prev) => ({ ...prev, [prog.transferId]: prog }))
       if (prog.status === 'done') {
         if (prog.direction === 'upload') void loadDir(currentPathRef.current, false)
-        setTimeout(() => {
-          setTransfers((p) => { const n = { ...p }; delete n[prog.transferId]; return n })
+        const existing = dismissTimersRef.current.get(prog.transferId)
+        if (existing !== undefined) clearTimeout(existing)
+        const timer = setTimeout(() => {
+          dismissTimersRef.current.delete(prog.transferId)
+          setTransfers((p) => {
+            if (!(prog.transferId in p)) return p
+            const n = { ...p }
+            delete n[prog.transferId]
+            return n
+          })
         }, 3500)
+        dismissTimersRef.current.set(prog.transferId, timer)
       }
     })
   }, [session.sessionId, loadDir])
@@ -128,7 +160,7 @@ export function useSftpState(
 
   return {
     currentPath, pathInput, setPathInput, parentPath, visibleEntries, loading, busyPaths,
-    showHidden, setShowHidden, error, transfers: Object.values(transfers),
+    showHidden, setShowHidden, error, transfers: Object.values(transfers), dismissTransfer,
     editingFile, setEditingFile, savingFile, loadDir, ...actions,
   }
 }

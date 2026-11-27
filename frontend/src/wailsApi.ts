@@ -44,18 +44,15 @@ export const api = {
   connectServer: (serverId: string, cols: number, rows: number) =>
     callGo<SessionInfo>('ConnectServer', serverId, cols, rows),
   disconnectSession: (sessionId: string) => callGo<void>('DisconnectSession', sessionId),
-  listSessions: () => callGo<SessionInfo[]>('ListSessions'),
   writeTerminal: (sessionId: string, data: string) => callGo<void>('WriteTerminal', sessionId, data),
   resizeTerminal: (sessionId: string, cols: number, rows: number) => callGo<void>('ResizeTerminal', sessionId, cols, rows),
   setSessionCwd: (sessionId: string, remotePath: string) => callGo<void>('SetSessionCWD', sessionId, remotePath),
-  getCurrentInputLine: (sessionId: string) => callGo<string>('GetCurrentInputLine', sessionId),
   getSessionMetrics: (sessionId: string) => callGo<HostMetrics>('GetSessionMetrics', sessionId),
   switchTerminalIme: () => callGo<void>('SwitchTerminalIME'),
   listCommandHistory: (serverId: string, limit: number) => callGo<CommandRecord[]>('ListCommandHistory', serverId, limit),
   deleteHistoryEntry: (id: string) => callGo<void>('DeleteHistoryEntry', id),
   clearHistory: (serverId: string) => callGo<void>('ClearHistory', serverId),
   listShortcuts: () => callGo<CommandShortcut[]>('ListShortcuts'),
-  listBuiltinTemplates: () => callGo<BuiltinTemplate[]>('ListBuiltinTemplates'),
   listOpsTemplates: () => callGo<BuiltinTemplate[]>('ListOpsTemplates'),
   saveOpsTemplate: (tpl: Partial<BuiltinTemplate>) => callGo<BuiltinTemplate>('SaveOpsTemplate', tpl),
   deleteOpsTemplate: (id: string) => callGo<void>('DeleteOpsTemplate', id),
@@ -64,7 +61,6 @@ export const api = {
   deleteShortcut: (id: string) => callGo<void>('DeleteShortcut', id),
   runShortcut: (sessionId: string, shortcutId: string, forceExec: boolean) =>
     callGo<void>('RunShortcut', sessionId, shortcutId, forceExec),
-  suggestCommands: (input: string, serverId: string) => callGo<CompletionItem[]>('SuggestCommands', input, serverId),
   suggestCommandsForSession: (input: string, serverId: string, sessionId: string) =>
     callGo<CompletionItem[]>('SuggestCommandsForSession', input, serverId, sessionId),
   getSettings: () => callGo<AppSettings>('GetSettings'),

@@ -79,7 +79,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
           <div className="flex items-center gap-2">
             <History className="w-4 h-4 text-emerald-400" />
             <span className="text-sm font-semibold text-ag-text">操作命令记录</span>
-            <span className="text-[11px] px-1.5 py-0.2 rounded bg-ag-elevated text-ag-muted">{filtered.length}</span>
+            <span className="text-[11px] px-1.5 py-0.5 rounded bg-ag-elevated text-ag-muted">{filtered.length}</span>
           </div>
           {filtered.length > 0 && <button onClick={handleClear} className="text-[11px] text-ag-subtle hover:text-rose-400 transition">清空记录</button>}
         </div>
