@@ -45,14 +45,19 @@ type Client struct {
 }
 
 // NewClient builds a sync relay client using SPKI pinning for the default relay
-// (or any custom relay with an explicit `#spki=<64-hex>` pin), TLS 1.3 SAN+TOFU
-// pinning for custom raw IP relays, and system CA verification for domains.
+// (or any custom relay with explicit `#spki=<64-hex>[,<64-hex>]` pins and optional `#gate=<64-hex>`),
+// TLS 1.3 SAN+TOFU pinning for custom raw IP relays, and system CA verification for domains.
 func NewClient(relayURL string) (*Client, error) {
-	cleanURL, mode, pin, err := NormalizeRelayURLWithPin(relayURL)
+	cfg, err := NormalizeRelayConfig(relayURL)
 	if err != nil {
 		return nil, err
 	}
-	return NewClientWithMode(cleanURL, AppGateKey, pin, mode)
+	return NewClientWithPins(cfg.URL, cfg.EffectiveGateKey(), cfg.SPKIPins, cfg.TLSMode)
+}
+
+// NewClientWithPins creates a client with explicit credentials, multi-pin SPKI list, and TLS mode.
+func NewClientWithPins(relayURL, appGateKey string, spkiPins []string, mode RelayTLSMode) (*Client, error) {
+	return NewClientWithMode(relayURL, appGateKey, strings.Join(spkiPins, ","), mode)
 }
 
 // NewClientWithMode creates a client with explicit credentials and TLS mode.
@@ -113,6 +118,7 @@ func (c *Client) postJSON(ctx context.Context, path string, reqBody any) (int, [
 	ts := strconv.FormatInt(c.nowFn().UTC().Unix(), 10)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-GSSH-Client", ClientHeaderValue)
+	req.Header.Set(WireProtocolHeader, strconv.Itoa(WireProtocolVersion))
 	req.Header.Set("X-GSSH-TS", ts)
 	req.Header.Set("X-GSSH-Sig", SignRequest(c.appGateKey, http.MethodPost, path, ts, raw))
 
@@ -128,7 +134,61 @@ func (c *Client) postJSON(ctx context.Context, path string, reqBody any) (int, [
 	if len(body) > maxResponseBodyBytes {
 		return resp.StatusCode, nil, errors.New("同步中继响应体积超过安全上限（4 MiB）")
 	}
+	if err := validateRelayProtoResponse(resp.StatusCode, resp.Header, body); err != nil {
+		return resp.StatusCode, body, err
+	}
 	return resp.StatusCode, body, nil
+}
+
+func validateRelayProtoResponse(statusCode int, hdr http.Header, body []byte) error {
+	minH := strings.TrimSpace(hdr.Get(WireProtocolMinHeader))
+	maxH := strings.TrimSpace(hdr.Get(WireProtocolMaxHeader))
+	if statusCode == http.StatusUpgradeRequired {
+		var payload struct {
+			MinVersion int `json:"minVersion"`
+			MaxVersion int `json:"maxVersion"`
+		}
+		_ = json.Unmarshal(body, &payload)
+		srvMin, srvMax := payload.MinVersion, payload.MaxVersion
+		if srvMin <= 0 && minH != "" {
+			if v, err := strconv.Atoi(minH); err == nil {
+				srvMin = v
+			}
+		}
+		if srvMax <= 0 && maxH != "" {
+			if v, err := strconv.Atoi(maxH); err == nil {
+				srvMax = v
+			}
+		}
+		if srvMin > 0 && srvMax >= srvMin {
+			return fmt.Errorf("同步协议版本不兼容（客户端支持 %d-%d，中继要求 %d-%d），请升级客户端或中继",
+				WireProtocolMinVersion, WireProtocolMaxVersion, srvMin, srvMax)
+		}
+		return fmt.Errorf("同步协议版本不兼容（HTTP 426），请升级 GravitySSH 客户端或同步中继")
+	}
+	if statusCode == http.StatusOK && (minH != "" || maxH != "") {
+		srvMin := WireProtocolMinVersion
+		srvMax := WireProtocolMaxVersion
+		if minH != "" {
+			v, err := strconv.Atoi(minH)
+			if err != nil || v <= 0 {
+				return fmt.Errorf("中继返回了无效的协议版本范围（%s=%q）", WireProtocolMinHeader, minH)
+			}
+			srvMin = v
+		}
+		if maxH != "" {
+			v, err := strconv.Atoi(maxH)
+			if err != nil || v <= 0 {
+				return fmt.Errorf("中继返回了无效的协议版本范围（%s=%q）", WireProtocolMaxHeader, maxH)
+			}
+			srvMax = v
+		}
+		if srvMin > srvMax || srvMax < WireProtocolMinVersion || srvMin > WireProtocolMaxVersion {
+			return fmt.Errorf("同步协议版本不兼容（客户端支持 %d-%d，中继支持 %d-%d），请升级客户端或中继",
+				WireProtocolMinVersion, WireProtocolMaxVersion, srvMin, srvMax)
+		}
+	}
+	return nil
 }
 
 func (c *Client) parseExpiresResponse(body []byte, ttlSeconds int, errMsg string) (time.Time, error) {

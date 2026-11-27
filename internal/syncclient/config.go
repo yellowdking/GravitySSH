@@ -18,8 +18,22 @@ const (
 	ClientHeaderValue = "GravitySSH/1"
 	// DefaultTTLSeconds is the default 5-minute ephemeral drop lifetime.
 	DefaultTTLSeconds = 300
-	// ProtocolVersion is the SyncBundle schemaVersion supported by gssh-sync-v2.
+	// ProtocolVersion is the emitted SyncBundle schemaVersion for cross-platform compatibility.
 	ProtocolVersion = 1
+	// MinBundleSchemaVersion and MaxBundleSchemaVersion define the accepted SyncBundle schema range.
+	MinBundleSchemaVersion = 1
+	MaxBundleSchemaVersion = 2
+	// WireProtocolMinVersion / WireProtocolMaxVersion define the compatible relay HTTP wire protocol range.
+	WireProtocolMinVersion = 1
+	WireProtocolMaxVersion = 2
+	// WireProtocolVersion is the preferred relay wire protocol advertised via X-GSSH-Proto.
+	WireProtocolVersion = 2
+	// WireProtocolHeader and server-advertised range headers for relay protocol negotiation.
+	WireProtocolHeader    = "X-GSSH-Proto"
+	WireProtocolMinHeader = "X-GSSH-Proto-Min"
+	WireProtocolMaxHeader = "X-GSSH-Proto-Max"
+	// maxSPKIPinsPerRelay bounds explicit comma-separated SPKI pins in #spki=.
+	maxSPKIPinsPerRelay = 8
 )
 
 // RelayTLSMode controls TLS certificate verification for the sync relay.
@@ -35,11 +49,105 @@ const (
 	RelayTLSModeSystemCA
 )
 
-// PinnedSPKISHA256 and AppGateKey are populated from the deployed relay config.
+// PinnedSPKISHA256, DefaultRelaySPKIPins, and AppGateKey are populated from the deployed relay config.
 var (
-	PinnedSPKISHA256 = "ca1a5f441de4962b6269449325ded3a284a0a8a9d8fd3d995ffcb218c8eb7575"
-	AppGateKey       = "fb6f39e339dffe1141537e5e8154491cce0044c7bc2ecb26b17828571b9d5aae"
+	PinnedSPKISHA256     = "ca1a5f441de4962b6269449325ded3a284a0a8a9d8fd3d995ffcb218c8eb7575"
+	DefaultRelaySPKIPins = []string{PinnedSPKISHA256}
+	AppGateKey           = "fb6f39e339dffe1141537e5e8154491cce0044c7bc2ecb26b17828571b9d5aae"
 )
+
+// RelayConfig holds normalized connection, TLS pinning, and optional App Gate override settings.
+type RelayConfig struct {
+	URL        string
+	TLSMode    RelayTLSMode
+	SPKIPins   []string
+	AppGateKey string
+}
+
+// EffectiveGateKey returns the custom #gate= key when set, or the built-in AppGateKey.
+func (c RelayConfig) EffectiveGateKey() string {
+	if strings.TrimSpace(c.AppGateKey) != "" {
+		return c.AppGateKey
+	}
+	return AppGateKey
+}
+
+func defaultRelaySPKIPins() []string {
+	if len(DefaultRelaySPKIPins) > 0 {
+		if pins, err := ParseSPKIPinList(strings.Join(DefaultRelaySPKIPins, ",")); err == nil && len(pins) > 0 {
+			return pins
+		}
+	}
+	if pin := strings.ToLower(strings.TrimSpace(PinnedSPKISHA256)); pin != "" {
+		return []string{pin}
+	}
+	return nil
+}
+
+// ParseSPKIPinList parses a comma-separated list of 64-char hex SPKI SHA-256 pins
+// (optionally prefixed with "sha256:"), deduplicating while preserving order.
+func ParseSPKIPinList(raw string) ([]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, errors.New("内置中继 SPKI 指纹未配置")
+	}
+	parts := strings.Split(trimmed, ",")
+	if len(parts) > maxSPKIPinsPerRelay {
+		return nil, errors.New("中继 SPKI 指纹数量超出上限（最多 8 个）")
+	}
+	pins := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, item := range parts {
+		pin := strings.ToLower(strings.TrimSpace(item))
+		pin = strings.TrimPrefix(pin, "sha256:")
+		if len(pin) != 64 {
+			return nil, errors.New("中继 SPKI 指纹格式无效（应为 64 位 SHA-256 十六进制字符串）")
+		}
+		if _, err := hex.DecodeString(pin); err != nil {
+			return nil, errors.New("中继 SPKI 指纹格式无效（应为 64 位 SHA-256 十六进制字符串）")
+		}
+		if _, dup := seen[pin]; !dup {
+			seen[pin] = struct{}{}
+			pins = append(pins, pin)
+		}
+	}
+	if len(pins) == 0 {
+		return nil, errors.New("中继 SPKI 指纹格式无效（应为 64 位 SHA-256 十六进制字符串）")
+	}
+	return pins, nil
+}
+
+func parseRelayFragment(frag string) (pins []string, gateKey string, err error) {
+	trimmed := strings.TrimSpace(frag)
+	if trimmed == "" {
+		return nil, "", nil
+	}
+	for _, part := range strings.Split(trimmed, "&") {
+		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			continue
+		}
+		key := strings.TrimSpace(k)
+		switch {
+		case strings.EqualFold(key, "spki"):
+			parsedPins, pErr := ParseSPKIPinList(v)
+			if pErr != nil {
+				return nil, "", pErr
+			}
+			pins = parsedPins
+		case strings.EqualFold(key, "gate"):
+			g := strings.ToLower(strings.TrimSpace(v))
+			if len(g) != 64 {
+				return nil, "", errors.New("自定义中继 App Gate 密钥格式无效（应为 64 位十六进制字符串）")
+			}
+			if _, dErr := hex.DecodeString(g); dErr != nil {
+				return nil, "", errors.New("自定义中继 App Gate 密钥格式无效（应为 64 位十六进制字符串）")
+			}
+			gateKey = g
+		}
+	}
+	return pins, gateKey, nil
+}
 
 // IsRawIPHost reports whether rawURL or host[:port] targets a literal IPv4/IPv6 address.
 func IsRawIPHost(rawURL string) bool {
@@ -62,77 +170,49 @@ func IsRawIPHost(rawURL string) bool {
 	return net.ParseIP(host) != nil
 }
 
-func parseExplicitSPKIFragment(frag string) (string, error) {
-	trimmed := strings.TrimSpace(frag)
-	if trimmed == "" {
-		return "", nil
-	}
-	for _, part := range strings.Split(trimmed, "&") {
-		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if !ok {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(k), "spki") {
-			pin := strings.ToLower(strings.TrimSpace(v))
-			pin = strings.TrimPrefix(pin, "sha256:")
-			if len(pin) != 64 {
-				return "", errors.New("中继 SPKI 指纹格式无效（应为 64 位 SHA-256 十六进制字符串）")
-			}
-			if _, err := hex.DecodeString(pin); err != nil {
-				return "", errors.New("中继 SPKI 指纹格式无效（应为 64 位 SHA-256 十六进制字符串）")
-			}
-			return pin, nil
-		}
-	}
-	return "", nil
-}
-
-// NormalizeRelayURL validates and normalizes a relay URL or bare host:port / IP:port.
-// Plain http:// is rejected; bare addresses automatically receive https://.
-func NormalizeRelayURL(raw string) (string, RelayTLSMode, error) {
-	cleanURL, mode, _, err := NormalizeRelayURLWithPin(raw)
-	return cleanURL, mode, err
-}
-
-// NormalizeRelayURLWithPin validates and normalizes a relay URL and extracts any
-// explicit SPKI SHA-256 pin from a `#spki=<64-hex>` URL fragment.
-func NormalizeRelayURLWithPin(raw string) (string, RelayTLSMode, string, error) {
+// NormalizeRelayConfig validates and normalizes a relay URL or bare host:port / IP:port,
+// extracting optional `#spki=<pin1>,<pin2>` and `#gate=<64-hex>` fragments.
+func NormalizeRelayConfig(raw string) (RelayConfig, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return DefaultRelayURL, RelayTLSModePinned, PinnedSPKISHA256, nil
+		return RelayConfig{
+			URL:      DefaultRelayURL,
+			TLSMode:  RelayTLSModePinned,
+			SPKIPins: defaultRelaySPKIPins(),
+		}, nil
 	}
 	lower := strings.ToLower(trimmed)
 	if strings.HasPrefix(lower, "http://") {
-		return "", 0, "", errors.New("中继服务器仅支持 HTTPS（TLS 1.3），不支持明文 http://")
+		return RelayConfig{}, errors.New("中继服务器仅支持 HTTPS（TLS 1.3），不支持明文 http://")
 	}
 	if !strings.Contains(trimmed, "://") {
 		trimmed = "https://" + trimmed
 	}
 	u, err := url.Parse(trimmed)
 	if err != nil {
-		return "", 0, "", errors.New("中继服务器地址格式无效")
+		return RelayConfig{}, errors.New("中继服务器地址格式无效")
 	}
 	if !strings.EqualFold(u.Scheme, "https") || u.Host == "" || u.Hostname() == "" {
-		return "", 0, "", errors.New("中继服务器地址必须使用有效的 HTTPS 地址或 IP:端口")
+		return RelayConfig{}, errors.New("中继服务器地址必须使用有效的 HTTPS 地址或 IP:端口")
 	}
 	if u.User != nil {
-		return "", 0, "", errors.New("中继服务器地址不支持包含用户名或密码")
+		return RelayConfig{}, errors.New("中继服务器地址不支持包含用户名或密码")
 	}
 	if strings.ContainsAny(u.Host, " \t\r\n") {
-		return "", 0, "", errors.New("中继服务器地址包含无效空格")
+		return RelayConfig{}, errors.New("中继服务器地址包含无效空格")
 	}
 	if strings.HasSuffix(u.Host, ":") {
-		return "", 0, "", errors.New("中继服务器端口号无效（范围应为 1-65535）")
+		return RelayConfig{}, errors.New("中继服务器端口号无效（范围应为 1-65535）")
 	}
 	if portStr := u.Port(); portStr != "" {
 		portNum, err := strconv.Atoi(portStr)
 		if err != nil || portNum < 1 || portNum > 65535 {
-			return "", 0, "", errors.New("中继服务器端口号无效（范围应为 1-65535）")
+			return RelayConfig{}, errors.New("中继服务器端口号无效（范围应为 1-65535）")
 		}
 	}
-	explicitPin, err := parseExplicitSPKIFragment(u.Fragment)
+	explicitPins, customGate, err := parseRelayFragment(u.Fragment)
 	if err != nil {
-		return "", 0, "", err
+		return RelayConfig{}, err
 	}
 
 	u.Scheme = "https"
@@ -140,15 +220,53 @@ func NormalizeRelayURLWithPin(raw string) (string, RelayTLSMode, string, error) 
 	u.RawQuery = ""
 	u.Fragment = ""
 
-	if explicitPin != "" {
-		return u.String(), RelayTLSModePinned, explicitPin, nil
+	if len(explicitPins) > 0 {
+		return RelayConfig{
+			URL:        u.String(),
+			TLSMode:    RelayTLSModePinned,
+			SPKIPins:   explicitPins,
+			AppGateKey: customGate,
+		}, nil
 	}
 	switch {
 	case strings.EqualFold(u.Host, DefaultRelayHost):
-		return u.String(), RelayTLSModePinned, PinnedSPKISHA256, nil
+		return RelayConfig{
+			URL:        u.String(),
+			TLSMode:    RelayTLSModePinned,
+			SPKIPins:   defaultRelaySPKIPins(),
+			AppGateKey: customGate,
+		}, nil
 	case IsRawIPHost(u.Host):
-		return u.String(), RelayTLSModeSelfSignedIP, "", nil
+		return RelayConfig{
+			URL:        u.String(),
+			TLSMode:    RelayTLSModeSelfSignedIP,
+			AppGateKey: customGate,
+		}, nil
 	default:
-		return u.String(), RelayTLSModeSystemCA, "", nil
+		return RelayConfig{
+			URL:        u.String(),
+			TLSMode:    RelayTLSModeSystemCA,
+			AppGateKey: customGate,
+		}, nil
 	}
+}
+
+// NormalizeRelayURL validates and normalizes a relay URL or bare host:port / IP:port.
+// Plain http:// is rejected; bare addresses automatically receive https://.
+func NormalizeRelayURL(raw string) (string, RelayTLSMode, error) {
+	cfg, err := NormalizeRelayConfig(raw)
+	if err != nil {
+		return "", 0, err
+	}
+	return cfg.URL, cfg.TLSMode, nil
+}
+
+// NormalizeRelayURLWithPin validates and normalizes a relay URL and extracts any
+// explicit SPKI SHA-256 pin(s) from a `#spki=<64-hex>[,<64-hex>...]` URL fragment.
+func NormalizeRelayURLWithPin(raw string) (string, RelayTLSMode, string, error) {
+	cfg, err := NormalizeRelayConfig(raw)
+	if err != nil {
+		return "", 0, "", err
+	}
+	return cfg.URL, cfg.TLSMode, strings.Join(cfg.SPKIPins, ","), nil
 }
