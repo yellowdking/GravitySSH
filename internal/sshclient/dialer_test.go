@@ -2,6 +2,9 @@ package sshclient
 
 import (
 	"context"
+	"net"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -9,7 +12,17 @@ import (
 	"github.com/yellowdking/GravitySSH/internal/sshkey"
 )
 
+func useTempKnownHosts(t *testing.T) string {
+	t.Helper()
+	khPath := filepath.Join(t.TempDir(), ".ssh", "known_hosts")
+	prev := knownHostsPathFunc
+	knownHostsPathFunc = func() string { return khPath }
+	t.Cleanup(func() { knownHostsPathFunc = prev })
+	return khPath
+}
+
 func TestDialServerViaHTTPProxyAndJumpHost(t *testing.T) {
+	khPath := useTempKnownHosts(t)
 	targetKeyPEM, targetKeyInfo, err := sshkey.GenerateKeyPair("ed25519", "target", "")
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
@@ -79,6 +92,56 @@ func TestDialServerViaHTTPProxyAndJumpHost(t *testing.T) {
 	}
 	if len(res.JumpClients) != 1 {
 		t.Fatalf("expected 1 jump client, got %d", len(res.JumpClients))
+	}
+	if CountKnownHosts(khPath) != 2 {
+		t.Fatalf("expected TOFU to record both jump and target host keys, got %d", CountKnownHosts(khPath))
+	}
+}
+
+func TestTOFUHostKeyVerificationAcceptsFirstAndRejectsMismatch(t *testing.T) {
+	khPath := useTempKnownHosts(t)
+
+	host, port, stop1 := startTestSSHServer(t, "u", "p", nil)
+	cfg := &models.ServerConfig{
+		ID: "s1", Name: "Node1", Host: host, Port: port,
+		Username: "u", AuthType: models.AuthPassword, Password: "p", TimeoutSeconds: 5,
+	}
+
+	// 1. First connection records host key via TOFU.
+	res1, err := DialServer(context.Background(), cfg, &memResolver{})
+	if err != nil {
+		stop1()
+		t.Fatalf("first TOFU dial failed: %v", err)
+	}
+	res1.Close()
+
+	// 2. Second connection to same server succeeds.
+	res2, err := DialServer(context.Background(), cfg, &memResolver{})
+	if err != nil {
+		stop1()
+		t.Fatalf("second dial to known host failed: %v", err)
+	}
+	res2.Close()
+	stop1()
+
+	// 3. Simulate server reinstall with a different host key at the same address.
+	_, newKeyInfo, err := sshkey.GenerateKeyPair("ed25519", "reinstalled", "")
+	if err != nil {
+		t.Fatalf("gen new key: %v", err)
+	}
+	cb := tofuHostKeyCallback(khPath)
+	hostPort := net.JoinHostPort(host, strconv.Itoa(port))
+	err = cb(hostPort, nil, newKeyInfo.Signer.PublicKey())
+	if err == nil || !strings.Contains(err.Error(), "SSH 缓存") {
+		t.Fatalf("expected Chinese mismatch error mentioning SSH 缓存, got: %v", err)
+	}
+
+	// 4. Clearing the host from known_hosts allows TOFU to accept the new key.
+	if _, err := ClearKnownHostsHost(khPath, host, port); err != nil {
+		t.Fatalf("ClearKnownHostsHost failed: %v", err)
+	}
+	if err := cb(hostPort, nil, newKeyInfo.Signer.PublicKey()); err != nil {
+		t.Fatalf("expected TOFU accept after clearing cache, got: %v", err)
 	}
 }
 

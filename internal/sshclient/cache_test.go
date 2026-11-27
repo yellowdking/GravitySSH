@@ -203,3 +203,22 @@ func TestSSHCacheManagerDirCacheAndMetricsReset(t *testing.T) {
 		t.Fatalf("cleared all remaining = %d, want 1", cleared)
 	}
 }
+
+func TestFindHostFieldSpanUnicodeWhitespaceNoPanic(t *testing.T) {
+	for _, line := range []string{
+		"\u00a0",
+		"\u3000\u00a0",
+		"\v\f",
+		"@revoked\u00a0",
+		"@cert-authority   \v",
+		"  \u00a0# comment",
+	} {
+		if _, _, ok := findHostFieldSpan(line); ok {
+			t.Fatalf("expected ok=false for %q", line)
+		}
+	}
+	s, e, ok := findHostFieldSpan("@revoked\u00a010.0.0.1\u00a0ssh-ed25519 AAAA")
+	if !ok || "@revoked\u00a010.0.0.1\u00a0ssh-ed25519 AAAA"[s:e] != "10.0.0.1" {
+		t.Fatalf("unexpected span for unicode-separated @revoked line: ok=%v s=%d e=%d", ok, s, e)
+	}
+}

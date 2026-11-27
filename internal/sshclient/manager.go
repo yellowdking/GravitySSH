@@ -37,14 +37,14 @@ type netSample struct {
 }
 
 type sessionState struct {
-	mu           sync.Mutex
-	writeMu      sync.Mutex
-	info         models.SessionInfo
-	appCtx       context.Context
-	dialRes      *DialResult
-	sshSession   *ssh.Session
-	stdin        io.WriteCloser
-	sftpClient   *sftp.Client
+	mu               sync.Mutex
+	writeMu          sync.Mutex
+	info             models.SessionInfo
+	cancelDial       context.CancelFunc
+	dialRes          *DialResult
+	sshSession       *ssh.Session
+	stdin            io.WriteCloser
+	sftpClient       *sftp.Client
 	recorder         *CommandRecorder
 	stopCh           chan struct{}
 	closed           bool
@@ -53,6 +53,7 @@ type sessionState struct {
 	lastRows         int
 	currentDir       string
 	dirCache         map[string]dirCacheEntry
+	dirCacheGen      uint64
 	prevCPU          *cpuSample
 	prevNet          *netSample
 	prevSampleAt     time.Time
@@ -178,6 +179,7 @@ func (m *Manager) Connect(ctx context.Context, serverID string, cols, rows int) 
 	}
 
 	sessionID := uuid.NewString()
+	dialCtx, cancelDial := context.WithCancel(ctx)
 	sess := &sessionState{
 		info: models.SessionInfo{
 			SessionID:  sessionID,
@@ -189,11 +191,11 @@ func (m *Manager) Connect(ctx context.Context, serverID string, cols, rows int) 
 			Status:     "connecting",
 			CreatedAt:  time.Now(),
 		},
-		appCtx:   ctx,
-		stopCh:   make(chan struct{}),
-		lastCols: cols,
-		lastRows: rows,
-		dirCache: make(map[string]dirCacheEntry),
+		cancelDial: cancelDial,
+		stopCh:     make(chan struct{}),
+		lastCols:   cols,
+		lastRows:   rows,
+		dirCache:   make(map[string]dirCacheEntry),
 	}
 
 	sess.recorder = NewCommandRecorder(func(cmd string) {
@@ -204,11 +206,12 @@ func (m *Manager) Connect(ctx context.Context, serverID string, cols, rows int) 
 		}
 	})
 
+	infoSnap := sess.info
 	m.mu.Lock()
 	m.sessions[sessionID] = sess
 	m.mu.Unlock()
-	m.emit("session:status", sess.info)
+	m.emit("session:status", infoSnap)
 
-	go m.establishSession(ctx, sess, srv, cols, rows)
-	return sess.info, nil
+	go m.establishSession(dialCtx, sess, srv, cols, rows)
+	return infoSnap, nil
 }

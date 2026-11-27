@@ -64,4 +64,19 @@ MemAvailable: 2097152
 	if unsupported.Supported {
 		t.Fatal("expected UNSUPPORTED output to set Supported=false")
 	}
+
+	// Guard uint64 underflow when curCPU.idle < prevCPU.idle and preserve spaces in disk mountpaths.
+	prev := &cpuSample{total: 1000, idle: 500}
+	spaceDiskAndIdleDrop := `---CPU---
+cpu  700 0 400 400 0 0 0 0
+---DISK---
+91% /mnt/My External Drive
+`
+	m3, _, _ := parseMetricsOutput("s3", spaceDiskAndIdleDrop, 15, prev, nil, t1, t2)
+	if math.Abs(m3.CPUPercent-100.0) > 0.1 {
+		t.Fatalf("expected 100%% CPU when idle decreased (no uint64 underflow), got %.2f", m3.CPUPercent)
+	}
+	if m3.DiskMount != "/mnt/My External Drive" || m3.DiskPercent != 91 {
+		t.Fatalf("expected disk mount with spaces preserved, got mount=%q pct=%.1f", m3.DiskMount, m3.DiskPercent)
+	}
 }

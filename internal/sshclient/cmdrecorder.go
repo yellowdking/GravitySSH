@@ -6,16 +6,21 @@ import (
 	"unicode/utf8"
 )
 
+const (
+	maxRecorderBufRunes = 8 * 1024
+	maxRecorderEscLen   = 64
+)
+
 // CommandRecorder tracks keystrokes typed into an interactive PTY terminal
 // and reconstructs executed commands cleanly for history recording & autocomplete.
 type CommandRecorder struct {
-	mu          sync.Mutex
-	buf         []rune
-	cursor      int
-	inEsc       bool
-	escSeq      strings.Builder
-	dirtyHist   bool // set when user uses Up/Down shell history so we don't log malformed partials
-	onCommand   func(cmd string)
+	mu        sync.Mutex
+	buf       []rune
+	cursor    int
+	inEsc     bool
+	escSeq    strings.Builder
+	dirtyHist bool // set when user uses Up/Down shell history so we don't log malformed partials
+	onCommand func(cmd string)
 }
 
 func NewCommandRecorder(onCommand func(cmd string)) *CommandRecorder {
@@ -30,17 +35,6 @@ func (r *CommandRecorder) CurrentLine() string {
 		return ""
 	}
 	return string(r.buf)
-}
-
-// Reset clears the current line buffer.
-func (r *CommandRecorder) Reset() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.buf = nil
-	r.cursor = 0
-	r.inEsc = false
-	r.escSeq.Reset()
-	r.dirtyHist = false
 }
 
 // Feed processes raw bytes sent from xterm.js to the SSH PTY stdin.
@@ -68,6 +62,9 @@ func (r *CommandRecorder) Feed(data []byte) {
 				r.handleEscape(seq)
 				r.inEsc = false
 				r.escSeq.Reset()
+			} else if r.escSeq.Len() >= maxRecorderEscLen {
+				r.inEsc = false
+				r.escSeq.Reset()
 			}
 			continue
 		}
@@ -80,7 +77,7 @@ func (r *CommandRecorder) Feed(data []byte) {
 		case '\r', '\n':
 			if !r.dirtyHist {
 				cmd := strings.TrimSpace(string(r.buf))
-				if cmd != "" && !isLikelyNoise(cmd) {
+				if cmd != "" {
 					emitted = append(emitted, cmd)
 				}
 			}
@@ -141,11 +138,16 @@ func (r *CommandRecorder) Feed(data []byte) {
 					r.cursor = 0
 					r.dirtyHist = false
 				}
-				// Insert rune at cursor
-				r.buf = append(r.buf, 0)
-				copy(r.buf[r.cursor+1:], r.buf[r.cursor:])
-				r.buf[r.cursor] = rn
-				r.cursor++
+				if len(r.buf) < maxRecorderBufRunes {
+					// Insert rune at cursor
+					if r.cursor > len(r.buf) {
+						r.cursor = len(r.buf)
+					}
+					r.buf = append(r.buf, 0)
+					copy(r.buf[r.cursor+1:], r.buf[r.cursor:])
+					r.buf[r.cursor] = rn
+					r.cursor++
+				}
 			}
 		}
 	}
@@ -196,9 +198,4 @@ func (r *CommandRecorder) handleEscape(seq string) {
 		r.cursor = 0
 		r.dirtyHist = true
 	}
-}
-
-func isLikelyNoise(cmd string) bool {
-	// Skip single-character navigation answers like y/n/q if desired? Keep meaningful 2+ or known 1-char commands like 'w'
-	return strings.TrimSpace(cmd) == ""
 }
