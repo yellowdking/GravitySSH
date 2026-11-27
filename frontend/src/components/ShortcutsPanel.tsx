@@ -1,6 +1,8 @@
 import React, { useMemo, useState } from 'react'
 import type { BuiltinTemplate, CommandShortcut } from '../types'
 import { api } from '../wailsApi'
+import { errMsg } from '../utils/errors'
+import { useActionDialogs } from '../hooks/useActionDialogs'
 import { ShortcutEditorModal } from './ShortcutEditorModal'
 import { ShortcutCard } from './ShortcutCard'
 import { ShortcutTemplatesModal } from './ShortcutTemplatesModal'
@@ -11,7 +13,7 @@ interface ShortcutsPanelProps {
   activeSessionId?: string
   compact?: boolean
   onRunShortcut: (sc: CommandShortcut, execute: boolean) => void
-  onRunCommand?: (cmd: string, execute: boolean) => void
+  onRunCommand?: (cmd: string, execute: boolean) => boolean | void | Promise<boolean | void>
   onChanged: () => void
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
@@ -23,6 +25,7 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
   const [selectedCat, setSelectedCat] = useState('全部')
   const [editing, setEditing] = useState<Partial<CommandShortcut> | null>(null)
   const [templatesOpen, setTemplatesOpen] = useState(false)
+  const { confirm, dialogNode } = useActionDialogs()
 
   const categories = useMemo(() => {
     const set = new Set<string>(['全部'])
@@ -48,7 +51,7 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
       onChanged()
       onToast('快捷命令已保存')
     } catch (err) {
-      onToast(String(err), 'error')
+      onToast(errMsg(err), 'error')
     }
   }
 
@@ -61,7 +64,7 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
       onChanged()
       onToast(`已将「${tpl.name}」加入快捷命令库`)
     } catch (err) {
-      onToast(String(err), 'error')
+      onToast(errMsg(err), 'error')
     }
   }
 
@@ -71,8 +74,37 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
       return
     }
     if (!onRunCommand) return
-    onRunCommand(tpl.command + '\r', false)
-    onToast(`已下发运维脚本：${tpl.name}`)
+    try {
+      const res = await onRunCommand(tpl.command + '\r', false)
+      if (res !== false) onToast(`已下发运维脚本：${tpl.name}`)
+    } catch (err) {
+      onToast(errMsg(err), 'error')
+    }
+  }
+
+  const handleTogglePin = async (sc: CommandShortcut) => {
+    try {
+      await api.saveShortcut({ ...sc, pinned: !sc.pinned })
+      onChanged()
+    } catch (err) {
+      onToast(errMsg(err), 'error')
+    }
+  }
+
+  const handleDeleteShortcut = async (sc: CommandShortcut) => {
+    const ok = await confirm({
+      title: '删除快捷命令',
+      message: `确定删除快捷命令 "${sc.name}" 吗？`,
+      confirmLabel: '删除',
+    })
+    if (!ok) return
+    try {
+      await api.deleteShortcut(sc.id)
+      onChanged()
+      onToast(`已删除快捷命令 ${sc.name}`)
+    } catch (err) {
+      onToast(errMsg(err), 'error')
+    }
   }
 
   return (
@@ -98,13 +130,9 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
               key={sc.id}
               sc={sc}
               hasActiveSession={!!activeSessionId}
-              onTogglePin={() => { void api.saveShortcut({ ...sc, pinned: !sc.pinned }).then(onChanged) }}
+              onTogglePin={() => { void handleTogglePin(sc) }}
               onEdit={() => setEditing(sc)}
-              onDelete={() => {
-                if (window.confirm(`确定删除快捷命令 "${sc.name}" 吗？`)) {
-                  void api.deleteShortcut(sc.id).then(() => { onChanged(); onToast(`已删除快捷命令 ${sc.name}`) })
-                }
-              }}
+              onDelete={() => { void handleDeleteShortcut(sc) }}
               onRun={(exec) => onRunShortcut(sc, exec)}
             />
           ))
@@ -113,6 +141,7 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
 
       <ShortcutEditorModal open={!!editing} initial={editing} title={editing?.id ? '编辑快捷命令' : '新建快捷命令'} onClose={() => setEditing(null)} onSubmit={handleSave} />
       <ShortcutTemplatesModal open={templatesOpen} hasActiveSession={!!activeSessionId} onClose={() => setTemplatesOpen(false)} onImport={handleImportTemplate} onRunNow={onRunCommand ? handleRunTemplateNow : undefined} onToast={onToast} />
+      {dialogNode}
     </div>
   )
 }

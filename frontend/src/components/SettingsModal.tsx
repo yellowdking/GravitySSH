@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { RefreshCw, Settings, X } from 'lucide-react'
 import type { AppSettings, UpdateCheckResult, VaultLockState, VaultSecurityInfo } from '../types'
 import { api } from '../wailsApi'
+import { errMsg } from '../utils/errors'
 import { ModalShell } from './ModalShell'
 import { SettingsToggles } from './SettingsToggles'
 import { SshCacheSection } from './SshCacheSection'
@@ -30,7 +31,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [saving, setSaving] = useState(false)
 
   useEffect(() => { if (open) setDraft(settings) }, [open, settings])
-  if (!open) return null
 
   const patch = (p: Partial<AppSettings>) => setDraft((prev) => ({ ...prev, ...p }))
 
@@ -41,7 +41,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       onSaved(saved)
       onClose()
     } catch (err) {
-      onToast(String(err), 'error')
+      onToast(errMsg(err), 'error')
     } finally {
       setSaving(false)
     }
@@ -58,7 +58,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <p className="text-[11px] text-ag-muted">自定义命令补齐、监控、SFTP、多端同步与更新</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text"><X className="w-4 h-4" /></button>
+          <button type="button" onClick={onClose} aria-label="关闭设置窗口" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text"><X className="w-4 h-4" /></button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 space-y-4">

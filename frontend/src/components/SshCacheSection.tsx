@@ -2,8 +2,10 @@ import React, { useEffect, useState } from 'react'
 import { Eraser, FileText, Loader2, RefreshCw, Trash2 } from 'lucide-react'
 import type { SSHCacheClearResult, SSHCacheInfo } from '../types'
 import { api } from '../wailsApi'
+import { errMsg } from '../utils/errors'
+import { useActionDialogs } from '../hooks/useActionDialogs'
 
-export function formatCacheClearSummary(res: SSHCacheClearResult): string {
+function formatCacheClearSummary(res: SSHCacheClearResult): string {
   const parts: string[] = []
   if (res.removedKnownHosts > 0) parts.push(`${res.removedKnownHosts} 条主机指纹缓存`)
   if (res.clearedDirCaches > 0) parts.push(`${res.clearedDirCaches} 条目录缓存`)
@@ -17,11 +19,12 @@ export const SshCacheSection: React.FC<{ onToast: (msg: string, type?: 'info' | 
   const [port, setPort] = useState('')
   const [busyHost, setBusyHost] = useState(false)
   const [busyAll, setBusyAll] = useState(false)
+  const { confirm, dialogNode } = useActionDialogs()
 
   const refresh = async () => {
     setLoading(true)
     try { setInfo(await api.getSshCacheInfo()) }
-    catch (err) { onToast(String(err), 'error') }
+    catch (err) { onToast(errMsg(err), 'error') }
     finally { setLoading(false) }
   }
 
@@ -38,18 +41,23 @@ export const SshCacheSection: React.FC<{ onToast: (msg: string, type?: 'info' | 
       setPort('')
       await refresh()
     } catch (err) {
-      onToast(String(err).replace(/^Error:\s*/i, ''), 'error')
+      onToast(errMsg(err), 'error')
     } finally { setBusyHost(false) }
   }
 
   const handleClearAll = async () => {
-    if (!window.confirm('确定清理全部 SSH 主机指纹缓存（known_hosts）与目录缓存吗？\n\n首次清理前会自动备份到 known_hosts.gssh.bak，不会删除已保存的服务器、私钥或快捷命令。')) return
+    const ok = await confirm({
+      title: '清理全部 SSH 缓存',
+      message: '确定清理全部 SSH 主机指纹缓存（known_hosts）与目录缓存吗？\n\n首次清理前会自动备份到 known_hosts.gssh.bak，不会删除已保存的服务器、私钥或快捷命令。',
+      confirmLabel: '清理全部',
+    })
+    if (!ok) return
     setBusyAll(true)
     try {
       onToast(formatCacheClearSummary(await api.clearAllSshCache()))
       await refresh()
     } catch (err) {
-      onToast(String(err).replace(/^Error:\s*/i, ''), 'error')
+      onToast(errMsg(err), 'error')
     } finally { setBusyAll(false) }
   }
 
@@ -92,6 +100,7 @@ export const SshCacheSection: React.FC<{ onToast: (msg: string, type?: 'info' | 
           </button>
         </div>
       </div>
+      {dialogNode}
     </section>
   )
 }
@@ -103,7 +112,7 @@ export const ClearHostCacheButton: React.FC<{ host: string; port: number; onResu
     if (!h) return
     setBusy(true)
     try { onResult({ ok: true, text: formatCacheClearSummary(await api.clearSshHostCache(h, port || 22)) }) }
-    catch (err) { onResult({ ok: false, text: String(err).replace(/^Error:\s*/i, '') }) }
+    catch (err) { onResult({ ok: false, text: errMsg(err) }) }
     finally { setBusy(false) }
   }
   return (

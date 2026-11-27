@@ -33,6 +33,7 @@ export const SftpTransferBar: React.FC<Props> = ({ transfers, onDismiss }) => {
                   type="button"
                   onClick={() => onDismiss(tr.transferId)}
                   title="关闭"
+                  aria-label="关闭传输提示"
                   className="p-0.5 rounded hover:bg-ag-hover text-ag-subtle hover:text-ag-text"
                 >
                   <X className="w-3 h-3" />

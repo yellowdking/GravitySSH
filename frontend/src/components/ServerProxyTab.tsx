@@ -27,7 +27,14 @@ export const ServerProxyTab: React.FC<Props> = ({ form, editingServer, onChange 
           <button
             key={opt.id}
             type="button"
-            onClick={() => onChange({ ...form, proxy: { ...form.proxy, type: opt.id } })}
+            onClick={() => onChange({
+              ...form,
+              proxy: {
+                ...form.proxy,
+                type: opt.id,
+                port: opt.id !== 'none' && form.proxy.port <= 0 ? 7890 : form.proxy.port,
+              },
+            })}
             className={`py-2 px-3 rounded-lg text-xs font-medium border transition ${
               form.proxy.type === opt.id
                 ? 'bg-sky-500/15 border-sky-400/60 text-sky-200'

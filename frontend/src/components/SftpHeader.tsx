@@ -8,6 +8,7 @@ interface Props {
   pathInput: string
   showHidden: boolean
   onPathInputChange: (v: string) => void
+  onPathInputFocusChange?: (focused: boolean) => void
   onSubmitPath: () => void
   onGoHome: () => void
   onGoUp: () => void
@@ -25,6 +26,7 @@ export const SftpHeader: React.FC<Props> = ({
   pathInput,
   showHidden,
   onPathInputChange,
+  onPathInputFocusChange,
   onSubmitPath,
   onGoHome,
   onGoUp,
@@ -63,7 +65,13 @@ export const SftpHeader: React.FC<Props> = ({
       <button onClick={onGoHome} disabled={!sftpReady} title="主目录" className="p-1.5 rounded hover:bg-ag-hover text-ag-muted hover:text-ag-text shrink-0"><Home className="w-3.5 h-3.5" /></button>
       <button onClick={onGoUp} disabled={!sftpReady || currentPath === '/'} title="上级目录" className="p-1.5 rounded hover:bg-ag-hover text-ag-muted hover:text-ag-text disabled:opacity-35 shrink-0"><ArrowUp className="w-3.5 h-3.5" /></button>
       <form className="flex-1 min-w-0" onSubmit={(e) => { e.preventDefault(); onSubmitPath() }}>
-        <input value={pathInput} onChange={(e) => onPathInputChange(e.target.value)} className="w-full rounded-md bg-ag-panel border border-ag-border px-2 py-1 text-xs font-mono text-ag-text focus:outline-none focus:border-sky-500/60" />
+        <input
+          value={pathInput}
+          onChange={(e) => onPathInputChange(e.target.value)}
+          onFocus={() => onPathInputFocusChange?.(true)}
+          onBlur={() => onPathInputFocusChange?.(false)}
+          className="w-full rounded-md bg-ag-panel border border-ag-border px-2 py-1 text-xs font-mono text-ag-text focus:outline-none focus:border-sky-500/60"
+        />
       </form>
       <button onClick={onCdInTerminal} disabled={!sftpReady} title="在终端 cd 到此目录" className="p-1.5 rounded hover:bg-ag-hover text-ag-muted hover:text-indigo-300 shrink-0"><Terminal className="w-3.5 h-3.5" /></button>
     </div>

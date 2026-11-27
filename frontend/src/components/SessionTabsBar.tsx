@@ -43,6 +43,8 @@ export const SessionTabsBar: React.FC<Props> = ({
             <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotCls}`} />
             <span className="truncate font-medium">{sess.serverName}</span>
             <button
+              type="button"
+              aria-label={`关闭会话 ${sess.serverName}`}
               onClick={(e) => {
                 e.stopPropagation()
                 onCloseSession(sess.sessionId)

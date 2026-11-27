@@ -35,8 +35,6 @@ export const SyncModal: React.FC<SyncModalProps> = ({
     return () => { cancelled = true }
   }, [open, settings.syncRelayUrl])
 
-  if (!open) return null
-
   const activeRelay = relayInput.trim()
 
   return (
@@ -52,7 +50,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({
               <p className="text-[11px] text-ag-muted">Windows / macOS / Linux / Android 多端同步 · 端到端加密互传</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text">
+          <button type="button" onClick={onClose} aria-label="关闭同步窗口" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -69,6 +67,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({
 
           <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-[#0d111a] border border-ag-border">
             <button
+              type="button"
               onClick={() => setTab('send')}
               className={`py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition ${tab === 'send' ? 'bg-indigo-500/20 text-indigo-200 border border-indigo-500/35' : 'text-ag-muted hover:text-ag-text'}`}
             >
@@ -76,6 +75,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({
               发送到其他设备
             </button>
             <button
+              type="button"
               onClick={() => setTab('receive')}
               className={`py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition ${tab === 'receive' ? 'bg-indigo-500/20 text-indigo-200 border border-indigo-500/35' : 'text-ag-muted hover:text-ag-text'}`}
             >
@@ -86,11 +86,12 @@ export const SyncModal: React.FC<SyncModalProps> = ({
         </div>
 
         <div className="flex-1 overflow-y-auto p-5">
-          {tab === 'send' ? (
+          <div className={tab === 'send' ? '' : 'hidden'}>
             <SyncSendTab relayUrl={activeRelay} onToast={onToast} />
-          ) : (
+          </div>
+          <div className={tab === 'receive' ? '' : 'hidden'}>
             <SyncReceiveTab relayUrl={activeRelay} onSynced={onSynced} onToast={onToast} />
-          )}
+          </div>
         </div>
       </div>
     </ModalShell>

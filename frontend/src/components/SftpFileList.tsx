@@ -17,11 +17,11 @@ interface Props {
   onDelete: (entry: SFTPFileEntry) => void
 }
 
-export function isArchiveFile(name: string): boolean {
+function isArchiveFile(name: string): boolean {
   return /\.(zip|tar\.gz|tgz|tar\.bz2|tar\.xz|tar|7z|gz)$/i.test(name)
 }
 
-export function isEditableTextFile(name: string): boolean {
+function isEditableTextFile(name: string): boolean {
   const lower = name.toLowerCase()
   if (/^(dockerfile|makefile|caddyfile|vagrantfile|readme|license|\.env(\..*)?|\.gitignore|\.bashrc|\.zshrc|\.profile)$/.test(lower)) {
     return true

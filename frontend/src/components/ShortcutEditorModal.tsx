@@ -18,7 +18,7 @@ export const ShortcutEditorModal: React.FC<Props> = ({ open, initial, title, onC
     if (open && initial) setDraft(initial)
   }, [open, initial])
 
-  if (!open || !initial) return null
+  if (!initial) return null
 
   const rawCommand = draft.command || ''
   const lineCount =
@@ -45,7 +45,7 @@ export const ShortcutEditorModal: React.FC<Props> = ({ open, initial, title, onC
             <BookmarkPlus className="w-4 h-4 text-indigo-400" />
             {title}
           </h3>
-          <button type="button" onClick={onClose} className="p-1 text-ag-muted hover:text-ag-text">
+          <button type="button" onClick={onClose} aria-label="关闭快捷方式编辑器" className="p-1 text-ag-muted hover:text-ag-text">
             <X className="w-4 h-4" />
           </button>
         </div>

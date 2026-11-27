@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { FileCode2, Loader2, Save, X } from 'lucide-react'
+import { insertTabIndent } from '../utils/errors'
+import { useActionDialogs } from '../hooks/useActionDialogs'
 import { ModalShell } from './ModalShell'
 
 interface Props {
@@ -13,23 +15,29 @@ interface Props {
 
 export const SftpEditorModal: React.FC<Props> = ({ open, remotePath, initialContent, saving, onSave, onClose }) => {
   const [content, setContent] = useState(initialContent)
+  const { confirm, dialogNode } = useActionDialogs()
 
   useEffect(() => {
     if (open) setContent(initialContent)
   }, [open, initialContent, remotePath])
 
-  if (!open) return null
-
   const dirty = content !== initialContent
   const lineCount = content === '' ? 0 : content.replace(/\r\n/g, '\n').split('\n').length
 
-  const handleClose = () => {
-    if (dirty && !window.confirm('文件有未保存的修改，确定放弃修改并关闭吗？')) return
+  const handleClose = async () => {
+    if (dirty) {
+      const ok = await confirm({
+        title: '放弃未保存的修改',
+        message: '文件有未保存的修改，确定放弃修改并关闭吗？',
+        confirmLabel: '放弃并关闭',
+      })
+      if (!ok) return
+    }
     onClose()
   }
 
   return (
-    <ModalShell open={open} onClose={handleClose} backdropClassName="bg-black/75">
+    <ModalShell open={open} onClose={() => { void handleClose() }} backdropClassName="bg-black/75">
       <div className="w-full max-w-4xl h-[82vh] rounded-2xl bg-ag-panel border border-ag-borderStrong shadow-ag flex flex-col overflow-hidden">
         <div className="px-4 py-3 border-b border-ag-border bg-[#11151f] flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-2 min-w-0">
@@ -52,7 +60,7 @@ export const SftpEditorModal: React.FC<Props> = ({ open, remotePath, initialCont
               {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
               {saving ? '保存中...' : '保存回传'}
             </button>
-            <button type="button" onClick={handleClose} className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text">
+            <button type="button" onClick={() => { void handleClose() }} aria-label="关闭文件编辑器" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text">
               <X className="w-4 h-4" />
             </button>
           </div>
@@ -67,21 +75,16 @@ export const SftpEditorModal: React.FC<Props> = ({ open, remotePath, initialCont
               if (dirty && !saving) void onSave(content)
             } else if (e.key === 'Escape') {
               e.preventDefault()
-              handleClose()
-            } else if (e.key === 'Tab') {
-              e.preventDefault()
-              const target = e.currentTarget
-              const start = target.selectionStart
-              const end = target.selectionEnd
-              const next = content.slice(0, start) + '  ' + content.slice(end)
-              setContent(next)
-              requestAnimationFrame(() => { target.selectionStart = target.selectionEnd = start + 2 })
+              void handleClose()
+            } else {
+              insertTabIndent(e, content, setContent)
             }
           }}
           spellCheck={false}
           className="flex-1 w-full bg-[#0b0d12] text-[#e6eaf5] font-mono text-[13px] leading-relaxed p-4 resize-none focus:outline-none"
         />
       </div>
+      {dialogNode}
     </ModalShell>
   )
 }

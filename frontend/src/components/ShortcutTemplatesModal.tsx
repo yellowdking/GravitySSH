@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { Plus, RotateCcw, Sparkles, X } from 'lucide-react'
 import type { BuiltinTemplate } from '../types'
 import { api } from '../wailsApi'
+import { errMsg } from '../utils/errors'
+import { useActionDialogs } from '../hooks/useActionDialogs'
 import { ModalShell } from './ModalShell'
 import { TemplateEditorModal } from './TemplateEditorModal'
 import { TemplateCard } from './TemplateCard'
@@ -22,18 +24,18 @@ export const ShortcutTemplatesModal: React.FC<Props> = ({ open, hasActiveSession
   const [loadingPresets, setLoadingPresets] = useState(false)
   const [editing, setEditing] = useState<Partial<BuiltinTemplate> | null>(null)
   const [saving, setSaving] = useState(false)
+  const { confirm, dialogNode } = useActionDialogs()
 
   const refresh = useCallback(async () => {
     try {
       const list = await api.listOpsTemplates()
       setTemplates(list || [])
     } catch (err) {
-      onToast(`读取运维模板失败: ${err}`, 'error')
+      onToast(`读取运维模板失败: ${errMsg(err)}`, 'error')
     }
   }, [onToast])
 
   useEffect(() => { if (open) void refresh() }, [open, refresh])
-  if (!open) return null
 
   const openNew = () => setEditing({ id: '', name: '', category: '自定义', description: '', safetyNote: '', command: '' })
 
@@ -48,7 +50,7 @@ export const ShortcutTemplatesModal: React.FC<Props> = ({ open, hasActiveSession
         onToast(`原预置模板均已存在（已跳过 ${res.skipped} 个），未覆盖任何现有模板`)
       }
     } catch (err) {
-      onToast(`加载预置模板失败: ${err}`, 'error')
+      onToast(`加载预置模板失败: ${errMsg(err)}`, 'error')
     } finally {
       setLoadingPresets(false)
     }
@@ -62,21 +64,26 @@ export const ShortcutTemplatesModal: React.FC<Props> = ({ open, hasActiveSession
       await refresh()
       onToast(draft.id ? '运维模板已更新' : '新运维模板已保存')
     } catch (err) {
-      onToast(String(err), 'error')
+      onToast(errMsg(err), 'error')
     } finally {
       setSaving(false)
     }
   }
 
   const handleDeleteTemplate = async (tpl: BuiltinTemplate) => {
-    if (!window.confirm(`确定删除运维模板「${tpl.name}」吗？${tpl.presetId ? '\n（删除原预置模板后可随时点击「加载预置模板」重新恢复）' : ''}`)) return
+    const ok = await confirm({
+      title: '删除运维模板',
+      message: `确定删除运维模板「${tpl.name}」吗？${tpl.presetId ? '\n（删除原预置模板后可随时点击「加载预置模板」重新恢复）' : ''}`,
+      confirmLabel: '删除',
+    })
+    if (!ok) return
     setBusyId(tpl.id)
     try {
       await api.deleteOpsTemplate(tpl.id)
       await refresh()
       onToast(`已删除模板「${tpl.name}」`)
     } catch (err) {
-      onToast(String(err), 'error')
+      onToast(errMsg(err), 'error')
     } finally {
       setBusyId(null)
     }
@@ -102,7 +109,7 @@ export const ShortcutTemplatesModal: React.FC<Props> = ({ open, hasActiveSession
             <button type="button" onClick={openNew} className="ag-btn-primary text-xs py-1 px-2.5">
               <Plus className="w-3.5 h-3.5" />新建模板
             </button>
-            <button type="button" onClick={onClose} className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text">
+            <button type="button" onClick={onClose} aria-label="关闭运维模板窗口" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text">
               <X className="w-4 h-4" />
             </button>
           </div>
@@ -144,6 +151,7 @@ export const ShortcutTemplatesModal: React.FC<Props> = ({ open, hasActiveSession
       </div>
 
       <TemplateEditorModal open={!!editing} initial={editing} saving={saving} onClose={() => setEditing(null)} onSubmit={handleSaveTemplate} />
+      {dialogNode}
     </ModalShell>
   )
 }

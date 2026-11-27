@@ -21,7 +21,7 @@ export const SftpPanel: React.FC<SftpPanelProps> = React.memo(({ session, active
   const sftp = useSftpState(session, active, followTerminal, onToast)
 
   return (
-    <div style={{ width }} className="shrink-0 bg-ag-sidebar border-l border-ag-border flex flex-col h-full min-w-0 select-none">
+    <div style={{ width: width > 0 ? width : 360 }} className="shrink-0 bg-ag-sidebar border-l border-ag-border flex flex-col h-full min-w-0 select-none">
       <SftpHeader
         sftpReady={session.sftpReady}
         loading={sftp.loading}
@@ -29,13 +29,14 @@ export const SftpPanel: React.FC<SftpPanelProps> = React.memo(({ session, active
         pathInput={sftp.pathInput}
         showHidden={sftp.showHidden}
         onPathInputChange={sftp.setPathInput}
-        onSubmitPath={() => void sftp.loadDir(sftp.pathInput)}
-        onGoHome={() => void sftp.loadDir(session.homeDir || '~')}
-        onGoUp={() => void sftp.loadDir(sftp.parentPath)}
+        onPathInputFocusChange={sftp.onPathInputFocusChange}
+        onSubmitPath={() => void sftp.loadDir(sftp.pathInput, true, true)}
+        onGoHome={() => void sftp.loadDir(session.homeDir || '~', true, true)}
+        onGoUp={() => void sftp.loadDir(sftp.parentPath, true, true)}
         onUpload={() => void sftp.handleUpload()}
         onMkdir={() => void sftp.handleMkdir()}
         onToggleHidden={() => sftp.setShowHidden((v) => !v)}
-        onRefresh={() => void sftp.loadDir(sftp.currentPath)}
+        onRefresh={() => void sftp.loadDir(sftp.currentPath, true, true)}
         onCdInTerminal={() => onCdInTerminal(sftp.currentPath)}
       />
 
@@ -56,7 +57,7 @@ export const SftpPanel: React.FC<SftpPanelProps> = React.memo(({ session, active
           <SftpFileList
             entries={sftp.visibleEntries}
             busyPaths={sftp.busyPaths}
-            onOpenDir={(p) => void sftp.loadDir(p)}
+            onOpenDir={(p) => void sftp.loadDir(p, true, true)}
             onEditFile={(e) => void sftp.handleEditFile(e)}
             onDownload={(e) => void sftp.handleDownload(e)}
             onDownloadFolder={(e) => void sftp.handleDownloadFolder(e)}
@@ -88,6 +89,7 @@ export const SftpPanel: React.FC<SftpPanelProps> = React.memo(({ session, active
           />
         </Suspense>
       )}
+      {sftp.dialogNode}
     </div>
   )
 })
