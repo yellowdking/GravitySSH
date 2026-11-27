@@ -226,9 +226,11 @@ func unpackTarStream(r io.Reader, destRoot string) (int, error) {
 			_, cpErr := io.Copy(f, tr)
 			closeErr := f.Close()
 			if cpErr != nil {
+				_ = os.Remove(target)
 				return count, cpErr
 			}
 			if closeErr != nil {
+				_ = os.Remove(target)
 				return count, closeErr
 			}
 			count++
@@ -242,6 +244,19 @@ func safeJoinLocal(absRoot, tarEntryName string) (string, error) {
 		return "", fmt.Errorf("检测到不安全的归档路径: %s", tarEntryName)
 	}
 	norm := strings.ReplaceAll(tarEntryName, "\\", "/")
+	for _, seg := range strings.Split(norm, "/") {
+		if seg == "" || seg == "." {
+			continue
+		}
+		if strings.ContainsAny(seg, `:*?"<>|`) {
+			return "", fmt.Errorf("检测到不安全的归档路径（含非法字符）: %s", tarEntryName)
+		}
+		for _, r := range seg {
+			if r < 0x20 {
+				return "", fmt.Errorf("检测到不安全的归档路径（含控制字符）: %s", tarEntryName)
+			}
+		}
+	}
 	cleaned := filepath.Clean(filepath.FromSlash(strings.TrimLeft(norm, "/")))
 	if cleaned == "." || cleaned == "" {
 		return absRoot, nil
@@ -267,9 +282,13 @@ func (m *Manager) SFTPCompress(sessionID, remoteDir string, names []string, form
 	if err != nil {
 		return "", err
 	}
-	dir := path.Clean(strings.TrimSpace(remoteDir))
-	if dir == "" {
-		dir = "/"
+	rawDir := strings.TrimSpace(remoteDir)
+	dir := "/"
+	if rawDir != "" {
+		cleaned := path.Clean(rawDir)
+		if cleaned != "" && cleaned != "." {
+			dir = cleaned
+		}
 	}
 	cleanNames := make([]string, 0, len(names))
 	for _, n := range names {
@@ -297,7 +316,12 @@ func (m *Manager) SFTPCompress(sessionID, remoteDir string, names []string, form
 }
 
 func buildPackedDownloadCommand(parentDir, baseName string) string {
-	return fmt.Sprintf("tar -cf - -C %s -- %s", shellQuote(parentDir), shellQuote(safeRelativeName(baseName)))
+	safeBase := safeRelativeName(baseName)
+	return fmt.Sprintf(
+		`sh -c 'cd -- "$1" && if [ -d "$2" ]; then exec tar -cf - -- "$2/."; else exec tar -cf - -- "$2"; fi' _ %s %s`,
+		shellQuote(parentDir),
+		shellQuote(safeBase),
+	)
 }
 
 func buildCompressCommand(dir string, names []string, format string) (string, string, error) {
@@ -316,7 +340,7 @@ func buildCompressCommand(dir string, names []string, format string) (string, st
 	case "zip":
 		archive := base + ".zip"
 		install := autoInstallSnippet("zip", "zip", "zip", "zip", "zip", "zip")
-		cmd := fmt.Sprintf("cd -- %s && { if ! command -v zip >/dev/null 2>&1; then %s; fi; zip -rq -- %s %s; }", qDir, install, shellQuote(safeRelativeName(archive)), args)
+		cmd := fmt.Sprintf("cd -- %s && { if ! command -v zip >/dev/null 2>&1; then %s; fi && zip -rq -- %s %s; }", qDir, install, shellQuote(safeRelativeName(archive)), args)
 		return archive, cmd, nil
 	case "", "tar.gz", "tgz":
 		archive := base + ".tar.gz"

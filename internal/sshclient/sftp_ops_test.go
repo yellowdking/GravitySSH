@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pkg/sftp"
 	"github.com/yellowdking/GravitySSH/internal/models"
@@ -50,9 +51,23 @@ func TestUpdateCWDFromCommand(t *testing.T) {
 		dirCache:   map[string]dirCacheEntry{"/home/u": {fetchedAt: time.Now()}},
 	}
 	s.info.HomeDir = "/home/u"
-	for _, tc := range [][2]string{{"cd /var/log/nginx", "/var/log/nginx"}, {"cd ../apt && ls", "/var/log/apt"}, {"cd ~/p", "/home/u/p"}, {"cd", "/home/u"}} {
+	for _, tc := range [][2]string{
+		{"cd /var/log/nginx", "/var/log/nginx"},
+		{"cd ../apt && ls", "/var/log/apt"},
+		{"cd ~/p", "/home/u/p"},
+		{"cd", "/home/u"},
+		{"cd /tmp || echo fail", "/tmp"},
+		{"cd -P /var/log", "/var/log"},
+		{"cd -L -- /etc", "/etc"},
+		{"cd -- -weird", "/etc/-weird"},
+		{"cd -", "/etc/-weird"},
+		{"cd /tmp | cat", "/etc/-weird"},
+		{"cd $HOME_UNKNOWN", "/etc/-weird"},
+		{"cd /var 2>/dev/null", "/var"},
+		{"cd -P", "/home/u"},
+	} {
 		if m.updateCWDFromCommand(s, tc[0]); s.currentDir != tc[1] {
-			t.Fatalf("%q: %q", tc[0], s.currentDir)
+			t.Fatalf("%q: got %q, want %q", tc[0], s.currentDir, tc[1])
 		}
 	}
 	// Read-only commands must NOT wipe dirCache.
@@ -270,7 +285,12 @@ func TestSFTPDeleteAndRename(t *testing.T) {
 	t.Cleanup(func() { _ = c2sW.Close(); _ = srv.Close(); _ = s2cW.Close(); _ = cli.Close() })
 	m := NewManager(nil, nil)
 	m.sessions["s1"] = &sessionState{sftpClient: cli, dirCache: map[string]dirCacheEntry{}}
-	has := func(p string) bool { _, ok := fs.m[p]; return ok }
+	has := func(p string) bool {
+		fs.mu.Lock()
+		defer fs.mu.Unlock()
+		_, ok := fs.m[p]
+		return ok
+	}
 
 	if m.SFTPDelete("s1", "/") == nil || !errors.Is(m.SFTPDelete("s1", "/r/miss"), os.ErrNotExist) {
 		t.Fatal("root/missing delete check failed")
@@ -290,7 +310,9 @@ func TestSFTPDeleteAndRename(t *testing.T) {
 		{"/r/a", "/r/b", "/r/b", false}, // overwrite
 		{"/r/b", "/r/c", "/r/c", true},  // server moved but replied ENOENT
 	} {
+		fs.mu.Lock()
 		fs.spurious = tc.sp
+		fs.mu.Unlock()
 		if err := m.SFTPRename("s1", tc.old, tc.dst); err != nil || has(tc.old) || !has(tc.chk) {
 			t.Fatalf("rename %s->%s: %v", tc.old, tc.dst, err)
 		}
@@ -335,8 +357,11 @@ func TestSFTPAlignPermissionsRejectsSymlinkAndFiltersNonRegularSiblings(t *testi
 	if _, err := m.SFTPAlignPermissions("s1", "/d/link"); err == nil || !strings.Contains(err.Error(), "符号链接") {
 		t.Fatalf("expected symlink rejection error, got: %v", err)
 	}
-	if got := fs.m["/d/secret"].mode.Perm(); got != 0o600 {
-		t.Fatalf("expected symlink target /d/secret mode untouched (0600), got %04o", got)
+	fs.mu.Lock()
+	secretPerm := fs.m["/d/secret"].mode.Perm()
+	fs.mu.Unlock()
+	if secretPerm != 0o600 {
+		t.Fatalf("expected symlink target /d/secret mode untouched (0600), got %04o", secretPerm)
 	}
 
 	// 2. Non-regular special file (socket) must be rejected.
@@ -347,12 +372,55 @@ func TestSFTPAlignPermissionsRejectsSymlinkAndFiltersNonRegularSiblings(t *testi
 	// 3. Regular file sibling voting must ignore sockets (0666) and symlinks (0777).
 	// Siblings are: reg1 (0640) vs 3 sockets (0666) and 2 symlinks (0777) and secret (0600).
 	// Between 0600 (1) and 0640 (1), tie-breaker picks smaller mode 0600 (NOT 0666 or 0777!).
+	fs.mu.Lock()
 	fs.m["/d/reg2"] = &mNode{name: "reg2", mode: 0o640}
+	fs.mu.Unlock()
 	modeStr, err := m.SFTPAlignPermissions("s1", "/d/target")
 	if err != nil {
 		t.Fatalf("SFTPAlignPermissions on regular file failed: %v", err)
 	}
-	if modeStr != "0640" || fs.m["/d/target"].mode.Perm() != 0o640 {
-		t.Fatalf("expected target aligned to regular siblings 0640 (ignoring 3 sockets at 0666), got %s (%04o)", modeStr, fs.m["/d/target"].mode.Perm())
+	fs.mu.Lock()
+	targetPerm := fs.m["/d/target"].mode.Perm()
+	fs.mu.Unlock()
+	if modeStr != "0640" || targetPerm != 0o640 {
+		t.Fatalf("expected target aligned to regular siblings 0640 (ignoring 3 sockets at 0666), got %s (%04o)", modeStr, targetPerm)
+	}
+}
+
+func TestFormatExecErrorUTF8SafeTruncation(t *testing.T) {
+	// 3-byte UTF-8 Chinese runes: byte slice from end could split a rune if naive.
+	msg := strings.Repeat("中文错误信息", 40) // 720 bytes
+	err := formatExecError("失败", []byte(msg), errors.New("exit 1"), 20)
+	if !utf8.ValidString(err.Error()) {
+		t.Fatalf("formatExecError produced invalid UTF-8: %q", err.Error())
+	}
+	prefix := "失败: "
+	tail := strings.TrimPrefix(err.Error(), prefix)
+	if len(tail) > 20 || len(tail) == 0 {
+		t.Fatalf("unexpected truncated tail length %d: %q", len(tail), tail)
+	}
+}
+
+func TestBuildSFTPEntriesPropagatesConnError(t *testing.T) {
+	c2sR, c2sW := io.Pipe()
+	s2cR, s2cW := io.Pipe()
+	fs := &mFS{m: map[string]*mNode{"/": {"/", "", os.ModeDir | 0o755}}}
+	srv := sftp.NewRequestServer(rwPipe{c2sR, s2cW}, sftp.Handlers{FileGet: fs, FilePut: fs, FileCmd: fs, FileList: fs})
+	go func() { _ = srv.Serve() }()
+	cli, err := sftp.NewClientPipe(s2cR, c2sW)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Close server pipes first so sftp client reader unblocks with EOF before cli.Close().
+	_ = c2sW.Close()
+	_ = srv.Close()
+	_ = s2cW.Close()
+	_ = cli.Close()
+
+	infos := []os.FileInfo{
+		&mNode{name: "linkdir", mode: os.ModeSymlink | 0o777, tgt: "/real"},
+	}
+	if _, bErr := buildSFTPEntries(cli, "/", infos); bErr == nil || !isSFTPConnError(bErr) {
+		t.Fatalf("expected SFTP connection error propagated from buildSFTPEntries, got %v", bErr)
 	}
 }
