@@ -16,24 +16,99 @@ const maxKeepAliveFailures = 3
 var (
 	keepAliveProbeTimeout = 10 * time.Second
 	errProbeInFlight      = errors.New("keepalive probe already in flight")
+	pumpBatchWindow       = 6 * time.Millisecond
+	pumpBatchMaxBytes     = 64 * 1024
+	pumpReadBufSize       = 32 * 1024
 )
 
 func (m *Manager) pumpOutput(sessionID string, r io.Reader, rec *CommandRecorder) {
-	buf := make([]byte, 16*1024)
+	chunkCh := make(chan []byte, 8)
+	go func() {
+		defer close(chunkCh)
+		buf := make([]byte, pumpReadBufSize)
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				cp := make([]byte, n)
+				copy(cp, buf[:n])
+				chunkCh <- cp
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	var (
+		pending   []byte
+		lastFlush time.Time
+		timer     *time.Timer
+		timerC    <-chan time.Time
+	)
+	stopTimer := func() {
+		if timer != nil {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timerC = nil
+		}
+	}
+	flush := func() {
+		stopTimer()
+		if len(pending) == 0 {
+			return
+		}
+		m.emit("terminal:data", map[string]string{
+			"sessionId": sessionID,
+			"data":      base64.StdEncoding.EncodeToString(pending),
+		})
+		if cap(pending) > pumpBatchMaxBytes*2 {
+			pending = nil
+		} else {
+			pending = pending[:0]
+		}
+		lastFlush = time.Now()
+	}
+	defer stopTimer()
+
 	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			chunk := buf[:n]
+		select {
+		case chunk, ok := <-chunkCh:
+			if !ok {
+				flush()
+				return
+			}
 			if rec != nil {
 				rec.FeedOutput(chunk)
 			}
-			m.emit("terminal:data", map[string]string{
-				"sessionId": sessionID,
-				"data":      base64.StdEncoding.EncodeToString(chunk),
-			})
-		}
-		if err != nil {
-			return
+			// Leading-edge fast path: emit immediately when idle so interactive keystrokes incur zero latency.
+			if len(pending) == 0 && len(chunkCh) == 0 && (lastFlush.IsZero() || time.Since(lastFlush) >= pumpBatchWindow) {
+				m.emit("terminal:data", map[string]string{
+					"sessionId": sessionID,
+					"data":      base64.StdEncoding.EncodeToString(chunk),
+				})
+				lastFlush = time.Now()
+				continue
+			}
+			pending = append(pending, chunk...)
+			if len(pending) >= pumpBatchMaxBytes {
+				flush()
+				continue
+			}
+			if timerC == nil {
+				if timer == nil {
+					timer = time.NewTimer(pumpBatchWindow)
+				} else {
+					timer.Reset(pumpBatchWindow)
+				}
+				timerC = timer.C
+			}
+		case <-timerC:
+			timerC = nil
+			flush()
 		}
 	}
 }

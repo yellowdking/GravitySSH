@@ -21,14 +21,15 @@ func (m *Manager) WriteInput(sessionID, data string) error {
 		return errors.New("终端尚未就绪")
 	}
 	raw := []byte(data)
+	var emitted []string
 	sess.writeMu.Lock()
-	defer sess.writeMu.Unlock()
 	for offset := 0; offset < len(raw); offset += writeChunkSize {
 		end := offset + writeChunkSize
 		if end > len(raw) {
 			end = len(raw)
 		}
 		if _, err := stdin.Write(raw[offset:end]); err != nil {
+			sess.writeMu.Unlock()
 			return err
 		}
 		if end < len(raw) {
@@ -36,7 +37,12 @@ func (m *Manager) WriteInput(sessionID, data string) error {
 		}
 	}
 	if rec != nil {
-		rec.Feed(raw)
+		emitted = rec.FeedInput(raw)
+	}
+	sess.writeMu.Unlock()
+
+	if rec != nil && len(emitted) > 0 {
+		rec.DispatchCommands(emitted)
 	}
 	return nil
 }

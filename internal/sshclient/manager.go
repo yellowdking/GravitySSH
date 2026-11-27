@@ -24,6 +24,14 @@ type EventSink interface {
 type dirCacheEntry struct {
 	entries   []models.SFTPFileEntry
 	fetchedAt time.Time
+	lastSeq   uint64
+}
+
+type sftpInitFlight struct {
+	done    chan struct{}
+	client  *sftp.Client
+	err     error
+	dialRes *DialResult
 }
 
 type cpuSample struct {
@@ -48,6 +56,7 @@ type sessionState struct {
 	sshSession        *ssh.Session
 	stdin             io.WriteCloser
 	sftpClient        *sftp.Client
+	sftpInit          *sftpInitFlight
 	recorder          *CommandRecorder
 	stopCh            chan struct{}
 	closed            bool
@@ -57,6 +66,7 @@ type sessionState struct {
 	currentDir        string
 	dirCache          map[string]dirCacheEntry
 	dirCacheGen       uint64
+	dirCacheSeq       uint64
 	prevCPU           *cpuSample
 	prevNet           *netSample
 	prevSampleAt      time.Time
