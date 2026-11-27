@@ -12,7 +12,9 @@ import (
 
 type mockOtherMachineProtector struct{}
 
-func (m *mockOtherMachineProtector) Protect(p []byte) ([]byte, error) { return append([]byte{1}, p...), nil }
+func (m *mockOtherMachineProtector) Protect(p []byte) ([]byte, error) {
+	return append([]byte{1}, p...), nil
+}
 func (m *mockOtherMachineProtector) Unprotect(c []byte) ([]byte, error) {
 	return nil, errors.New("different machine/user cannot unprotect")
 }
@@ -26,7 +28,7 @@ func (e *EnvelopeCrypto) sealV1(plaintext []byte) ([]byte, error) {
 	if _, err := io.ReadFull(rand.Reader, masterKey); err != nil {
 		return nil, fmt.Errorf("generate master key: %w", err)
 	}
-	defer ZeroBytes(masterKey)
+	defer clear(masterKey)
 
 	wrappedKey, err := e.protector.Protect(masterKey)
 	if err != nil {
@@ -42,7 +44,7 @@ func (e *EnvelopeCrypto) sealV1(plaintext []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer ZeroBytes(dataKey)
+	defer clear(dataKey)
 
 	gcm, err := newAESGCM(dataKey)
 	if err != nil {
@@ -155,7 +157,7 @@ func TestEnvelopePasswordDualLayer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenWithPasswordAndKey failed: %v", err)
 	}
-	defer ZeroBytes(pwKey)
+	defer clear(pwKey)
 	if !bytes.Equal(opened, secret) {
 		t.Fatalf("decrypted mismatch: got %q, want %q", opened, secret)
 	}

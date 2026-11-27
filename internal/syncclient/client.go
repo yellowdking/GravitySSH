@@ -36,7 +36,7 @@ type PairStatusResult struct {
 	EncryptedPayload
 }
 
-// Client communicates with a gssh-sync-v1 / gssh-sync-v2 relay over TLS 1.3 with App Gate HMAC auth.
+// Client communicates with a gssh-sync-v2 relay over TLS 1.3 with App Gate HMAC auth.
 type Client struct {
 	relayURL   string
 	appGateKey string
@@ -72,7 +72,9 @@ func NewClientWithMode(relayURL, appGateKey, spkiSHA256 string, mode RelayTLSMod
 		TLSClientConfig:       tlsCfg,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 15 * time.Second,
-		DisableKeepAlives:     true,
+		DisableKeepAlives:     false,
+		IdleConnTimeout:       30 * time.Second,
+		MaxIdleConnsPerHost:   2,
 	}
 	return &Client{
 		relayURL:   strings.TrimRight(relayURL, "/"),
@@ -80,6 +82,13 @@ func NewClientWithMode(relayURL, appGateKey, spkiSHA256 string, mode RelayTLSMod
 		httpClient: &http.Client{Transport: tr, Timeout: 20 * time.Second},
 		nowFn:      time.Now,
 	}, nil
+}
+
+// CloseIdleConnections closes any pooled idle keep-alive connections held by this client.
+func (c *Client) CloseIdleConnections() {
+	if c != nil && c.httpClient != nil {
+		c.httpClient.CloseIdleConnections()
+	}
 }
 
 func (c *Client) postJSON(ctx context.Context, path string, reqBody any) (int, []byte, error) {
@@ -128,68 +137,6 @@ func (c *Client) parseExpiresResponse(body []byte, ttlSeconds int, errMsg string
 		exp = c.nowFn().UTC().Add(time.Duration(ttlSeconds) * time.Second)
 	}
 	return exp, nil
-}
-
-// Drop uploads an encrypted sync payload to the relay and returns its expiration time.
-func (c *Client) Drop(ctx context.Context, payload EncryptedPayload, ttlSeconds int) (time.Time, error) {
-	if ttlSeconds <= 0 {
-		ttlSeconds = DefaultTTLSeconds
-	}
-	req := map[string]any{
-		"channelId": payload.ChannelID, "salt": payload.Salt,
-		"nonce": payload.Nonce, "ciphertext": payload.Ciphertext, "ttlSeconds": ttlSeconds,
-	}
-	code, body, err := c.postJSON(ctx, "/v1/drop", req)
-	if err != nil {
-		return time.Time{}, err
-	}
-	switch code {
-	case http.StatusOK:
-		return c.parseExpiresResponse(body, ttlSeconds, "中继服务器返回了无效的上传响应")
-	case http.StatusConflict:
-		return time.Time{}, errors.New("同步码冲突，请重试生成新的同步码")
-	case http.StatusTooManyRequests:
-		return time.Time{}, errors.New("中继服务器当前繁忙，请稍后再试")
-	case http.StatusRequestEntityTooLarge:
-		return time.Time{}, errors.New("同步数据体积超过中继限制（2 MiB）")
-	default:
-		return time.Time{}, fmt.Errorf("上传同步数据失败（HTTP %d）", code)
-	}
-}
-
-// Pickup fetches and burns an encrypted sync payload from the relay.
-func (c *Client) Pickup(ctx context.Context, channelID string) (EncryptedPayload, error) {
-	code, body, err := c.postJSON(ctx, "/v1/pickup", map[string]string{"channelId": channelID})
-	if err != nil {
-		return EncryptedPayload{}, err
-	}
-	switch code {
-	case http.StatusOK:
-		var out EncryptedPayload
-		if err := json.Unmarshal(body, &out); err != nil {
-			return EncryptedPayload{}, errors.New("中继返回的数据格式无效")
-		}
-		out.ChannelID = channelID
-		return out, nil
-	case http.StatusNotFound:
-		return EncryptedPayload{}, errors.New("未找到对应同步数据（可能同步码错误、已过期或已被领取）")
-	case http.StatusTooManyRequests:
-		return EncryptedPayload{}, errors.New("请求过于频繁，请稍后再试")
-	default:
-		return EncryptedPayload{}, fmt.Errorf("获取同步数据失败（HTTP %d）", code)
-	}
-}
-
-// Cancel deletes an active drop from the relay if it has not been picked up yet.
-func (c *Client) Cancel(ctx context.Context, channelID string) error {
-	code, _, err := c.postJSON(ctx, "/v1/cancel", map[string]string{"channelId": channelID})
-	if err != nil {
-		return err
-	}
-	if code != http.StatusOK {
-		return fmt.Errorf("撤销同步码失败（HTTP %d）", code)
-	}
-	return nil
 }
 
 // PairInit registers an empty pairing slot for gssh-sync-v2 without uploading any vault payload.

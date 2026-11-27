@@ -42,45 +42,14 @@ func TestGenerateAndCanonicalizeCode(t *testing.T) {
 	}
 }
 
-func TestGoldenVectorAndTamperRejection(t *testing.T) {
-	code := "K7M9-P4X2"
-	canonical := "K7M9P4X2"
-	salt, _ := hex.DecodeString("000102030405060708090a0b0c0d0e0f")
-	nonce, _ := hex.DecodeString("a0a1a2a3a4a5a6a7a8a9aaab")
-	fixedTime := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-
-	bundle := models.SyncBundle{
-		SchemaVersion:  1,
-		ExportedAt:     "2026-01-02T03:04:05Z",
-		SourcePlatform: "windows",
-		SourceDevice:   "WIN-DEV-01",
-		Servers: []models.ServerConfig{
-			{
-				ID: "srv-golden-1", Name: "Prod Node", Group: "Prod", Color: "#6366f1",
-				Host: "192.0.2.10", Port: 22, Username: "root",
-				AuthType: models.AuthPassword, Password: "golden-pass-!@#",
-				Proxy: models.ProxyConfig{Type: models.ProxyNone},
-				JumpHost: models.JumpHostConfig{Mode: models.JumpNone},
-				TimeoutSeconds: 15, KeepAliveSeconds: 30,
-				CreatedAt: fixedTime, UpdatedAt: fixedTime,
-			},
-		},
-		SSHKeys: []models.SSHKeyRecord{},
-		Shortcuts: []models.CommandShortcut{
-			{
-				ID: "sc-golden-1", Name: "Disk", Command: "df -h", Category: "Sys",
-				AutoExecute: true, Pinned: true, CreatedAt: fixedTime, UpdatedAt: fixedTime,
-			},
-		},
-		Templates: []models.BuiltinTemplate{},
-	}
-
-	payload, err := EncryptBundleDeterministic(code, bundle, salt, nonce)
+func TestGoldenChannelAndAuthVectors(t *testing.T) {
+	canonical, err := CanonicalizeCode("K7M9-P4X2")
 	if err != nil {
-		t.Fatalf("EncryptBundleDeterministic failed: %v", err)
+		t.Fatalf("CanonicalizeCode failed: %v", err)
 	}
-	if payload.ChannelID != goldenChannelID {
-		t.Fatalf("channelId mismatch: got %s want %s", payload.ChannelID, goldenChannelID)
+	salt, _ := hex.DecodeString("000102030405060708090a0b0c0d0e0f")
+	if got := DeriveChannelID(canonical); got != goldenChannelID {
+		t.Fatalf("channelId mismatch: got %s want %s", got, goldenChannelID)
 	}
 	if got := hex.EncodeToString(DeriveAESKey(canonical, salt)); got != goldenAESKeyHex {
 		t.Fatalf("aesKey mismatch: got %s want %s", got, goldenAESKeyHex)
@@ -88,22 +57,6 @@ func TestGoldenVectorAndTamperRejection(t *testing.T) {
 	sig := SignRequest("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "POST", "/v1/pickup", "1767323045", []byte(`{"channelId":"abc"}`))
 	if sig != goldenHMACSig {
 		t.Fatalf("HMAC sig mismatch: got %s want %s", sig, goldenHMACSig)
-	}
-
-	dec, err := DecryptBundle("k7m9p4x2", payload)
-	if err != nil {
-		t.Fatalf("DecryptBundle failed: %v", err)
-	}
-	if dec.SourceDevice != "WIN-DEV-01" || len(dec.Servers) != 1 || dec.Servers[0].Password != "golden-pass-!@#" {
-		t.Fatalf("decrypted bundle mismatch: %+v", dec)
-	}
-	if _, err := DecryptBundle("2222-3333", payload); err == nil {
-		t.Fatal("expected decryption failure with wrong sync code")
-	}
-	tampered := payload
-	tampered.Ciphertext = "AAAA" + payload.Ciphertext[4:]
-	if _, err := DecryptBundle(code, tampered); err == nil {
-		t.Fatal("expected decryption failure with tampered ciphertext")
 	}
 }
 
@@ -171,8 +124,8 @@ func TestGoldenDualKeyAndPairRequestVectors(t *testing.T) {
 				ID: "srv-golden-1", Name: "Prod Node", Group: "Prod", Color: "#6366f1",
 				Host: "192.0.2.10", Port: 22, Username: "root",
 				AuthType: models.AuthPassword, Password: "golden-pass-!@#",
-				Proxy: models.ProxyConfig{Type: models.ProxyNone},
-				JumpHost: models.JumpHostConfig{Mode: models.JumpNone},
+				Proxy:          models.ProxyConfig{Type: models.ProxyNone},
+				JumpHost:       models.JumpHostConfig{Mode: models.JumpNone},
 				TimeoutSeconds: 15, KeepAliveSeconds: 30,
 				CreatedAt: fixedTime, UpdatedAt: fixedTime,
 			},

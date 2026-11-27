@@ -71,7 +71,7 @@ func TestCustomSelfSignedIPTLS13AndPing(t *testing.T) {
 		}
 		if r.URL.Path == "/v1/ping" {
 			pingHits++
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "protocol": "gssh-sync-v1"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "protocol": "gssh-sync-v2"})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -157,7 +157,7 @@ func TestSyncClientSafetyGuards(t *testing.T) {
 		Nonce:      "efgh",
 		Ciphertext: strings.Repeat("A", maxDropPayloadBytes+10),
 	}
-	if _, err := cli.Drop(context.Background(), hugePayload, 300); err == nil || !strings.Contains(err.Error(), "2 MiB") {
+	if err := cli.PairApprove(context.Background(), strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64), hugePayload); err == nil || !strings.Contains(err.Error(), "2 MiB") {
 		t.Fatalf("expected 2 MiB payload pre-check error, got %v", err)
 	}
 }

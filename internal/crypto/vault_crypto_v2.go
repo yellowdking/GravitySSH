@@ -30,7 +30,7 @@ func DerivePasswordKey(password string, pwSalt []byte) (pwKey, saltOut []byte, e
 		saltOut = append([]byte(nil), pwSalt...)
 	}
 	pwBytes := []byte(password)
-	defer ZeroBytes(pwBytes)
+	defer clear(pwBytes)
 	pwKey = argon2.IDKey(pwBytes, saltOut, 2, 64*1024, 2, masterKeySize)
 	return pwKey, saltOut, nil
 }
@@ -51,7 +51,7 @@ func (e *EnvelopeCrypto) SealWithPassword(plaintext []byte, password string) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer ZeroBytes(pwKey)
+	defer clear(pwKey)
 	return e.SealV2WithCachedKey(plaintext, pwSalt, pwKey)
 }
 
@@ -71,7 +71,7 @@ func (e *EnvelopeCrypto) SealV2WithCachedKey(plaintext, pwSalt, pwKey []byte) ([
 	if _, err := io.ReadFull(rand.Reader, masterKey); err != nil {
 		return nil, fmt.Errorf("generate master key: %w", err)
 	}
-	defer ZeroBytes(masterKey)
+	defer clear(masterKey)
 
 	wrappedKey, err := e.protector.Protect(masterKey)
 	if err != nil {
@@ -86,7 +86,7 @@ func (e *EnvelopeCrypto) SealV2WithCachedKey(plaintext, pwSalt, pwKey []byte) ([
 	keyMaterial := masterKey
 	if mode == ModePasswordDPAPI {
 		combined := xorKeyMaterial(masterKey, pwKey)
-		defer ZeroBytes(combined)
+		defer clear(combined)
 		keyMaterial = combined
 	}
 
@@ -94,7 +94,7 @@ func (e *EnvelopeCrypto) SealV2WithCachedKey(plaintext, pwSalt, pwKey []byte) ([
 	if err != nil {
 		return nil, err
 	}
-	defer ZeroBytes(dataKey)
+	defer clear(dataKey)
 
 	gcm, err := newAESGCM(dataKey)
 	if err != nil {
@@ -172,7 +172,7 @@ func (e *EnvelopeCrypto) openV2WithKey(blob []byte, password string) (plaintext,
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("%w: %v", ErrDecryptFailed, err)
 	}
-	defer ZeroBytes(masterKey)
+	defer clear(masterKey)
 	if len(masterKey) != masterKeySize {
 		return nil, nil, nil, ErrDecryptFailed
 	}
@@ -182,16 +182,16 @@ func (e *EnvelopeCrypto) openV2WithKey(blob []byte, password string) (plaintext,
 	keepPWKey := false
 	defer func() {
 		if !keepPWKey {
-			ZeroBytes(pwKey)
+			clear(pwKey)
 		}
 	}()
 
 	if mode == ModePasswordDPAPI {
 		pwBytes := []byte(password)
 		pwKey = argon2.IDKey(pwBytes, pwSalt, 2, 64*1024, 2, masterKeySize)
-		ZeroBytes(pwBytes)
+		clear(pwBytes)
 		combined := xorKeyMaterial(masterKey, pwKey)
-		defer ZeroBytes(combined)
+		defer clear(combined)
 		keyMaterial = combined
 	}
 
@@ -199,7 +199,7 @@ func (e *EnvelopeCrypto) openV2WithKey(blob []byte, password string) (plaintext,
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	defer ZeroBytes(dataKey)
+	defer clear(dataKey)
 
 	gcm, err := newAESGCM(dataKey)
 	if err != nil {

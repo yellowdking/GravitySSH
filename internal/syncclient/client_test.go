@@ -23,7 +23,8 @@ import (
 func TestRelayClientTLS13SPKIPinningAndRoundTrip(t *testing.T) {
 	const gateKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	var mu sync.Mutex
-	slots := make(map[string]EncryptedPayload)
+	slots := make(map[string]string)
+	remoteAddrs := make(map[string]struct{})
 
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -38,25 +39,38 @@ func TestRelayClientTLS13SPKIPinningAndRoundTrip(t *testing.T) {
 		}
 		mu.Lock()
 		defer mu.Unlock()
+		remoteAddrs[r.RemoteAddr] = struct{}{}
 		switch r.URL.Path {
-		case "/v1/drop":
-			var req EncryptedPayload
+		case "/v1/pair/init":
+			var req struct {
+				ChannelID   string `json:"channelId"`
+				SenderToken string `json:"senderToken"`
+			}
 			_ = json.Unmarshal(body, &req)
-			slots[req.ChannelID] = req
+			slots[req.ChannelID] = req.SenderToken
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "expiresAt": time.Now().UTC().Add(5 * time.Minute).Format(time.RFC3339)})
-		case "/v1/pickup":
-			var req struct{ ChannelID string `json:"channelId"` }
+		case "/v1/pair/poll":
+			var req struct {
+				ChannelID   string `json:"channelId"`
+				SenderToken string `json:"senderToken"`
+			}
 			_ = json.Unmarshal(body, &req)
-			p, ok := slots[req.ChannelID]
-			if !ok {
+			tok, ok := slots[req.ChannelID]
+			if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(req.SenderToken)) != 1 {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
-			delete(slots, req.ChannelID)
-			_ = json.NewEncoder(w).Encode(map[string]string{"salt": p.Salt, "nonce": p.Nonce, "ciphertext": p.Ciphertext})
-		case "/v1/cancel":
-			var req struct{ ChannelID string `json:"channelId"` }
+			_ = json.NewEncoder(w).Encode(map[string]any{"state": "waiting"})
+		case "/v1/pair/cancel":
+			var req struct {
+				ChannelID   string `json:"channelId"`
+				SenderToken string `json:"senderToken"`
+			}
 			_ = json.Unmarshal(body, &req)
+			if tok, ok := slots[req.ChannelID]; !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(req.SenderToken)) != 1 {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
 			delete(slots, req.ChannelID)
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		default:
@@ -74,7 +88,7 @@ func TestRelayClientTLS13SPKIPinningAndRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClientWithMode failed: %v", err)
 	}
-	if _, err := badClient.Pickup(context.Background(), strings.Repeat("a", 64)); err == nil {
+	if _, err := badClient.PairInit(context.Background(), strings.Repeat("a", 64), strings.Repeat("b", 64), 300); err == nil {
 		t.Fatal("expected SPKI pin mismatch error")
 	}
 
@@ -83,26 +97,29 @@ func TestRelayClientTLS13SPKIPinningAndRoundTrip(t *testing.T) {
 		t.Fatalf("NewClientWithMode failed: %v", err)
 	}
 	code, _ := GenerateCode()
-	payload, err := EncryptBundle(code, models.SyncBundle{SchemaVersion: 1, SourcePlatform: "windows", SourceDevice: "TEST"})
-	if err != nil {
-		t.Fatalf("EncryptBundle failed: %v", err)
+	canonical, _ := CanonicalizeCode(code)
+	channelID := DeriveChannelID(canonical)
+	senderToken, _ := GenerateHexToken32()
+
+	if _, err := client.PairInit(context.Background(), channelID, senderToken, 300); err != nil {
+		t.Fatalf("PairInit failed: %v", err)
 	}
-	if _, err := client.Drop(context.Background(), payload, 300); err != nil {
-		t.Fatalf("Drop failed: %v", err)
+	poll, err := client.PairPoll(context.Background(), channelID, senderToken)
+	if err != nil || poll.State != "waiting" || poll.NotFound {
+		t.Fatalf("PairPoll failed: %+v err=%v", poll, err)
 	}
-	got, err := client.Pickup(context.Background(), payload.ChannelID)
-	if err != nil {
-		t.Fatalf("Pickup failed: %v", err)
+	if err := client.PairCancel(context.Background(), channelID, senderToken); err != nil {
+		t.Fatalf("PairCancel failed: %v", err)
 	}
-	dec, err := DecryptBundle(code, got)
-	if err != nil || dec.SourceDevice != "TEST" {
-		t.Fatalf("DecryptBundle failed: %+v err=%v", dec, err)
+	pollAfter, err := client.PairPoll(context.Background(), channelID, senderToken)
+	if err != nil || !pollAfter.NotFound || pollAfter.State != "gone" {
+		t.Fatalf("expected gone after cancel, got %+v err=%v", pollAfter, err)
 	}
-	if _, err := client.Pickup(context.Background(), payload.ChannelID); err == nil {
-		t.Fatal("expected second pickup to fail (burn-after-read)")
-	}
-	if err := client.Cancel(context.Background(), payload.ChannelID); err != nil {
-		t.Fatalf("Cancel failed: %v", err)
+	mu.Lock()
+	connCount := len(remoteAddrs)
+	mu.Unlock()
+	if connCount != 1 {
+		t.Fatalf("expected HTTP keep-alive to reuse 1 TLS connection across 4 requests, got %d", connCount)
 	}
 }
 
@@ -409,10 +426,59 @@ func TestLiveRelayRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient default failed: %v", err)
 	}
-	code, err := GenerateCode()
+	ctx := context.Background()
+
+	sendCode, err := GenerateCode()
 	if err != nil {
-		t.Fatalf("GenerateCode failed: %v", err)
+		t.Fatalf("GenerateCode send failed: %v", err)
 	}
+	recvCode, err := GenerateCode()
+	if err != nil {
+		t.Fatalf("GenerateCode recv failed: %v", err)
+	}
+	canonicalSend, err := CanonicalizeCode(sendCode)
+	if err != nil {
+		t.Fatalf("CanonicalizeCode failed: %v", err)
+	}
+	channelID := DeriveChannelID(canonicalSend)
+	senderToken, err := GenerateHexToken32()
+	if err != nil {
+		t.Fatalf("GenerateHexToken32 senderToken failed: %v", err)
+	}
+	requestID, err := GenerateHexToken32()
+	if err != nil {
+		t.Fatalf("GenerateHexToken32 requestID failed: %v", err)
+	}
+
+	exp, err := client.PairInit(ctx, channelID, senderToken, 60)
+	if err != nil {
+		t.Fatalf("Live PairInit failed: %v", err)
+	}
+	t.Logf("Live PairInit OK: sendCode=%s expiresAt=%s", sendCode, exp.Format(time.RFC3339))
+
+	reqInfo := PairRequestPayload{
+		ReceiverCode:     recvCode,
+		ReceiverDevice:   "WIN-LIVE-RECV",
+		ReceiverPlatform: "windows",
+		RequestedAt:      time.Now().UTC().Format(time.RFC3339),
+	}
+	encReq, err := EncryptPairRequest(sendCode, reqInfo)
+	if err != nil {
+		t.Fatalf("EncryptPairRequest failed: %v", err)
+	}
+	if _, err := client.PairRequest(ctx, channelID, requestID, encReq); err != nil {
+		t.Fatalf("Live PairRequest failed: %v", err)
+	}
+
+	poll, err := client.PairPoll(ctx, channelID, senderToken)
+	if err != nil || poll.State != "requested" || poll.RequestID != requestID {
+		t.Fatalf("Live PairPoll expected requested, got %+v err=%v", poll, err)
+	}
+	decReq, err := DecryptPairRequest(sendCode, poll.EncryptedPayload)
+	if err != nil || decReq.ReceiverCode != recvCode {
+		t.Fatalf("Live DecryptPairRequest mismatch: %+v err=%v", decReq, err)
+	}
+
 	want := models.SyncBundle{
 		SchemaVersion:  1,
 		ExportedAt:     time.Now().UTC().Format(time.RFC3339),
@@ -420,25 +486,29 @@ func TestLiveRelayRoundTrip(t *testing.T) {
 		SourceDevice:   "WIN-LIVE-TEST",
 		Servers:        []models.ServerConfig{{ID: "live-1", Name: "LiveNode", Host: "192.0.2.99", Port: 22, Username: "root"}},
 	}
-	payload, err := EncryptBundle(code, want)
+	dualPayload, err := EncryptBundleDual(sendCode, decReq.ReceiverCode, requestID, want)
 	if err != nil {
-		t.Fatalf("EncryptBundle failed: %v", err)
+		t.Fatalf("EncryptBundleDual failed: %v", err)
 	}
-	exp, err := client.Drop(context.Background(), payload, 60)
-	if err != nil {
-		t.Fatalf("Live Drop failed: %v", err)
+	if err := client.PairApprove(ctx, channelID, senderToken, requestID, dualPayload); err != nil {
+		t.Fatalf("Live PairApprove failed: %v", err)
 	}
-	t.Logf("Live Drop OK: code=%s expiresAt=%s", code, exp.Format(time.RFC3339))
-	gotPayload, err := client.Pickup(context.Background(), payload.ChannelID)
-	if err != nil {
-		t.Fatalf("Live Pickup failed: %v", err)
+
+	st, err := client.PairStatus(ctx, channelID, requestID)
+	if err != nil || st.State != "approved" {
+		t.Fatalf("Live PairStatus expected approved, got %+v err=%v", st, err)
 	}
-	dec, err := DecryptBundle(code, gotPayload)
+	dec, err := DecryptBundleDual(sendCode, recvCode, requestID, st.EncryptedPayload)
 	if err != nil || dec.SourceDevice != "WIN-LIVE-TEST" || len(dec.Servers) != 1 {
-		t.Fatalf("Live DecryptBundle mismatch: %+v err=%v", dec, err)
+		t.Fatalf("Live DecryptBundleDual mismatch: %+v err=%v", dec, err)
 	}
-	// Burn-after-read: second pickup must return not found
-	if _, err := client.Pickup(context.Background(), payload.ChannelID); err == nil {
-		t.Fatal("expected second live pickup to fail (burn-after-read)")
+
+	// Burn-after-read: second PairStatus must return ErrPairNotFound and PairPoll must report gone/NotFound.
+	if _, err := client.PairStatus(ctx, channelID, requestID); !errors.Is(err, ErrPairNotFound) {
+		t.Fatalf("expected ErrPairNotFound on second live PairStatus, got %v", err)
+	}
+	pollGone, err := client.PairPoll(ctx, channelID, senderToken)
+	if err != nil || !pollGone.NotFound || pollGone.State != "gone" {
+		t.Fatalf("expected gone/NotFound after live burn-after-read, got %+v err=%v", pollGone, err)
 	}
 }

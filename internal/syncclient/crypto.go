@@ -135,55 +135,6 @@ func openAESGCMGunzip(secret, aad string, payload EncryptedPayload, badTagMsg st
 	return plainJSON, nil
 }
 
-// EncryptBundle compresses and encrypts a SyncBundle with fresh random salt & nonce (gssh-sync-v1).
-func EncryptBundle(code string, bundle models.SyncBundle) (EncryptedPayload, error) {
-	salt, nonce, err := randomSaltAndNonce()
-	if err != nil {
-		return EncryptedPayload{}, err
-	}
-	return EncryptBundleDeterministic(code, bundle, salt, nonce)
-}
-
-// EncryptBundleDeterministic encrypts a SyncBundle with explicit salt & nonce (gssh-sync-v1).
-func EncryptBundleDeterministic(code string, bundle models.SyncBundle, salt, nonce []byte) (EncryptedPayload, error) {
-	canonical, err := CanonicalizeCode(code)
-	if err != nil {
-		return EncryptedPayload{}, err
-	}
-	if bundle.SchemaVersion == 0 {
-		bundle.SchemaVersion = ProtocolVersion
-	}
-	rawJSON, err := json.Marshal(bundle)
-	if err != nil {
-		return EncryptedPayload{}, fmt.Errorf("marshal sync bundle: %w", err)
-	}
-	defer clear(rawJSON)
-	channelID := DeriveChannelID(canonical)
-	return sealGzipAESGCM(canonical, channelID, channelID, rawJSON, salt, nonce)
-}
-
-// DecryptBundle verifies AAD, decrypts AES-256-GCM, gunzips, and unmarshals a SyncBundle (gssh-sync-v1).
-func DecryptBundle(code string, payload EncryptedPayload) (models.SyncBundle, error) {
-	canonical, err := CanonicalizeCode(code)
-	if err != nil {
-		return models.SyncBundle{}, err
-	}
-	channelID := DeriveChannelID(canonical)
-	plainJSON, err := openAESGCMGunzip(canonical, channelID, payload, "同步数据解密或完整性校验失败，请确认同步码正确")
-	if err != nil {
-		return models.SyncBundle{}, err
-	}
-	defer clear(plainJSON)
-	var bundle models.SyncBundle
-	if err := json.Unmarshal(plainJSON, &bundle); err != nil {
-		return models.SyncBundle{}, fmt.Errorf("解析同步数据失败: %w", err)
-	}
-	if bundle.SchemaVersion != ProtocolVersion {
-		return models.SyncBundle{}, fmt.Errorf("不支持的同步协议版本: %d", bundle.SchemaVersion)
-	}
-	return bundle, nil
-}
-
 // EncryptPairRequest encrypts receiver verification info using canonicalSend and AAD = channelID.
 func EncryptPairRequest(sendCode string, info PairRequestPayload) (EncryptedPayload, error) {
 	salt, nonce, err := randomSaltAndNonce()
@@ -233,6 +184,21 @@ func DecryptPairRequest(sendCode string, payload EncryptedPayload) (PairRequestP
 	return info, nil
 }
 
+func deriveDualParams(sendCode, recvCode, requestID string) (dualSecret, dualAAD, channelID string, err error) {
+	dualSecret, err = DeriveDualSecret(sendCode, recvCode)
+	if err != nil {
+		return "", "", "", err
+	}
+	reqID := strings.TrimSpace(requestID)
+	if reqID == "" {
+		return "", "", "", errors.New("requestId 不能为空")
+	}
+	canonicalSend, canonicalRecv, _ := strings.Cut(dualSecret, ":")
+	channelID = DeriveChannelID(canonicalSend)
+	dualAAD = DeriveDualAAD(channelID, reqID, canonicalRecv)
+	return dualSecret, dualAAD, channelID, nil
+}
+
 // EncryptBundleDual encrypts a SyncBundle with both sendCode and recvCode bound to requestID (gssh-sync-v2).
 func EncryptBundleDual(sendCode, recvCode, requestID string, bundle models.SyncBundle) (EncryptedPayload, error) {
 	salt, nonce, err := randomSaltAndNonce()
@@ -244,17 +210,9 @@ func EncryptBundleDual(sendCode, recvCode, requestID string, bundle models.SyncB
 
 // EncryptBundleDualDeterministic encrypts a SyncBundle with explicit salt & nonce using dual-key derivation.
 func EncryptBundleDualDeterministic(sendCode, recvCode, requestID string, bundle models.SyncBundle, salt, nonce []byte) (EncryptedPayload, error) {
-	canonicalSend, err := CanonicalizeCode(sendCode)
+	dualSecret, dualAAD, channelID, err := deriveDualParams(sendCode, recvCode, requestID)
 	if err != nil {
 		return EncryptedPayload{}, err
-	}
-	canonicalRecv, err := CanonicalizeCode(recvCode)
-	if err != nil {
-		return EncryptedPayload{}, err
-	}
-	reqID := strings.TrimSpace(requestID)
-	if reqID == "" {
-		return EncryptedPayload{}, errors.New("requestId 不能为空")
 	}
 	if bundle.SchemaVersion == 0 {
 		bundle.SchemaVersion = ProtocolVersion
@@ -264,29 +222,15 @@ func EncryptBundleDualDeterministic(sendCode, recvCode, requestID string, bundle
 		return EncryptedPayload{}, fmt.Errorf("marshal sync bundle: %w", err)
 	}
 	defer clear(rawJSON)
-	channelID := DeriveChannelID(canonicalSend)
-	dualSecret := canonicalSend + ":" + canonicalRecv
-	dualAAD := DeriveDualAAD(channelID, reqID, canonicalRecv)
 	return sealGzipAESGCM(dualSecret, dualAAD, channelID, rawJSON, salt, nonce)
 }
 
 // DecryptBundleDual decrypts and verifies a gssh-sync-v2 dual-key SyncBundle payload.
 func DecryptBundleDual(sendCode, recvCode, requestID string, payload EncryptedPayload) (models.SyncBundle, error) {
-	canonicalSend, err := CanonicalizeCode(sendCode)
+	dualSecret, dualAAD, _, err := deriveDualParams(sendCode, recvCode, requestID)
 	if err != nil {
 		return models.SyncBundle{}, err
 	}
-	canonicalRecv, err := CanonicalizeCode(recvCode)
-	if err != nil {
-		return models.SyncBundle{}, err
-	}
-	reqID := strings.TrimSpace(requestID)
-	if reqID == "" {
-		return models.SyncBundle{}, errors.New("requestId 不能为空")
-	}
-	channelID := DeriveChannelID(canonicalSend)
-	dualSecret := canonicalSend + ":" + canonicalRecv
-	dualAAD := DeriveDualAAD(channelID, reqID, canonicalRecv)
 	plainJSON, err := openAESGCMGunzip(dualSecret, dualAAD, payload, "双向密钥解密或完整性校验失败，请确认双方同步码与确认码一致")
 	if err != nil {
 		return models.SyncBundle{}, err
