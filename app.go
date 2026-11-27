@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"github.com/yellowdking/GravitySSH/internal/models"
@@ -18,7 +20,15 @@ import (
 	"github.com/yellowdking/GravitySSH/internal/vault"
 )
 
-const maxSSHKeyFileSize = 256 * 1024
+const (
+	maxSSHKeyFileSize    = 256 * 1024
+	maxCachedSyncClients = 16
+)
+
+type cachedSyncClient struct {
+	client   *syncclient.Client
+	lastUsed time.Time
+}
 
 type wailsEventSink struct {
 	ctx context.Context
@@ -31,97 +41,163 @@ func (w *wailsEventSink) Emit(eventName string, data ...any) {
 }
 
 type App struct {
-	ctx          context.Context
-	store        *vault.Store
-	sshMgr       *sshclient.Manager
-	syncCache    *syncPreviewCache
-	syncClientMu sync.Mutex
-	syncClients  map[string]*syncclient.Client
-	initErr      error
+	mu              sync.RWMutex
+	ctx             context.Context
+	store           *vault.Store
+	sshMgr          *sshclient.Manager
+	initErr         error
+	closing         bool
+	syncCache       *syncPreviewCache
+	syncClientMu    sync.Mutex
+	syncClients     map[string]*cachedSyncClient
+	shortcutMu      sync.Mutex
+	shortcutRunners map[string]*sessionShortcutRunner
 }
 
 func NewApp() *App {
 	return &App{
-		syncCache:   newSyncPreviewCache(),
-		syncClients: make(map[string]*syncclient.Client),
+		syncCache:       newSyncPreviewCache(),
+		syncClients:     make(map[string]*cachedSyncClient),
+		shortcutRunners: make(map[string]*sessionShortcutRunner),
 	}
 }
 
 func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
 	store, err := vault.Open("", nil)
+
+	a.mu.Lock()
+	if a.closing {
+		a.mu.Unlock()
+		if store != nil {
+			_ = store.Close()
+		}
+		return
+	}
+	a.ctx = ctx
 	if err != nil {
 		a.initErr = err
+		a.mu.Unlock()
 		return
 	}
 	a.store = store
 	a.sshMgr = sshclient.NewManager(store, &wailsEventSink{ctx: ctx})
+	a.mu.Unlock()
 }
 
 func (a *App) shutdown(ctx context.Context) {
-	if a.sshMgr != nil {
-		a.sshMgr.CloseAll()
+	a.mu.Lock()
+	a.closing = true
+	a.ctx = nil
+	sshMgr := a.sshMgr
+	store := a.store
+	syncCache := a.syncCache
+	a.mu.Unlock()
+
+	a.cancelAllShortcutRuns()
+	if sshMgr != nil {
+		sshMgr.CloseAll()
 	}
-	if a.syncCache != nil {
-		a.syncCache.close()
+	if syncCache != nil {
+		syncCache.close()
 	}
 	a.syncClientMu.Lock()
-	for _, cli := range a.syncClients {
-		cli.CloseIdleConnections()
+	for _, entry := range a.syncClients {
+		if entry != nil && entry.client != nil {
+			entry.client.CloseIdleConnections()
+		}
 	}
 	clear(a.syncClients)
 	a.syncClientMu.Unlock()
-	if a.store != nil {
-		_ = a.store.Close()
+	if store != nil {
+		_ = store.Close()
 	}
+}
+
+func (a *App) appContext() context.Context {
+	a.mu.RLock()
+	ctx := a.ctx
+	a.mu.RUnlock()
+	return ctx
+}
+
+func (a *App) bgContext() context.Context {
+	if ctx := a.appContext(); ctx != nil {
+		return ctx
+	}
+	return context.Background()
+}
+
+func (a *App) readyDeps() (*vault.Store, *sshclient.Manager, context.Context, error) {
+	a.mu.RLock()
+	closing := a.closing
+	initErr := a.initErr
+	store := a.store
+	sshMgr := a.sshMgr
+	ctx := a.ctx
+	a.mu.RUnlock()
+	if closing {
+		return nil, nil, nil, errors.New("应用正在关闭")
+	}
+	if initErr != nil {
+		return nil, nil, nil, fmt.Errorf("加密保险库初始化失败: %w", initErr)
+	}
+	if store == nil || sshMgr == nil {
+		return nil, nil, nil, errors.New("应用尚未初始化完成")
+	}
+	return store, sshMgr, ctx, nil
+}
+
+func (a *App) unlockedDeps() (*vault.Store, *sshclient.Manager, context.Context, error) {
+	store, sshMgr, ctx, err := a.readyDeps()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if store.IsLocked() {
+		return nil, nil, nil, errors.New("配置文件已锁定，请先输入解锁密码")
+	}
+	return store, sshMgr, ctx, nil
 }
 
 func (a *App) ensureReady() error {
-	if a.initErr != nil {
-		return fmt.Errorf("加密保险库初始化失败: %w", a.initErr)
-	}
-	if a.store == nil || a.sshMgr == nil {
-		return errors.New("应用尚未初始化完成")
-	}
-	return nil
+	_, _, _, err := a.readyDeps()
+	return err
 }
 
 func (a *App) ensureUnlocked() error {
-	if err := a.ensureReady(); err != nil {
-		return err
-	}
-	if a.store.IsLocked() {
-		return errors.New("配置文件已锁定，请先输入解锁密码")
-	}
-	return nil
+	_, _, _, err := a.unlockedDeps()
+	return err
 }
 
 func (a *App) GetVaultLockState() (models.VaultLockState, error) {
-	if err := a.ensureReady(); err != nil {
+	store, _, _, err := a.readyDeps()
+	if err != nil {
 		return models.VaultLockState{}, err
 	}
-	return a.store.LockState(), nil
+	return store.LockState(), nil
 }
 
 func (a *App) UnlockVault(password string) error {
-	if err := a.ensureReady(); err != nil {
+	store, _, _, err := a.readyDeps()
+	if err != nil {
 		return err
 	}
-	return a.store.Unlock(password)
+	return store.Unlock(password)
 }
 
 func (a *App) SetVaultPassword(currentPassword, newPassword string) error {
-	if err := a.ensureUnlocked(); err != nil {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
 		return err
 	}
-	return a.store.SetPassword(currentPassword, newPassword)
+	return store.SetPassword(currentPassword, newPassword)
 }
 
 func (a *App) GetVaultSecurityInfo() (models.VaultSecurityInfo, error) {
-	if err := a.ensureReady(); err != nil {
+	store, _, _, err := a.readyDeps()
+	if err != nil {
 		return models.VaultSecurityInfo{}, err
 	}
-	return a.store.SecurityInfo(), nil
+	return store.SecurityInfo(), nil
 }
 
 func (a *App) GetAppVersion() string {
@@ -129,15 +205,12 @@ func (a *App) GetAppVersion() string {
 }
 
 func (a *App) CheckForUpdates() (models.UpdateCheckResult, error) {
-	ctx := a.ctx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return updater.CheckLatestRelease(ctx, AppVersion)
+	return updater.CheckLatestRelease(a.bgContext(), AppVersion)
 }
 
 func (a *App) OpenExternalURL(rawURL string) {
-	if a.ctx == nil {
+	ctx := a.appContext()
+	if ctx == nil {
 		return
 	}
 	u, err := url.Parse(strings.TrimSpace(rawURL))
@@ -148,56 +221,100 @@ func (a *App) OpenExternalURL(rawURL string) {
 	if scheme != "https" && scheme != "http" {
 		return
 	}
-	runtime.BrowserOpenURL(a.ctx, u.String())
+	runtime.BrowserOpenURL(ctx, u.String())
 }
 
 func (a *App) ListServers() ([]models.ServerView, error) {
-	if err := a.ensureReady(); err != nil {
+	store, _, _, err := a.readyDeps()
+	if err != nil {
 		return nil, err
 	}
-	return a.store.ListServers(), nil
+	return store.ListServers(), nil
 }
 
 func (a *App) SaveServer(req models.ServerSaveRequest) (models.ServerView, error) {
-	if err := a.ensureUnlocked(); err != nil {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
 		return models.ServerView{}, err
 	}
-	return a.store.SaveServer(req)
+	return store.SaveServer(req)
 }
 
 func (a *App) DeleteServer(id string) error {
-	if err := a.ensureUnlocked(); err != nil {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
 		return err
 	}
-	return a.store.DeleteServer(id)
+	return store.DeleteServer(id)
 }
 
 func (a *App) TestServerConnection(req models.ServerSaveRequest) (string, error) {
-	if err := a.ensureUnlocked(); err != nil {
+	_, sshMgr, ctx, err := a.unlockedDeps()
+	if err != nil {
 		return "", err
 	}
-	return a.sshMgr.TestConnection(a.ctx, req)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return sshMgr.TestConnection(ctx, req)
 }
 
 func (a *App) ListSSHKeys() ([]models.SSHKeyMeta, error) {
-	if err := a.ensureReady(); err != nil {
+	store, _, _, err := a.readyDeps()
+	if err != nil {
 		return nil, err
 	}
-	return a.store.ListSSHKeys(), nil
+	return store.ListSSHKeys(), nil
 }
 
 func (a *App) ImportSSHKeyFromText(name, pemContent, passphrase, comment string) (models.SSHKeyMeta, error) {
-	if err := a.ensureUnlocked(); err != nil {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
 		return models.SSHKeyMeta{}, err
 	}
-	return a.store.ImportSSHKey(name, pemContent, passphrase, comment)
+	return store.ImportSSHKey(name, pemContent, passphrase, comment)
+}
+
+func readSSHKeyFileBounded(selected string, maxBytes int64) (string, error) {
+	f, err := os.Open(selected)
+	if err != nil {
+		return "", fmt.Errorf("读取密钥文件失败: %w", err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("读取密钥文件失败: %w", err)
+	}
+	if info.IsDir() {
+		return "", errors.New("所选路径是目录，不是有效的 SSH 私钥文件")
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("所选路径不是普通文件，无法作为 SSH 私钥读取")
+	}
+	if info.Size() > maxBytes {
+		return "", errors.New("文件体积过大，不是有效的 SSH 私钥文件")
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("读取密钥文件失败: %w", err)
+	}
+	defer clear(raw)
+	if int64(len(raw)) > maxBytes {
+		return "", errors.New("文件体积过大，不是有效的 SSH 私钥文件")
+	}
+	return string(raw), nil
 }
 
 func (a *App) PickAndReadSSHKeyFile() (map[string]string, error) {
-	if err := a.ensureUnlocked(); err != nil {
+	_, _, ctx, err := a.unlockedDeps()
+	if err != nil {
 		return nil, err
 	}
-	selected, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+	if ctx == nil {
+		return nil, errors.New("应用上下文尚未就绪")
+	}
+	selected, err := runtime.OpenFileDialog(ctx, runtime.OpenDialogOptions{
 		Title: "选择 SSH 私钥文件",
 		Filters: []runtime.FileFilter{
 			{DisplayName: "SSH 密钥文件 (*.pem, *.key, id_*)", Pattern: "*.pem;*.key;*.ppk;*"},
@@ -210,48 +327,40 @@ func (a *App) PickAndReadSSHKeyFile() (map[string]string, error) {
 	if selected == "" {
 		return map[string]string{"cancelled": "true"}, nil
 	}
-	info, err := os.Stat(selected)
+	content, err := readSSHKeyFileBounded(selected, maxSSHKeyFileSize)
 	if err != nil {
-		return nil, fmt.Errorf("读取密钥文件失败: %w", err)
-	}
-	if info.IsDir() {
-		return nil, errors.New("所选路径是目录，不是有效的 SSH 私钥文件")
-	}
-	if info.Size() > maxSSHKeyFileSize {
-		return nil, errors.New("文件体积过大，不是有效的 SSH 私钥文件")
-	}
-	raw, err := os.ReadFile(selected)
-	if err != nil {
-		return nil, fmt.Errorf("读取密钥文件失败: %w", err)
-	}
-	defer clear(raw)
-	if len(raw) > maxSSHKeyFileSize {
-		return nil, errors.New("文件体积过大，不是有效的 SSH 私钥文件")
+		return nil, err
 	}
 	return map[string]string{
 		"cancelled": "false",
 		"fileName":  filepath.Base(selected),
-		"content":   string(raw),
+		"content":   content,
 	}, nil
 }
 
 func (a *App) GenerateSSHKey(name, algorithm, passphrase, comment string) (models.SSHKeyMeta, error) {
-	if err := a.ensureUnlocked(); err != nil {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
 		return models.SSHKeyMeta{}, err
 	}
-	return a.store.GenerateSSHKey(name, algorithm, passphrase, comment)
+	return store.GenerateSSHKey(name, algorithm, passphrase, comment)
 }
 
 func (a *App) DeleteSSHKey(id string) error {
-	if err := a.ensureUnlocked(); err != nil {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
 		return err
 	}
-	return a.store.DeleteSSHKey(id)
+	return store.DeleteSSHKey(id)
 }
 
 func (a *App) DeploySSHKeyToServers(keyID string, serverIDs []string, bindAsAuth bool) ([]models.KeyDeployResult, error) {
-	if err := a.ensureUnlocked(); err != nil {
+	_, sshMgr, ctx, err := a.unlockedDeps()
+	if err != nil {
 		return nil, err
 	}
-	return a.sshMgr.DeploySSHKeyToServers(a.ctx, keyID, serverIDs, bindAsAuth)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return sshMgr.DeploySSHKeyToServers(ctx, keyID, serverIDs, bindAsAuth)
 }
