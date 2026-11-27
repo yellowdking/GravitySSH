@@ -31,16 +31,17 @@ func TestStoreLimitsExpiryAndZeroing(t *testing.T) {
 	tok := []byte("0123456789abcdef0123456789abcdef")
 	reqID0 := makeTestHex64("slot-req-0")
 
-	// Fill all 64 slots
+	// Fill all 64 slots across distinct IPs (respecting maxSlotsPerIP = 4)
 	for i := 0; i < maxSlots; i++ {
 		ch := makeTestChannel(fmt.Sprintf("slot-%d", i))
+		ownerIP := fmt.Sprintf("198.51.100.%d", i/maxSlotsPerIP+1)
 		ttl := 30
 		wantTTL := 60 * time.Second
 		if i == 1 {
 			ttl = 900
 			wantTTL = 600 * time.Second
 		}
-		exp, err := st.PairInit(ch, tok, ttl)
+		exp, err := st.PairInit(ch, tok, ttl, ownerIP)
 		if err != nil {
 			t.Fatalf("pair init %d: %v", i, err)
 		}
@@ -48,8 +49,8 @@ func TestStoreLimitsExpiryAndZeroing(t *testing.T) {
 			t.Fatalf("slot %d expected ttl %v, got %v", i, wantTTL, exp.Sub(now))
 		}
 	}
-	// 65th slot -> errStoreFull
-	if _, err := st.PairInit(makeTestChannel("overflow"), tok, 0); err != errStoreFull {
+	// 65th slot from a fresh IP -> global errStoreFull
+	if _, err := st.PairInit(makeTestChannel("overflow"), tok, 0, "198.51.100.99"); err != errStoreFull {
 		t.Fatalf("expected errStoreFull, got %v", err)
 	}
 
@@ -100,7 +101,8 @@ func TestStoreMaxTotalBytesAndB64Escapes(t *testing.T) {
 	for i := 0; i < int(maxTotalBytes/(2<<20)); i++ {
 		ch := makeTestChannel(fmt.Sprintf("big-%d", i))
 		reqID := makeTestHex64(fmt.Sprintf("big-req-%d", i))
-		if _, err := st.PairInit(ch, tok, 120); err != nil {
+		ownerIP := fmt.Sprintf("198.51.100.%d", i/maxSlotsPerIP+1)
+		if _, err := st.PairInit(ch, tok, 120, ownerIP); err != nil {
 			t.Fatalf("pair init big %d failed: %v", i, err)
 		}
 		if _, err := st.PairRequest(ch, reqID, []byte{1}, []byte{2}, []byte{3}); err != nil {
@@ -115,7 +117,7 @@ func TestStoreMaxTotalBytesAndB64Escapes(t *testing.T) {
 	}
 	chOver := makeTestChannel("big-over")
 	reqOver := makeTestHex64("big-over-req")
-	if _, err := st.PairInit(chOver, tok, 120); err != nil {
+	if _, err := st.PairInit(chOver, tok, 120, "198.51.100.99"); err != nil {
 		t.Fatalf("pair init big-over failed: %v", err)
 	}
 	if _, err := st.PairRequest(chOver, reqOver, []byte{1}, []byte{2}, []byte{3}); err != errStoreFull {
@@ -160,7 +162,8 @@ func TestRateLimitBurstAndOversizedStealthStrike(t *testing.T) {
 
 	tok := makeTestHex64("rl-tok")
 	ip := "198.51.100.77"
-	for i := 0; i < 5; i++ {
+	// Consume all 5 burst tokens while staying within maxSlotsPerIP=4 (4 inits + 1 cancel)
+	for i := 0; i < maxSlotsPerIP; i++ {
 		body := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s"}`, makeTestChannel(fmt.Sprintf("rl-%d", i)), tok))
 		r := httptest.NewRecorder()
 		srv.ServeHTTP(r, signReq(t, http.MethodPost, "/v1/pair/init", body, testAppKey, now.Unix(), ip))
@@ -168,12 +171,18 @@ func TestRateLimitBurstAndOversizedStealthStrike(t *testing.T) {
 			t.Fatalf("burst req %d expected 200, got %d", i+1, r.Code)
 		}
 	}
-	// 6th immediate request -> 429 rate limited
+	cancelBody := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s"}`, makeTestChannel("rl-0"), tok))
+	rCancel := httptest.NewRecorder()
+	srv.ServeHTTP(rCancel, signReq(t, http.MethodPost, "/v1/pair/cancel", cancelBody, testAppKey, now.Unix(), ip))
+	if rCancel.Code != http.StatusOK {
+		t.Fatalf("burst req 5 (cancel) expected 200, got %d", rCancel.Code)
+	}
+	// 6th immediate request -> 429 rate_limited
 	body6 := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s"}`, makeTestChannel("rl-5"), tok))
 	r6 := httptest.NewRecorder()
 	srv.ServeHTTP(r6, signReq(t, http.MethodPost, "/v1/pair/init", body6, testAppKey, now.Unix(), ip))
-	if r6.Code != http.StatusTooManyRequests {
-		t.Fatalf("expected 429 on 6th burst req, got %d", r6.Code)
+	if r6.Code != http.StatusTooManyRequests || !strings.Contains(r6.Body.String(), `"rate_limited"`) {
+		t.Fatalf("expected 429 rate_limited on 6th burst req, got %d %s", r6.Code, r6.Body.String())
 	}
 	// Advance 6s -> 1 token refilled -> 200
 	now = now.Add(6 * time.Second)
@@ -340,7 +349,8 @@ func TestLimitListenerCloseUnblocksAcceptAndPerIPCap(t *testing.T) {
 
 func TestEnsureAssetsInitAndReload(t *testing.T) {
 	dir := t.TempDir()
-	a1, err := ensureAssets(dir, "107.172.98.169")
+	const testSanIP = "198.51.100.10"
+	a1, err := ensureAssets(dir, testSanIP)
 	if err != nil {
 		t.Fatalf("ensureAssets init: %v", err)
 	}
@@ -362,7 +372,7 @@ func TestEnsureAssetsInitAndReload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse cert: %v", err)
 	}
-	if len(cert.IPAddresses) != 1 || cert.IPAddresses[0].String() != "107.172.98.169" {
+	if len(cert.IPAddresses) != 1 || cert.IPAddresses[0].String() != testSanIP {
 		t.Fatalf("unexpected SAN IPs: %+v", cert.IPAddresses)
 	}
 	if cert.NotAfter.Sub(cert.NotBefore) < 9*365*24*time.Hour {
@@ -370,7 +380,7 @@ func TestEnsureAssetsInitAndReload(t *testing.T) {
 	}
 
 	// Second call reloads same key and SPKI
-	a2, err := ensureAssets(dir, "107.172.98.169")
+	a2, err := ensureAssets(dir, testSanIP)
 	if err != nil {
 		t.Fatalf("ensureAssets reload: %v", err)
 	}
@@ -591,7 +601,7 @@ func TestPairRejectAndExpiryClamp(t *testing.T) {
 
 	// Also test expiry clamp: TTL=300s -> after reject at t=0, expires at t+30s
 	ch2 := makeTestHex64("pair-rej-clamp")
-	if _, err := store.PairInit(ch2, []byte("tok2"), 300); err != nil {
+	if _, err := store.PairInit(ch2, []byte("tok2"), 300, "198.51.100.42"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.PairRequest(ch2, reqID, []byte{1}, []byte{2}, []byte{3}); err != nil {
@@ -694,7 +704,7 @@ func TestPairStoreMemoryLimitsAndZeroing(t *testing.T) {
 	bigCh := makeTestHex64("fill-store")
 	bigTok := []byte("fedcba9876543210fedcba9876543210")
 	bigReqID := makeTestHex64("fill-store-req")
-	if _, err := st.PairInit(bigCh, bigTok, 120); err != nil {
+	if _, err := st.PairInit(bigCh, bigTok, 120, "198.51.100.60"); err != nil {
 		t.Fatalf("pair init fill: %v", err)
 	}
 	if _, err := st.PairRequest(bigCh, bigReqID, []byte{1}, []byte{2}, []byte{3}); err != nil {
@@ -707,7 +717,7 @@ func TestPairStoreMemoryLimitsAndZeroing(t *testing.T) {
 	pairCh := makeTestHex64("pair-mem-limit")
 	tok := []byte("0123456789abcdef0123456789abcdef")
 	reqID := makeTestHex64("req-mem-limit")
-	if _, err := st.PairInit(pairCh, tok, 120); err != nil {
+	if _, err := st.PairInit(pairCh, tok, 120, "198.51.100.60"); err != nil {
 		t.Fatalf("pair init: %v", err)
 	}
 	if _, err := st.PairRequest(pairCh, reqID, make([]byte, 16), make([]byte, 12), make([]byte, 32)); err != nil {
@@ -904,7 +914,7 @@ func TestGracefulShutdownWaitsForInFlightAndZeroesStore(t *testing.T) {
 	ch := makeTestHex64("shutdown-ch")
 	tok := []byte("0123456789abcdef0123456789abcdef")
 	reqID := makeTestHex64("shutdown-req")
-	if _, err := store.PairInit(ch, tok, 120); err != nil {
+	if _, err := store.PairInit(ch, tok, 120, "198.51.100.61"); err != nil {
 		t.Fatalf("PairInit: %v", err)
 	}
 	if _, err := store.PairRequest(ch, reqID, []byte("s"), []byte("n"), []byte("top-secret-payload")); err != nil {
@@ -1316,7 +1326,7 @@ func TestPairStatusHeavyGatePreservesSlotAndStoreCap16MiB(t *testing.T) {
 	// Channel A: pending (requested)
 	chPending := makeTestHex64("status-gate-pending")
 	reqPending := makeTestHex64("status-gate-req-pending")
-	if _, err := store.PairInit(chPending, tok, 300); err != nil {
+	if _, err := store.PairInit(chPending, tok, 300, "198.51.100.70"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.PairRequest(chPending, reqPending, []byte("s"), []byte("n"), []byte("c")); err != nil {
@@ -1326,7 +1336,7 @@ func TestPairStatusHeavyGatePreservesSlotAndStoreCap16MiB(t *testing.T) {
 	// Channel B: approved with heavy payload
 	chApproved := makeTestHex64("status-gate-approved")
 	reqApproved := makeTestHex64("status-gate-req-approved")
-	if _, err := store.PairInit(chApproved, tok, 300); err != nil {
+	if _, err := store.PairInit(chApproved, tok, 300, "198.51.100.70"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.PairRequest(chApproved, reqApproved, []byte("s"), []byte("n"), []byte("c")); err != nil {
@@ -1375,5 +1385,122 @@ func TestPairStatusHeavyGatePreservesSlotAndStoreCap16MiB(t *testing.T) {
 	// Drain remaining test semaphore tokens
 	for len(srv.heavyBodySem) > 0 {
 		<-srv.heavyBodySem
+	}
+}
+
+func TestPerIPSlotCapIPv4AndIPv6Slash64(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	store := newMemStore(nowFn)
+	guard := newIPGuard(nowFn)
+	srv := newRelayServer(store, guard, testAppKey, nowFn)
+
+	tokHex := makeTestHex64("per-ip-tok")
+	tokRaw := []byte("0123456789abcdef0123456789abcdef")
+
+	// 1. Single IPv4 can allocate maxSlotsPerIP (4) slots, 5th returns 429 ip_limit
+	ip4 := "203.0.113.10"
+	for i := 0; i < maxSlotsPerIP; i++ {
+		now = now.Add(10 * time.Second) // keep rate limit tokens full
+		body := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s","ttlSeconds":120}`,
+			makeTestChannel(fmt.Sprintf("ip4-%d", i)), tokHex))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, signReq(t, http.MethodPost, "/v1/pair/init", body, testAppKey, now.Unix(), ip4))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("ip4 slot %d expected 200, got %d %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	now = now.Add(10 * time.Second)
+	overBody := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s","ttlSeconds":120}`,
+		makeTestChannel("ip4-overflow"), tokHex))
+	rOver := httptest.NewRecorder()
+	srv.ServeHTTP(rOver, signReq(t, http.MethodPost, "/v1/pair/init", overBody, testAppKey, now.Unix(), ip4))
+	if rOver.Code != http.StatusTooManyRequests || !strings.Contains(rOver.Body.String(), `"ip_limit"`) {
+		t.Fatalf("5th slot from same IPv4 expected 429 ip_limit, got %d %s", rOver.Code, rOver.Body.String())
+	}
+
+	// Distinct IPv4 is unaffected
+	otherBody := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s","ttlSeconds":120}`,
+		makeTestChannel("ip4-other"), tokHex))
+	rOther := httptest.NewRecorder()
+	srv.ServeHTTP(rOther, signReq(t, http.MethodPost, "/v1/pair/init", otherBody, testAppKey, now.Unix(), "203.0.113.11"))
+	if rOther.Code != http.StatusOK {
+		t.Fatalf("distinct IPv4 expected 200, got %d %s", rOther.Code, rOther.Body.String())
+	}
+
+	// 2. IPv6 addresses in the same /64 share the 4-slot cap; another /64 succeeds
+	for i := 0; i < maxSlotsPerIP; i++ {
+		ch := makeTestChannel(fmt.Sprintf("ip6-%d", i))
+		addr := fmt.Sprintf("2001:db8:abcd:1234::%x", i+1)
+		if _, err := store.PairInit(ch, tokRaw, 60, addr); err != nil {
+			t.Fatalf("ip6 slot %d (%s) failed: %v", i+1, addr, err)
+		}
+	}
+	if _, err := store.PairInit(makeTestChannel("ip6-over"), tokRaw, 60, "2001:db8:abcd:1234:dead:beef::99"); !errors.Is(err, errIPSlotsFull) {
+		t.Fatalf("5th slot in same IPv6 /64 expected errIPSlotsFull, got %v", err)
+	}
+	if _, err := store.PairInit(makeTestChannel("ip6-other64"), tokRaw, 60, "2001:db8:abcd:1235::1"); err != nil {
+		t.Fatalf("different IPv6 /64 expected success, got %v", err)
+	}
+
+	// 3. Slot release paths (Cancel, Approved burn-after-read, Rejected status, Expiry) restore per-IP quota
+	// (a) PairCancel releases a slot for ip4
+	cancelBody := []byte(fmt.Sprintf(`{"channelId":"%s","senderToken":"%s"}`, makeTestChannel("ip4-0"), tokHex))
+	rCan := httptest.NewRecorder()
+	srv.ServeHTTP(rCan, signReq(t, http.MethodPost, "/v1/pair/cancel", cancelBody, testAppKey, now.Unix(), ip4))
+	if rCan.Code != http.StatusOK {
+		t.Fatalf("cancel ip4-0 failed: %d", rCan.Code)
+	}
+	now = now.Add(10 * time.Second)
+	rRetry := httptest.NewRecorder()
+	srv.ServeHTTP(rRetry, signReq(t, http.MethodPost, "/v1/pair/init", overBody, testAppKey, now.Unix(), ip4))
+	if rRetry.Code != http.StatusOK {
+		t.Fatalf("expected ip4 init to succeed after cancel freed slot, got %d %s", rRetry.Code, rRetry.Body.String())
+	}
+
+	// (b) Approved burn-after-read releases a slot for IPv6 /64
+	reqIDApprove := makeTestHex64("ip6-approve-req")
+	if _, err := store.PairRequest(makeTestChannel("ip6-0"), reqIDApprove, []byte("s"), []byte("n"), []byte("c")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PairApprove(makeTestChannel("ip6-0"), tokRaw, reqIDApprove, []byte("s"), []byte("n"), []byte("c")); err != nil {
+		t.Fatal(err)
+	}
+	st, entry, err := store.PairStatus(makeTestChannel("ip6-0"), reqIDApprove)
+	if err != nil || st != "approved" || entry == nil {
+		t.Fatalf("expected approved status, got %q %v", st, err)
+	}
+	zeroSlot(entry)
+	if _, err := store.PairInit(makeTestChannel("ip6-after-approve"), tokRaw, 60, "2001:db8:abcd:1234::aa"); err != nil {
+		t.Fatalf("expected IPv6 /64 init after approved burn, got %v", err)
+	}
+
+	// (c) Rejected status releases a slot for IPv6 /64
+	reqIDReject := makeTestHex64("ip6-reject-req")
+	if _, err := store.PairRequest(makeTestChannel("ip6-1"), reqIDReject, []byte("s"), []byte("n"), []byte("c")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PairReject(makeTestChannel("ip6-1"), tokRaw, reqIDReject); err != nil {
+		t.Fatal(err)
+	}
+	stRej, _, err := store.PairStatus(makeTestChannel("ip6-1"), reqIDReject)
+	if err != nil || stRej != "rejected" {
+		t.Fatalf("expected rejected status, got %q %v", stRej, err)
+	}
+	if _, err := store.PairInit(makeTestChannel("ip6-after-reject"), tokRaw, 60, "2001:db8:abcd:1234::bb"); err != nil {
+		t.Fatalf("expected IPv6 /64 init after rejected status, got %v", err)
+	}
+
+	// (d) Expiry clears all slots and cleans ipSlots map completely
+	now = now.Add(10 * time.Minute)
+	store.Sweep()
+	if store.Len() != 0 {
+		t.Fatalf("expected 0 slots after expiry sweep, got %d", store.Len())
+	}
+	store.mu.Lock()
+	ipMapLen := len(store.ipSlots)
+	store.mu.Unlock()
+	if ipMapLen != 0 {
+		t.Fatalf("expected empty ipSlots map after sweep, got %d entries", ipMapLen)
 	}
 }
