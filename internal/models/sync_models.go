@@ -1,6 +1,6 @@
 package models
 
-// SyncBundle is the portable decrypted vault payload exchanged via gssh-sync-v1.
+// SyncBundle is the portable decrypted vault payload exchanged via gssh-sync-v1 / gssh-sync-v2.
 type SyncBundle struct {
 	SchemaVersion  int               `json:"schemaVersion"`
 	ExportedAt     string            `json:"exportedAt"`
@@ -12,8 +12,9 @@ type SyncBundle struct {
 	Templates      []BuiltinTemplate `json:"templates"`
 }
 
-// SyncSendSession describes an active drop uploaded to the relay.
+// SyncSendSession describes an active pairing channel registered on the relay.
 type SyncSendSession struct {
+	SessionID     string `json:"sessionId"`
 	Code          string `json:"code"`
 	QRText        string `json:"qrText"`
 	ExpiresAt     string `json:"expiresAt"`
@@ -22,6 +23,31 @@ type SyncSendSession struct {
 	KeyCount      int    `json:"keyCount"`
 	ShortcutCount int    `json:"shortcutCount"`
 	TemplateCount int    `json:"templateCount"`
+}
+
+// SyncSendPollResult reports the sender-side mutual verification pairing status.
+type SyncSendPollResult struct {
+	Status           string `json:"status"`
+	RequestID        string `json:"requestId,omitempty"`
+	ReceiverCode     string `json:"receiverCode,omitempty"`
+	ReceiverDevice   string `json:"receiverDevice,omitempty"`
+	ReceiverPlatform string `json:"receiverPlatform,omitempty"`
+	RequestedAt      string `json:"requestedAt,omitempty"`
+	Message          string `json:"message,omitempty"`
+}
+
+// SyncReceiveWaitSession represents an active receiver-side verification wait.
+type SyncReceiveWaitSession struct {
+	WaitID       string `json:"waitId"`
+	ReceiverCode string `json:"receiverCode"`
+	ExpiresAt    string `json:"expiresAt"`
+}
+
+// SyncReceivePollResult reports the receiver-side mutual verification status.
+type SyncReceivePollResult struct {
+	Status  string              `json:"status"`
+	Preview *SyncReceivePreview `json:"preview,omitempty"`
+	Message string              `json:"message,omitempty"`
 }
 
 // SyncReceivePreview summarizes a fetched & decrypted sync bundle before import.

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net/url"
 	"strings"
@@ -30,6 +31,16 @@ func GenerateCode() (string, error) {
 		buf[i] = CrockfordAlphabet[n.Int64()]
 	}
 	return FormatDisplayCode(string(buf)), nil
+}
+
+// GenerateHexToken32 returns 32 cryptographically random bytes encoded as 64 lowercase hex chars.
+func GenerateHexToken32() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, buf); err != nil {
+		return "", fmt.Errorf("generate random token: %w", err)
+	}
+	defer clear(buf)
+	return hex.EncodeToString(buf), nil
 }
 
 // FormatDisplayCode formats an 8-char canonical code as XXXX-XXXX.
@@ -82,4 +93,22 @@ func CanonicalizeCode(input string) (string, error) {
 func DeriveChannelID(canonicalCode string) string {
 	sum := sha256.Sum256([]byte(ChannelPrefix + canonicalCode))
 	return hex.EncodeToString(sum[:])
+}
+
+// DeriveDualSecret returns "canonicalSend:canonicalRecv" for gssh-sync-v2 dual-key derivation.
+func DeriveDualSecret(sendCode, recvCode string) (string, error) {
+	canonicalSend, err := CanonicalizeCode(sendCode)
+	if err != nil {
+		return "", err
+	}
+	canonicalRecv, err := CanonicalizeCode(recvCode)
+	if err != nil {
+		return "", err
+	}
+	return canonicalSend + ":" + canonicalRecv, nil
+}
+
+// DeriveDualAAD returns "channelID:requestID:canonicalRecv" used as AES-GCM AAD in gssh-sync-v2.
+func DeriveDualAAD(channelID, requestID, canonicalRecv string) string {
+	return channelID + ":" + requestID + ":" + canonicalRecv
 }
