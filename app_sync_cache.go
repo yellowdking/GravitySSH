@@ -148,6 +148,19 @@ func (c *syncPreviewCache) put(bundle models.SyncBundle) string {
 	return id
 }
 
+func (c *syncPreviewCache) peekClone(id string) (models.SyncBundle, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	c.pruneLocked(now)
+	entry, ok := c.entries[id]
+	c.rescheduleLocked(now)
+	if !ok {
+		return models.SyncBundle{}, false
+	}
+	return cloneSyncBundle(entry.bundle), true
+}
+
 func (c *syncPreviewCache) pop(id string) (models.SyncBundle, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

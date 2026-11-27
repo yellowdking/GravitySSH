@@ -2,7 +2,7 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
 import type { ServerView } from './types'
 import { useAppData } from './hooks/useAppData'
 import { useLayoutState } from './hooks/useLayoutState'
-import { createSessionActions } from './hooks/useSessionActions'
+import { createSessionActions, type AutocompleteToggleState } from './hooks/useSessionActions'
 import type { TerminalActions } from './hooks/terminalStream'
 import { useActionDialogs } from './hooks/useActionDialogs'
 import { Sidebar, type SidebarTab } from './components/Sidebar'
@@ -42,6 +42,17 @@ export default function App() {
   sessionsRef.current = sessions
   const serversRef = useRef(servers)
   serversRef.current = servers
+  const settingsRef = useRef(settings)
+  settingsRef.current = settings
+  const autocompleteToggleStateRef = useRef<AutocompleteToggleState>({
+    seq: 0,
+    lastConfirmedSeq: 0,
+    inFlight: 0,
+    confirmedEnabled: settings.autocompleteEnabled,
+  })
+  if (autocompleteToggleStateRef.current.inFlight === 0) {
+    autocompleteToggleStateRef.current.confirmedEnabled = settings.autocompleteEnabled
+  }
   const terminalActionsRef = useRef<Map<string, TerminalActions>>(new Map())
 
   const registerTerminalActions = useCallback((sessionId: string, actions: TerminalActions | null) => {
@@ -52,7 +63,7 @@ export default function App() {
   const act = createSessionActions({
     activeNav: nav, setActiveNav: setNav, activeSessionId: sid, setActiveSessionId: data.setActiveSessionId,
     sessionsRef, closedSessionIdsRef: data.closedSessionIdsRef, terminalActionsRef, setSessions: data.setSessions, setSftpOpenBySession, setShortcuts: data.setShortcuts,
-    settings, setSettings: data.setSettings, reloadServers, confirm, showToast: notify,
+    settings, settingsRef, autocompleteToggleStateRef, setSettings: data.setSettings, reloadServers, confirm, showToast: notify,
     estimatePty: () => lay.estimateInitialPty(wsRef.current, settings.terminalFontSize, settings.autoOpenSftp, drw !== 'none'),
   })
   const actRef = useRef(act)

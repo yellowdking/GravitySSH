@@ -38,10 +38,10 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
       </div>
       <div className="p-5 text-xs text-ag-text leading-relaxed whitespace-pre-line">{message}</div>
       <div className="px-5 py-3.5 border-t border-ag-border bg-[#11151f] flex justify-end gap-2">
-        <button type="button" onClick={onCancel} className="ag-btn-ghost text-xs">{cancelLabel}</button>
+        <button type="button" autoFocus={danger} onClick={onCancel} className="ag-btn-ghost text-xs">{cancelLabel}</button>
         <button
           type="button"
-          autoFocus
+          autoFocus={!danger}
           onClick={onConfirm}
           className={danger
             ? 'inline-flex items-center justify-center rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-medium text-xs px-4 py-2 transition'
