@@ -35,15 +35,37 @@ func TestBuildExtractCommand(t *testing.T) {
 	if _, err := buildExtractCommand("/t", "r.txt"); err == nil {
 		t.Fatal("expected error")
 	}
+	zipCmd, err := buildExtractCommand("/w", "pkg.zip")
+	if err != nil || !strings.Contains(zipCmd, "sudo -n") || !strings.Contains(zipCmd, "DEBIAN_FRONTEND=noninteractive") {
+		t.Fatalf("expected sudo -n and DEBIAN_FRONTEND=noninteractive in auto-install snippet: %q err=%v", zipCmd, err)
+	}
 }
 
 func TestUpdateCWDFromCommand(t *testing.T) {
-	m, s := NewManager(nil, nil), &sessionState{currentDir: "/home/u"}
+	m, s := NewManager(nil, nil), &sessionState{
+		currentDir: "/home/u",
+		dirCache:   map[string]dirCacheEntry{"/home/u": {fetchedAt: time.Now()}},
+	}
 	s.info.HomeDir = "/home/u"
 	for _, tc := range [][2]string{{"cd /var/log/nginx", "/var/log/nginx"}, {"cd ../apt && ls", "/var/log/apt"}, {"cd ~/p", "/home/u/p"}, {"cd", "/home/u"}} {
 		if m.updateCWDFromCommand(s, tc[0]); s.currentDir != tc[1] {
 			t.Fatalf("%q: %q", tc[0], s.currentDir)
 		}
+	}
+	// Read-only commands must NOT wipe dirCache.
+	if len(s.dirCache) != 1 {
+		t.Fatalf("expected read-only commands to preserve dirCache, got %d entries", len(s.dirCache))
+	}
+	// Mutating command MUST wipe dirCache and bump dirCacheGen.
+	genBefore := s.dirCacheGen
+	m.updateCWDFromCommand(s, "touch newfile.txt")
+	if len(s.dirCache) != 0 || s.dirCacheGen <= genBefore {
+		t.Fatalf("expected mutating command to clear dirCache and bump gen (len=%d gen=%d->%d)", len(s.dirCache), genBefore, s.dirCacheGen)
+	}
+	// Stale generation write must be rejected.
+	putDirCacheIfGen(s, "/home/u", nil, genBefore)
+	if len(s.dirCache) != 0 {
+		t.Fatal("stale dirCacheGen write should have been ignored")
 	}
 }
 

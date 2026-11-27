@@ -7,7 +7,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/pkg/sftp"
 )
@@ -161,5 +160,4 @@ func TestLowRTTDirDeleteAndPostDropVerify(t *testing.T) {
 	if !isSFTPConnError(io.EOF) || isSFTPConnError(os.ErrNotExist) || path.Clean("/a") != "/a" {
 		t.Fatal("conn error classifier mismatch")
 	}
-	_ = time.Millisecond
 }

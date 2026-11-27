@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/pkg/sftp"
 	"github.com/yellowdking/GravitySSH/internal/models"
@@ -73,7 +74,7 @@ func (m *Manager) getSFTP(sessionID string) (*sftp.Client, error) {
 		if sshCli == nil || sshCli.Client == nil {
 			return nil, fmt.Errorf("SSH 连接未就绪")
 		}
-		sc, err = sftp.NewClient(sshCli.Client)
+		sc, err = newSFTPClient(sshCli.Client)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("初始化 SFTP 失败: %w", err)
@@ -101,10 +102,8 @@ func (m *Manager) invalidateSFTP(sessionID string, bad *sftp.Client) {
 	if bad == nil {
 		return
 	}
-	m.mu.RLock()
-	sess, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if !ok {
+	sess := m.getSession(sessionID)
+	if sess == nil {
 		return
 	}
 	var toClose *sftp.Client
@@ -138,6 +137,7 @@ func (m *Manager) withSFTP(sessionID string, fn func(sc *sftp.Client) error) err
 
 // SFTPList lists entries in the given remote directory (defaults to home/cwd when empty).
 func (m *Manager) SFTPList(sessionID, remotePath string) (models.SFTPListResult, error) {
+	gen, hasSess := m.getDirCacheGen(sessionID)
 	var (
 		dir     string
 		entries []models.SFTPFileEntry
@@ -186,7 +186,9 @@ func (m *Manager) SFTPList(sessionID, remotePath string) (models.SFTPListResult,
 		}
 		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
 	})
-	m.updateDirCache(sessionID, dir, entries)
+	if hasSess {
+		m.updateDirCacheIfGen(sessionID, dir, entries, gen)
+	}
 	return models.SFTPListResult{Path: dir, Parent: path.Dir(dir), Entries: entries}, nil
 }
 
@@ -206,13 +208,29 @@ func buildSFTPEntries(sc *sftp.Client, dir string, infos []os.FileInfo) []models
 	}
 	if len(symlinks) > 0 {
 		sem := make(chan struct{}, 8)
-		var wg sync.WaitGroup
+		var (
+			wg         sync.WaitGroup
+			connBroken atomic.Bool
+		)
 		for _, idx := range symlinks {
+			if connBroken.Load() {
+				break
+			}
 			wg.Add(1)
 			sem <- struct{}{}
 			go func(i int) {
 				defer func() { <-sem; wg.Done() }()
-				if st, err := sc.Stat(entries[i].Path); err == nil && st.IsDir() {
+				if connBroken.Load() {
+					return
+				}
+				st, err := sc.Stat(entries[i].Path)
+				if err != nil {
+					if isSFTPConnError(err) {
+						connBroken.Store(true)
+					}
+					return
+				}
+				if st.IsDir() {
 					entries[i].IsDir = true
 				}
 			}(idx)
@@ -222,15 +240,10 @@ func buildSFTPEntries(sc *sftp.Client, dir string, infos []os.FileInfo) []models
 	return entries
 }
 
-func renameRemote(sc *sftp.Client, oldPath, newPath string) error {
+func renameRemote(sc *sftp.Client, oldPath, newPath string, hadOld bool) error {
 	if oldPath == newPath {
 		return nil
 	}
-	_, preErr := sc.Lstat(oldPath)
-	if isSFTPConnError(preErr) {
-		return preErr
-	}
-	hadOld := preErr == nil
 
 	var err error
 	if _, hasPosix := sc.HasExtension("posix-rename@openssh.com"); hasPosix {
