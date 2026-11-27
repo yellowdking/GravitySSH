@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -13,15 +14,219 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-const sftpMaxConcurrentRequestsPerFile = 64
+const (
+	sftpMaxConcurrentRequestsPerFile = 64
+	maxSSHExecOutputBytes            = 256 * 1024
+)
+
+var sftpInitTimeout = 15 * time.Second
+
+type sessionPipeCloser struct {
+	io.WriteCloser
+	sess *ssh.Session
+	once sync.Once
+}
+
+func (c *sessionPipeCloser) Close() error {
+	var err error
+	c.once.Do(func() {
+		err = c.WriteCloser.Close()
+		if c.sess != nil {
+			_ = c.sess.Close()
+		}
+	})
+	return err
+}
 
 func newSFTPClient(cli *ssh.Client) (*sftp.Client, error) {
-	return sftp.NewClient(
-		cli,
-		sftp.UseConcurrentReads(true),
-		sftp.UseConcurrentWrites(true),
-		sftp.MaxConcurrentRequestsPerFile(sftpMaxConcurrentRequestsPerFile),
-	)
+	ctx, cancel := context.WithTimeout(context.Background(), sftpInitTimeout)
+	defer cancel()
+	return newSFTPClientWithContext(ctx, cli)
+}
+
+func newSFTPClientWithContext(ctx context.Context, cli *ssh.Client) (*sftp.Client, error) {
+	if cli == nil {
+		return nil, errors.New("SSH 连接未就绪")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	sshSess, err := newSessionWithContext(ctx, cli)
+	if err != nil {
+		return nil, err
+	}
+
+	type initResult struct {
+		client *sftp.Client
+		err    error
+	}
+	ch := make(chan initResult, 1)
+	go func() {
+		wr, err := sshSess.StdinPipe()
+		if err != nil {
+			_ = sshSess.Close()
+			ch <- initResult{err: err}
+			return
+		}
+		rd, err := sshSess.StdoutPipe()
+		if err != nil {
+			_ = sshSess.Close()
+			ch <- initResult{err: err}
+			return
+		}
+		if err := sshSess.RequestSubsystem("sftp"); err != nil {
+			_ = sshSess.Close()
+			ch <- initResult{err: err}
+			return
+		}
+		wrappedWr := &sessionPipeCloser{WriteCloser: wr, sess: sshSess}
+		sc, err := sftp.NewClientPipe(
+			rd,
+			wrappedWr,
+			sftp.UseConcurrentReads(true),
+			sftp.UseConcurrentWrites(true),
+			sftp.MaxConcurrentRequestsPerFile(sftpMaxConcurrentRequestsPerFile),
+		)
+		if err != nil {
+			_ = wrappedWr.Close()
+			ch <- initResult{err: err}
+			return
+		}
+		select {
+		case ch <- initResult{client: sc}:
+		case <-ctx.Done():
+			_ = sc.Close()
+		}
+	}()
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, res.err
+		}
+		if err := ctx.Err(); err != nil {
+			_ = res.client.Close()
+			return nil, err
+		}
+		return res.client, nil
+	case <-ctx.Done():
+		abortSSHSession(sshSess)
+		return nil, ctx.Err()
+	}
+}
+
+func dialSFTPWithContext(ctx context.Context, fn func() (*sftp.Client, error)) (*sftp.Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	type dialResult struct {
+		client *sftp.Client
+		err    error
+	}
+	ch := make(chan dialResult, 1)
+	go func() {
+		sc, err := fn()
+		select {
+		case ch <- dialResult{client: sc, err: err}:
+		case <-ctx.Done():
+			if sc != nil {
+				_ = sc.Close()
+			}
+		}
+	}()
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, res.err
+		}
+		if err := ctx.Err(); err != nil {
+			if res.client != nil {
+				_ = res.client.Close()
+			}
+			return nil, err
+		}
+		return res.client, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+type boundedBuffer struct {
+	mu       sync.Mutex
+	limit    int
+	keepTail bool
+	buf      []byte
+}
+
+func newBoundedBuffer(limit int, keepTail bool) *boundedBuffer {
+	if limit <= 0 {
+		limit = maxSSHExecOutputBytes
+	}
+	return &boundedBuffer{limit: limit, keepTail: keepTail}
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.keepTail {
+		rem := b.limit - len(b.buf)
+		if rem > 0 {
+			if len(p) > rem {
+				b.buf = append(b.buf, p[:rem]...)
+			} else {
+				b.buf = append(b.buf, p...)
+			}
+		}
+		return len(p), nil
+	}
+	if len(p) >= b.limit {
+		if cap(b.buf) < b.limit {
+			b.buf = make([]byte, b.limit)
+		} else {
+			b.buf = b.buf[:b.limit]
+		}
+		copy(b.buf, p[len(p)-b.limit:])
+		return len(p), nil
+	}
+	total := len(b.buf) + len(p)
+	if total > b.limit {
+		drop := total - b.limit
+		keep := len(b.buf) - drop
+		copy(b.buf[:keep], b.buf[drop:])
+		b.buf = b.buf[:keep]
+	}
+	b.buf = append(b.buf, p...)
+	return len(p), nil
+}
+
+func (b *boundedBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]byte, len(b.buf))
+	copy(out, b.buf)
+	return out
+}
+
+func (b *boundedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.buf)
 }
 
 // newSessionWithContext opens an SSH session bounded by ctx so a stalled SSH
@@ -104,16 +309,13 @@ func runSSHExec(ctx context.Context, client *ssh.Client, cmd string, timeout tim
 	resCh := make(chan execResult, 1)
 	go func() {
 		defer sshSess.Close()
-		var (
-			out    []byte
-			runErr error
-		)
+		buf := newBoundedBuffer(maxSSHExecOutputBytes, combined)
+		sshSess.Stdout = buf
 		if combined {
-			out, runErr = sshSess.CombinedOutput(cmd)
-		} else {
-			out, runErr = sshSess.Output(cmd)
+			sshSess.Stderr = buf
 		}
-		resCh <- execResult{out: out, err: runErr}
+		runErr := sshSess.Run(cmd)
+		resCh <- execResult{out: buf.Bytes(), err: runErr}
 	}()
 
 	select {

@@ -95,10 +95,10 @@ func TestBuildCompressCommand(t *testing.T) {
 }
 
 func TestOptionInjectionGuardForDashPrefixedNames(t *testing.T) {
-	// 1. SFTPDownloadPacked (tar -cf - with symlinked-dir dereference base/.)
+	// 1. SFTPDownloadPacked (tar -czf - with symlinked-dir dereference base/.)
 	dlCmd := buildPackedDownloadCommand("/tmp", "--checkpoint-action=exec=id")
 	for _, want := range []string{
-		`sh -c 'cd -- "$1" && if [ -d "$2" ]; then exec tar -cf - -- "$2/."; else exec tar -cf - -- "$2"; fi' _`,
+		`sh -c 'cd -- "$1" && if [ -d "$2" ]; then exec tar -czf - -- "$2/."; else exec tar -czf - -- "$2"; fi' _`,
 		`'/tmp'`,
 		`'./--checkpoint-action=exec=id'`,
 	} {
@@ -152,7 +152,7 @@ func TestOptionInjectionGuardForDashPrefixedNames(t *testing.T) {
 		base string
 		want string
 	}{
-		{"/tmp", "-evil.zip", "; fi && unzip -o './-evil.zip' -d ."},
+		{"/tmp", "-evil.zip", "; fi && unzip -oq './-evil.zip' -d ."},
 		{"/tmp", "-evil.gz", "gunzip -kf -- './-evil.gz'"},
 		{"/tmp", "-evil.tar.gz", "tar -xzf './-evil.tar.gz'"},
 		{"/tmp", "backup-12:30.tar.gz", "tar -xzf './backup-12:30.tar.gz'"},
@@ -160,7 +160,7 @@ func TestOptionInjectionGuardForDashPrefixedNames(t *testing.T) {
 		{"/tmp", "-evil.tar.bz2", "tar -xjf './-evil.tar.bz2'"},
 		{"/tmp", "-evil.tar.xz", "tar -xJf './-evil.tar.xz'"},
 		{"-dir", "-evil.tar", "cd -- '-dir' && tar -xf './-evil.tar'"},
-		{"/tmp", "-evil.7z", "; fi && 7z x -y -- './-evil.7z'"},
+		{"/tmp", "-evil.7z", "; fi && 7z x -y -bso0 -- './-evil.7z'"},
 	}
 	for _, tc := range extractCases {
 		got, err := buildExtractCommand(tc.dir, tc.base)

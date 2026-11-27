@@ -2,7 +2,8 @@ package sshclient
 
 import (
 	"archive/tar"
-	"bytes"
+	"bufio"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -10,33 +11,17 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
+const maxPackedStderrBytes = 64 * 1024
+
 var packedDownloadTimeout = 30 * time.Minute
 
-type lockedBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (l *lockedBuffer) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.Write(p)
-}
-
-func (l *lockedBuffer) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.String()
-}
-
-// SFTPDownloadPacked streams a remote directory/file via `tar -cf -` over SSH
+// SFTPDownloadPacked streams a remote directory/file via gzip-compressed `tar -czf -` over SSH
 // and unpacks directly into localDir without leaving any temporary archive on the server.
 func (m *Manager) SFTPDownloadPacked(sessionID, remotePath, localDir string) (int, error) {
 	client, err := m.getSSHClient(sessionID)
@@ -78,8 +63,8 @@ func (m *Manager) SFTPDownloadPacked(sessionID, remotePath, localDir string) (in
 	if err != nil {
 		return 0, err
 	}
-	var stderr lockedBuffer
-	sshSess.Stderr = &stderr
+	stderr := newBoundedBuffer(maxPackedStderrBytes, true)
+	sshSess.Stderr = stderr
 
 	cmd := buildPackedDownloadCommand(parentDir, baseName)
 	startCh := make(chan error, 1)
@@ -97,16 +82,17 @@ func (m *Manager) SFTPDownloadPacked(sessionID, remotePath, localDir string) (in
 		return 0, fmt.Errorf("启动远程流式打包失败: %w", dlCtx.Err())
 	}
 
-	transferID := uuid.NewString()
-	m.emitTransfer(models.TransferProgress{
-		TransferID: transferID,
+	prog := models.TransferProgress{
+		TransferID: uuid.NewString(),
 		SessionID:  sessionID,
 		Direction:  "download",
 		FileName:   baseName + " (打包下载)",
 		RemotePath: clean,
 		LocalPath:  localDir,
 		Status:     "running",
-	})
+	}
+	tracker := newProgressTracker(m, &prog, stopCh)
+	tracker.emitInitial()
 
 	type unpackResult struct {
 		count int
@@ -114,7 +100,7 @@ func (m *Manager) SFTPDownloadPacked(sessionID, remotePath, localDir string) (in
 	}
 	unpackCh := make(chan unpackResult, 1)
 	go func() {
-		n, uErr := unpackTarStream(stdout, localDir)
+		n, uErr := unpackTarStreamWithProgress(stdout, localDir, tracker)
 		unpackCh <- unpackResult{count: n, err: uErr}
 	}()
 
@@ -162,33 +148,26 @@ func (m *Manager) SFTPDownloadPacked(sessionID, remotePath, localDir string) (in
 		} else {
 			errText = waitErr.Error()
 		}
-		m.emitTransfer(models.TransferProgress{
-			TransferID: transferID,
-			SessionID:  sessionID,
-			Direction:  "download",
-			FileName:   baseName + " (打包下载)",
-			RemotePath: clean,
-			LocalPath:  localDir,
-			Status:     "error",
-			Error:      errText,
-		})
+		snap := tracker.snapshot()
+		snap.Status = "error"
+		snap.Error = errText
+		m.emitTransfer(snap)
 		return fileCount, fmt.Errorf("打包下载失败: %s", errText)
 	}
 
-	m.emitTransfer(models.TransferProgress{
-		TransferID: transferID,
-		SessionID:  sessionID,
-		Direction:  "download",
-		FileName:   baseName + " (打包下载)",
-		RemotePath: clean,
-		LocalPath:  localDir,
-		Percent:    100,
-		Status:     "done",
-	})
+	snap := tracker.snapshot()
+	snap.Total = snap.Transferred
+	snap.Percent = 100
+	snap.Status = "done"
+	m.emitTransfer(snap)
 	return fileCount, nil
 }
 
 func unpackTarStream(r io.Reader, destRoot string) (int, error) {
+	return unpackTarStreamWithProgress(r, destRoot, nil)
+}
+
+func unpackTarStreamWithProgress(r io.Reader, destRoot string, tracker *progressTracker) (int, error) {
 	if err := os.MkdirAll(destRoot, 0o755); err != nil {
 		return 0, err
 	}
@@ -196,9 +175,27 @@ func unpackTarStream(r io.Reader, destRoot string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	tr := tar.NewReader(r)
+
+	br := bufio.NewReaderSize(r, 32*1024)
+	tarSrc := io.Reader(br)
+	var gzr *gzip.Reader
+	if magic, peekErr := br.Peek(2); (peekErr == nil || (peekErr == io.EOF && len(magic) == 2)) && magic[0] == 0x1f && magic[1] == 0x8b {
+		gzr, err = gzip.NewReader(br)
+		if err != nil {
+			return 0, err
+		}
+		defer gzr.Close()
+		tarSrc = gzr
+	}
+
+	tr := tar.NewReader(tarSrc)
 	count := 0
 	for {
+		if tracker != nil {
+			if err := tracker.checkCanceled(); err != nil {
+				return count, err
+			}
+		}
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			break
@@ -223,7 +220,11 @@ func unpackTarStream(r io.Reader, destRoot string) (int, error) {
 			if err != nil {
 				return count, err
 			}
-			_, cpErr := io.Copy(f, tr)
+			dst := io.Writer(f)
+			if tracker != nil {
+				dst = &progressWriter{w: f, tracker: tracker}
+			}
+			_, cpErr := io.Copy(dst, tr)
 			closeErr := f.Close()
 			if cpErr != nil {
 				_ = os.Remove(target)
@@ -234,6 +235,12 @@ func unpackTarStream(r io.Reader, destRoot string) (int, error) {
 				return count, closeErr
 			}
 			count++
+		}
+	}
+	if gzr != nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(gzr, 64*1024))
+		if err := gzr.Close(); err != nil {
+			return count, err
 		}
 	}
 	return count, nil
@@ -318,7 +325,7 @@ func (m *Manager) SFTPCompress(sessionID, remoteDir string, names []string, form
 func buildPackedDownloadCommand(parentDir, baseName string) string {
 	safeBase := safeRelativeName(baseName)
 	return fmt.Sprintf(
-		`sh -c 'cd -- "$1" && if [ -d "$2" ]; then exec tar -cf - -- "$2/."; else exec tar -cf - -- "$2"; fi' _ %s %s`,
+		`sh -c 'cd -- "$1" && if [ -d "$2" ]; then exec tar -czf - -- "$2/."; else exec tar -czf - -- "$2"; fi' _ %s %s`,
 		shellQuote(parentDir),
 		shellQuote(safeBase),
 	)
