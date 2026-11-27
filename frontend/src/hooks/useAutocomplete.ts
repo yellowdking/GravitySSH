@@ -125,7 +125,7 @@ export function useAutocomplete({ enabled, serverId, sessionId, inputLineRef, on
   }, [applySuggestion])
 
   return {
-    suggestions, queryLine, selectedIdx, setSelectedIdx, suggestionsRef, selectedIdxRef,
+    suggestions, queryLine, selectedIdx, setSelectedIdx, suggestionsRef,
     requestSuggestions, clearSuggestions, moveSelection, applySuggestion, applySelected,
   }
 }

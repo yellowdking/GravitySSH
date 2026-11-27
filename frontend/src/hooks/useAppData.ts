@@ -50,7 +50,7 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
   const [securityInfo, setSecurityInfo] = useState<VaultSecurityInfo | null>(null)
   const [lockState, setLockState] = useState<VaultLockState | null>(null)
-  const [appVersion, setAppVersion] = useState('1.4.2')
+  const [appVersion, setAppVersion] = useState('1.4.3')
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null)
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
@@ -89,7 +89,13 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
       if (ver) setAppVersion(ver)
       if (lock) {
         setLockState(lock)
-        if (lock.locked) return
+        if (lock.locked) {
+          setServers([])
+          setSshKeys([])
+          setShortcuts([])
+          setHistory([])
+          return
+        }
       }
       const [srvs, keys, scs, hist, cfg, sec] = await Promise.all([
         api.listServers(),

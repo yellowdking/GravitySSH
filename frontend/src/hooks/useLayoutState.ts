@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 
 function readNum(key: string, fallback: number, min: number, max: number): number {
   try {
@@ -28,6 +28,11 @@ export function useLayoutState() {
   const [sftpWidth, setSftpWidth] = useState(() => readNum('gssh.sftpWidth', 360, 240, 620))
   const [drawerWidth, setDrawerWidth] = useState(() => readNum('gssh.drawerWidth', 360, 260, 560))
 
+  const sftpWidthRef = useRef(sftpWidth)
+  sftpWidthRef.current = sftpWidth
+  const drawerWidthRef = useRef(drawerWidth)
+  drawerWidthRef.current = drawerWidth
+
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed((prev) => {
       const next = !prev
@@ -36,21 +41,34 @@ export function useLayoutState() {
     })
   }, [])
 
-  const commitSidebarWidth = useCallback((w: number) => saveStr('gssh.sidebarWidth', String(w)), [])
-  const commitSftpWidth = useCallback((w: number) => saveStr('gssh.sftpWidth', String(w)), [])
-  const commitDrawerWidth = useCallback((w: number) => saveStr('gssh.drawerWidth', String(w)), [])
+  const commitSidebarWidth = useCallback((w: number) => {
+    setSidebarWidth(w)
+    saveStr('gssh.sidebarWidth', String(w))
+  }, [])
+
+  const commitSftpWidth = useCallback((w: number) => {
+    sftpWidthRef.current = w
+    setSftpWidth(w)
+    saveStr('gssh.sftpWidth', String(w))
+  }, [])
+
+  const commitDrawerWidth = useCallback((w: number) => {
+    drawerWidthRef.current = w
+    setDrawerWidth(w)
+    saveStr('gssh.drawerWidth', String(w))
+  }, [])
 
   const estimateInitialPty = useCallback(
     (container: HTMLDivElement | null, fontSize: number, withSftp: boolean, withDrawer: boolean) => {
       const rect = container?.getBoundingClientRect()
       const fs = Math.max(10, fontSize || 14)
-      const availW = (rect?.width || 960) - (withSftp ? sftpWidth : 0) - (withDrawer ? drawerWidth : 0) - 36
+      const availW = (rect?.width || 960) - (withSftp ? sftpWidthRef.current : 0) - (withDrawer ? drawerWidthRef.current : 0) - 36
       const availH = (rect?.height || 620) - 64
       const cols = Math.max(60, Math.min(240, Math.floor(availW / (fs * 0.62))))
       const rows = Math.max(18, Math.min(80, Math.floor(availH / (fs * 1.15))))
       return { cols, rows }
     },
-    [sftpWidth, drawerWidth]
+    []
   )
 
   return {
