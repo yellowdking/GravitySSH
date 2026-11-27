@@ -2,13 +2,24 @@ package syncclient
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestNormalizeRelayURL(t *testing.T) {
@@ -188,5 +199,171 @@ func TestSyncClientBlocksRedirects(t *testing.T) {
 	}
 	if targetHits != 0 {
 		t.Fatalf("sync client followed 307 redirect to %s (%d hits)", downgradeTarget.URL, targetHits)
+	}
+}
+
+func makeSelfSignedCertForIP(t *testing.T, ipStr string) tls.Certificate {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: ipStr},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP(ipStr)},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{
+		Certificate: [][]byte{der},
+		PrivateKey:  priv,
+		Leaf:        leaf,
+	}
+}
+
+func makeSelfSignedCertForDNS(t *testing.T, dnsName string) tls.Certificate {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: dnsName},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{dnsName},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{
+		Certificate: [][]byte{der},
+		PrivateKey:  priv,
+		Leaf:        leaf,
+	}
+}
+
+func TestCustomRelayExplicitSPKIPinSANAndTOFUHardening(t *testing.T) {
+	const gateKey = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
+	cert1 := makeSelfSignedCertForIP(t, "127.0.0.1")
+	cert2 := makeSelfSignedCertForIP(t, "127.0.0.1")
+	wrongIPCert := makeSelfSignedCertForIP(t, "198.51.100.77")
+
+	sum1 := sha256.Sum256(cert1.Leaf.RawSubjectPublicKeyInfo)
+	pin1 := hex.EncodeToString(sum1[:])
+
+	// 1. NormalizeRelayURLWithPin parses valid #spki= and rejects malformed #spki=.
+	cleanURL, mode, gotPin, err := NormalizeRelayURLWithPin("127.0.0.1:54843#spki=" + strings.ToUpper(pin1))
+	if err != nil || cleanURL != "https://127.0.0.1:54843" || mode != RelayTLSModePinned || gotPin != pin1 {
+		t.Fatalf("unexpected NormalizeRelayURLWithPin: url=%q mode=%v pin=%q err=%v", cleanURL, mode, gotPin, err)
+	}
+	if _, _, _, err := NormalizeRelayURLWithPin("https://127.0.0.1:54843#spki=not-hex"); err == nil {
+		t.Fatal("expected malformed #spki= fragment to be rejected")
+	}
+
+	// 2. Custom raw-IP TLS 1.3 server with swappable certificate (avoid httptest.StartTLS
+	//    which injects a default Certificates[0] that bypasses GetCertificate for raw IPs).
+	var activeCert atomic.Pointer[tls.Certificate]
+	activeCert.Store(&cert1)
+
+	rawLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsLn := tls.NewListener(rawLn, &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return activeCert.Load(), nil
+		},
+	})
+	httpSrv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			if r.Header.Get("X-GSSH-Client") != ClientHeaderValue ||
+				r.Header.Get("X-GSSH-Sig") != SignRequest(gateKey, r.Method, r.URL.Path, r.Header.Get("X-GSSH-TS"), body) {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		}),
+	}
+	go func() { _ = httpSrv.Serve(tlsLn) }()
+	defer httpSrv.Close()
+	srvURL := "https://" + rawLn.Addr().String()
+
+	// Explicit #spki= matches cert1 and rejects mismatching pin.
+	cURL, cMode, cPin, err := NormalizeRelayURLWithPin(srvURL + "#spki=" + pin1)
+	if err != nil || cMode != RelayTLSModePinned {
+		t.Fatalf("NormalizeRelayURLWithPin failed: %v", err)
+	}
+	pinnedCli, err := NewClientWithMode(cURL, gateKey, cPin, cMode)
+	if err != nil {
+		t.Fatalf("NewClientWithMode pinned failed: %v", err)
+	}
+	if _, err := pinnedCli.Ping(context.Background()); err != nil {
+		t.Fatalf("explicit #spki= pin Ping failed: %v", err)
+	}
+
+	// 3. TOFU on RelayTLSModeSelfSignedIP pins cert1 on first handshake, then rejects MITM swap to cert2.
+	tofuCli, err := NewClientWithMode(srvURL, gateKey, "", RelayTLSModeSelfSignedIP)
+	if err != nil {
+		t.Fatalf("NewClientWithMode TOFU failed: %v", err)
+	}
+	if _, err := tofuCli.Ping(context.Background()); err != nil {
+		t.Fatalf("initial TOFU Ping failed: %v", err)
+	}
+	// Close idle connections so the next request performs a fresh TLS handshake against the swapped cert2.
+	tofuCli.CloseIdleConnections()
+	activeCert.Store(&cert2)
+	if _, err := tofuCli.Ping(context.Background()); err == nil || !strings.Contains(err.Error(), "TOFU") {
+		t.Fatalf("expected TOFU SPKI mismatch error after cert swap, got: %v", err)
+	}
+
+	// 4. Raw-IP cert with mismatched IP SANs must be rejected even on first handshake.
+	activeCert.Store(&wrongIPCert)
+	wrongSanCli, err := NewClientWithMode(srvURL, gateKey, "", RelayTLSModeSelfSignedIP)
+	if err != nil {
+		t.Fatalf("NewClientWithMode wrongSan failed: %v", err)
+	}
+	if _, err := wrongSanCli.Ping(context.Background()); err == nil || !strings.Contains(err.Error(), "SAN") {
+		t.Fatalf("expected SAN IP mismatch error, got: %v", err)
+	}
+
+	// 5. Default self-hosted bbplin/sshsync cert (DNSNames:["sshsync"], empty IPAddresses)
+	//    must work out-of-the-box under RelayTLSModeSelfSignedIP AND enforce TOFU on swap.
+	sshsyncCertA := makeSelfSignedCertForDNS(t, "sshsync")
+	sshsyncCertB := makeSelfSignedCertForDNS(t, "sshsync")
+	activeCert.Store(&sshsyncCertA)
+	defaultSelfHostedCli, err := NewClientWithMode(srvURL, gateKey, "", RelayTLSModeSelfSignedIP)
+	if err != nil {
+		t.Fatalf("NewClientWithMode defaultSelfHosted failed: %v", err)
+	}
+	if _, err := defaultSelfHostedCli.Ping(context.Background()); err != nil {
+		t.Fatalf("expected default bbplin/sshsync cert (DNSNames:[sshsync], no IP SAN) to succeed: %v", err)
+	}
+	defaultSelfHostedCli.CloseIdleConnections()
+	activeCert.Store(&sshsyncCertB)
+	if _, err := defaultSelfHostedCli.Ping(context.Background()); err == nil || !strings.Contains(err.Error(), "TOFU") {
+		t.Fatalf("expected TOFU mismatch when default bbplin/sshsync cert rotates, got: %v", err)
 	}
 }

@@ -256,8 +256,18 @@ func TestSFTPPipelinedUploadDownloadAndEditorLimits(t *testing.T) {
 	if err := m.SFTPUpload("s1", srcLocal, "/dir"); err != nil {
 		t.Fatalf("SFTPUpload failed: %v", err)
 	}
-	if !bytes.Equal(fs.nodes["/dir/big.bin"].data, payload) {
-		t.Fatalf("uploaded content mismatch: got %d bytes, want %d", len(fs.nodes["/dir/big.bin"].data), len(payload))
+	fs.mu.Lock()
+	uploadedBig := append([]byte(nil), fs.nodes["/dir/big.bin"].data...)
+	fs.mu.Unlock()
+	if !bytes.Equal(uploadedBig, payload) {
+		t.Fatalf("uploaded content mismatch: got %d bytes, want %d", len(uploadedBig), len(payload))
+	}
+
+	// Verify progressReader implements Size() int64 so pkg/sftp (*File).ReadFrom enables concurrent writes.
+	var pr any = &progressReader{r: bytes.NewReader(payload), size: int64(len(payload))}
+	sizer, ok := pr.(interface{ Size() int64 })
+	if !ok || sizer.Size() != int64(len(payload)) {
+		t.Fatalf("progressReader must implement Size() int64 returning %d, ok=%v", len(payload), ok)
 	}
 
 	dstLocal := filepath.Join(tmpDir, "downloaded.bin")
@@ -273,25 +283,31 @@ func TestSFTPPipelinedUploadDownloadAndEditorLimits(t *testing.T) {
 	if err := m.SFTPWriteTextFile("s1", "/dir/conf.ini", "k=v1\n"); err != nil {
 		t.Fatalf("SFTPWriteTextFile temp+rename failed: %v", err)
 	}
-	if string(fs.nodes["/dir/conf.ini"].data) != "k=v1\n" {
-		t.Fatalf("unexpected conf.ini data: %q", string(fs.nodes["/dir/conf.ini"].data))
-	}
+	fs.mu.Lock()
+	confV1 := string(fs.nodes["/dir/conf.ini"].data)
 	fs.failRename = true
+	fs.mu.Unlock()
+	if confV1 != "k=v1\n" {
+		t.Fatalf("unexpected conf.ini data: %q", confV1)
+	}
 	if err := m.SFTPWriteTextFile("s1", "/dir/conf.ini", "k=v2\n"); err != nil {
 		t.Fatalf("SFTPWriteTextFile fallback in-place failed: %v", err)
 	}
-	if string(fs.nodes["/dir/conf.ini"].data) != "k=v2\n" {
-		t.Fatalf("unexpected fallback conf.ini data: %q", string(fs.nodes["/dir/conf.ini"].data))
-	}
+	fs.mu.Lock()
+	confV2 := string(fs.nodes["/dir/conf.ini"].data)
 	fs.failRename = false
-
-	// Editor: reject len(raw) > maxEditableFileSize even when Stat reports size 0.
 	fs.nodes["/dir/virtual.log"] = &memRWNode{
 		name: "virtual.log",
 		mode: 0o644,
 		data: bytes.Repeat([]byte("x"), maxEditableFileSize+10),
 	}
 	fs.reportZeroSz = true
+	fs.mu.Unlock()
+	if confV2 != "k=v2\n" {
+		t.Fatalf("unexpected fallback conf.ini data: %q", confV2)
+	}
+
+	// Editor: reject len(raw) > maxEditableFileSize even when Stat reports size 0.
 	if _, err := m.SFTPReadTextFile("s1", "/dir/virtual.log"); err == nil || !strings.Contains(err.Error(), "1 MB") {
 		t.Fatalf("expected >1MB read rejection when Stat reports 0, got %v", err)
 	}
@@ -401,8 +417,10 @@ func TestSFTPUploadAtomicPreservesExistingAndInvalidatesCacheOnError(t *testing.
 	}
 
 	// Verify rename-failure fallback works cleanly without leaving temp files.
+	fs.mu.Lock()
 	fs.failMidWrite = false
 	fs.failRename = true
+	fs.mu.Unlock()
 	if err := m.SFTPUpload("s1", localFile, "/dir"); err != nil {
 		t.Fatalf("expected in-place fallback upload to succeed when rename fails: %v", err)
 	}
@@ -465,7 +483,9 @@ func TestSFTPWriteTextFilePreservesSymlink(t *testing.T) {
 	}
 
 	// 2. Server does NOT resolve RealPath -> must NOT rename over symlink; writes in-place through link.
+	fs.mu.Lock()
 	fs.resolveRealPath = false
+	fs.mu.Unlock()
 	if err := m.SFTPWriteTextFile("s1", "/sites-enabled/site", "new-v3\n"); err != nil {
 		t.Fatalf("SFTPWriteTextFile via unresolved symlink failed: %v", err)
 	}
