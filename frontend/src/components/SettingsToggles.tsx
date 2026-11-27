@@ -1,6 +1,7 @@
 import React from 'react'
 import { FolderTree, Sparkles, Terminal } from 'lucide-react'
 import type { AppSettings } from '../types'
+import { NumericInput } from './NumericInput'
 
 interface Props {
   draft: AppSettings
@@ -63,7 +64,7 @@ export const SettingsToggles: React.FC<Props> = ({ draft, patch }) => (
         </div>
         <div>
           <label className="block text-xs text-ag-muted mb-1">默认心跳保活 (秒)</label>
-          <input type="number" min={5} max={300} className="ag-input font-mono py-1.5" value={draft.defaultKeepAliveSeconds} onChange={(e) => patch({ defaultKeepAliveSeconds: Number(e.target.value) || 30 })} />
+          <NumericInput min={5} max={300} fallback={30} className="ag-input font-mono py-1.5" value={draft.defaultKeepAliveSeconds} onChange={(defaultKeepAliveSeconds) => patch({ defaultKeepAliveSeconds })} />
         </div>
       </div>
     </section>

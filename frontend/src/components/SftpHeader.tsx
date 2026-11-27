@@ -40,7 +40,7 @@ export const SftpHeader: React.FC<Props> = ({
         <Folder className="w-3.5 h-3.5 shrink-0" />
         <span className="truncate">SFTP 文件</span>
         {sftpReady && (
-          <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/20 shrink-0">
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/20 shrink-0">
             就绪
           </span>
         )}

@@ -1,11 +1,12 @@
-import React from 'react'
+import React, { Suspense, lazy } from 'react'
 import { Loader2 } from 'lucide-react'
 import type { SessionInfo } from '../types'
 import { useSftpState } from '../hooks/useSftpState'
 import { SftpHeader } from './SftpHeader'
 import { SftpFileList } from './SftpFileList'
 import { SftpTransferBar } from './SftpTransferBar'
-import { SftpEditorModal } from './SftpEditorModal'
+
+const SftpEditorModal = lazy(() => import('./SftpEditorModal').then((m) => ({ default: m.SftpEditorModal })))
 
 interface SftpPanelProps {
   session: SessionInfo
@@ -16,7 +17,7 @@ interface SftpPanelProps {
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
 
-export const SftpPanel: React.FC<SftpPanelProps> = ({ session, active, width, followTerminal, onCdInTerminal, onToast }) => {
+export const SftpPanel: React.FC<SftpPanelProps> = React.memo(({ session, active, width, followTerminal, onCdInTerminal, onToast }) => {
   const sftp = useSftpState(session, active, followTerminal, onToast)
 
   return (
@@ -68,21 +69,25 @@ export const SftpPanel: React.FC<SftpPanelProps> = ({ session, active, width, fo
         )}
       </div>
 
-      <SftpTransferBar transfers={sftp.transfers} />
+      <SftpTransferBar transfers={sftp.transfers} onDismiss={sftp.dismissTransfer} />
 
       <div className="px-3 py-1.5 border-t border-ag-border/70 bg-[#0d1017] text-[10px] text-ag-subtle flex items-center justify-between gap-2">
         <span className="truncate">共 {sftp.visibleEntries.length} 项 · 双击编辑/解压/下载</span>
         <span className="shrink-0">拖入直接上传</span>
       </div>
 
-      <SftpEditorModal
-        open={!!sftp.editingFile}
-        remotePath={sftp.editingFile?.path || ''}
-        initialContent={sftp.editingFile?.content || ''}
-        saving={sftp.savingFile}
-        onSave={sftp.handleSaveFile}
-        onClose={() => sftp.setEditingFile(null)}
-      />
+      {sftp.editingFile && (
+        <Suspense fallback={null}>
+          <SftpEditorModal
+            open
+            remotePath={sftp.editingFile.path}
+            initialContent={sftp.editingFile.content}
+            saving={sftp.savingFile}
+            onSave={sftp.handleSaveFile}
+            onClose={() => sftp.setEditingFile(null)}
+          />
+        </Suspense>
+      )}
     </div>
   )
-}
+})
