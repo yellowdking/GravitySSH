@@ -159,7 +159,13 @@ func (m *Manager) CachedDirEntries(sid, dir string) []models.SFTPFileEntry {
 		}
 		return nil
 	}
-	entries := buildSFTPEntries(sc, target, infos)
+	entries, bErr := buildSFTPEntries(sc, target, infos)
+	if bErr != nil {
+		if isSFTPConnError(bErr) {
+			m.invalidateSFTP(sid, sc)
+		}
+		return nil
+	}
 	putDirCacheIfGen(s, target, entries, gen)
 	return entries
 }
@@ -186,6 +192,9 @@ func (m *Manager) invalidateDirTreeCache(sid, target string) {
 	}
 	clean := path.Clean(target)
 	prefix := clean + "/"
+	if clean == "/" {
+		prefix = "/"
+	}
 	s.mu.Lock()
 	s.dirCacheGen++
 	delete(s.dirCache, path.Dir(clean))
@@ -221,32 +230,292 @@ func resolveRemoteDir(dir, curDir, homeDir string) string {
 	return cleanAbsPath(d)
 }
 
+func splitShellCommandSegments(cmd string) []string {
+	var (
+		segs    []string
+		cur     strings.Builder
+		inS     bool
+		inD     bool
+		escaped bool
+	)
+	flush := func() {
+		if s := strings.TrimSpace(cur.String()); s != "" {
+			segs = append(segs, s)
+		}
+		cur.Reset()
+	}
+	for i := 0; i < len(cmd); i++ {
+		ch := cmd[i]
+		if escaped {
+			cur.WriteByte(ch)
+			escaped = false
+			continue
+		}
+		if inS {
+			if ch == '\'' {
+				inS = false
+			}
+			cur.WriteByte(ch)
+			continue
+		}
+		if ch == '\\' {
+			cur.WriteByte(ch)
+			escaped = true
+			continue
+		}
+		if inD {
+			if ch == '"' {
+				inD = false
+			}
+			cur.WriteByte(ch)
+			continue
+		}
+		switch ch {
+		case '\'':
+			inS = true
+			cur.WriteByte(ch)
+		case '"':
+			inD = true
+			cur.WriteByte(ch)
+		case ';', '\n':
+			flush()
+		case '&':
+			if i+1 < len(cmd) && cmd[i+1] == '&' {
+				flush()
+				i++
+			} else {
+				cur.WriteByte(ch)
+			}
+		case '|':
+			if i+1 < len(cmd) && cmd[i+1] == '|' {
+				flush()
+				i++
+			} else {
+				cur.WriteByte(ch)
+			}
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	flush()
+	return segs
+}
+
+type cdToken struct {
+	val    string
+	quoted bool
+	squote bool
+}
+
+func hasUnquotedPipe(seg string) bool {
+	inS, inD, esc := false, false, false
+	for i := 0; i < len(seg); i++ {
+		ch := seg[i]
+		if esc {
+			esc = false
+			continue
+		}
+		if inS {
+			if ch == '\'' {
+				inS = false
+			}
+			continue
+		}
+		if ch == '\\' {
+			esc = true
+			continue
+		}
+		if inD {
+			if ch == '"' {
+				inD = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inS = true
+		case '"':
+			inD = true
+		case '|':
+			return true
+		}
+	}
+	return false
+}
+
+func tokenizeSimpleCommand(seg string) []cdToken {
+	var (
+		out    []cdToken
+		cur    strings.Builder
+		hasTok bool
+		quoted bool
+		squote bool
+		inS    bool
+		inD    bool
+		esc    bool
+	)
+	flush := func() {
+		if hasTok {
+			out = append(out, cdToken{val: cur.String(), quoted: quoted, squote: squote})
+			cur.Reset()
+			hasTok = false
+			quoted = false
+			squote = false
+		}
+	}
+	for i := 0; i < len(seg); i++ {
+		ch := seg[i]
+		if esc {
+			cur.WriteByte(ch)
+			hasTok = true
+			esc = false
+			continue
+		}
+		if inS {
+			if ch == '\'' {
+				inS = false
+			} else {
+				cur.WriteByte(ch)
+			}
+			continue
+		}
+		if inD {
+			if ch == '\\' && i+1 < len(seg) && (seg[i+1] == '"' || seg[i+1] == '\\' || seg[i+1] == '$' || seg[i+1] == '`') {
+				i++
+				cur.WriteByte(seg[i])
+			} else if ch == '"' {
+				inD = false
+			} else {
+				cur.WriteByte(ch)
+			}
+			continue
+		}
+		switch ch {
+		case ' ', '\t':
+			flush()
+		case '\\':
+			esc = true
+			hasTok = true
+		case '\'':
+			inS = true
+			hasTok = true
+			quoted = true
+			squote = true
+		case '"':
+			inD = true
+			hasTok = true
+			quoted = true
+		default:
+			cur.WriteByte(ch)
+			hasTok = true
+		}
+	}
+	flush()
+	return out
+}
+
+func isCDFlagCluster(tok string) bool {
+	if len(tok) < 2 || tok[0] != '-' {
+		return false
+	}
+	for i := 1; i < len(tok); i++ {
+		switch tok[i] {
+		case 'L', 'P', 'e', '@':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isShellRedirToken(tok string) bool {
+	if tok == "" {
+		return false
+	}
+	s := tok
+	if s[0] >= '0' && s[0] <= '9' {
+		s = s[1:]
+	} else if s[0] == '&' {
+		s = s[1:]
+	}
+	return strings.HasPrefix(s, ">") || strings.HasPrefix(s, "<")
+}
+
+func parseCDTarget(seg string) (string, bool) {
+	if hasUnquotedPipe(seg) {
+		return "", false
+	}
+	toks := tokenizeSimpleCommand(seg)
+	if len(toks) == 0 || toks[0].val != "cd" {
+		return "", false
+	}
+	afterDashDash := false
+	var args []cdToken
+	for i := 1; i < len(toks); i++ {
+		tk := toks[i]
+		if !tk.quoted && isShellRedirToken(tk.val) {
+			// Skip standalone redirection operator and its following filename token.
+			if tk.val == ">" || tk.val == ">>" || tk.val == "<" || tk.val == "2>" || tk.val == "2>>" || tk.val == "&>" || tk.val == "1>" {
+				i++
+			}
+			continue
+		}
+		if !afterDashDash && !tk.quoted {
+			if tk.val == "--" {
+				afterDashDash = true
+				continue
+			}
+			if tk.val == "-" {
+				return "", false
+			}
+			if strings.HasPrefix(tk.val, "-") && len(tk.val) > 1 {
+				if isCDFlagCluster(tk.val) {
+					continue
+				}
+				return "", false
+			}
+		}
+		args = append(args, tk)
+	}
+	if len(args) == 0 {
+		return "~", true
+	}
+	if len(args) > 1 {
+		return "", false
+	}
+	target := args[0]
+	if target.val == "" {
+		return "", false
+	}
+	if !target.squote && (strings.Contains(target.val, "$") || strings.Contains(target.val, "`")) {
+		return "", false
+	}
+	if !target.quoted && strings.ContainsAny(target.val, "*?") {
+		return "", false
+	}
+	return target.val, true
+}
+
 func (m *Manager) updateCWDFromCommand(s *sessionState, cmd string) {
-	for _, seg := range strings.FieldsFunc(cmd, func(r rune) bool { return r == ';' }) {
-		for _, sub := range strings.Split(seg, "&&") {
-			part := strings.TrimSpace(sub)
-			if part != "cd" && !strings.HasPrefix(part, "cd ") && !strings.HasPrefix(part, "cd\t") {
-				continue
-			}
-			arg := strings.Trim(strings.TrimSpace(strings.TrimPrefix(part, "cd")), `"'`)
-			if arg == "-" {
-				continue
-			}
-			var changedTo string
-			s.mu.Lock()
-			nextDir := sessionDirTargetLocked(s, "~")
-			if arg != "" && arg != "~" {
-				nextDir = sessionDirTargetLocked(s, arg)
-			}
-			if nextDir != s.currentDir {
-				s.currentDir = nextDir
-				changedTo = nextDir
-			}
-			sid := s.info.SessionID
-			s.mu.Unlock()
-			if changedTo != "" && sid != "" {
-				m.emit("session:cwd", map[string]string{"sessionId": sid, "path": changedTo})
-			}
+	for _, seg := range splitShellCommandSegments(cmd) {
+		arg, ok := parseCDTarget(seg)
+		if !ok {
+			continue
+		}
+		var changedTo string
+		s.mu.Lock()
+		nextDir := sessionDirTargetLocked(s, "~")
+		if arg != "" && arg != "~" {
+			nextDir = sessionDirTargetLocked(s, arg)
+		}
+		if nextDir != s.currentDir {
+			s.currentDir = nextDir
+			changedTo = nextDir
+		}
+		sid := s.info.SessionID
+		s.mu.Unlock()
+		if changedTo != "" && sid != "" {
+			m.emit("session:cwd", map[string]string{"sessionId": sid, "path": changedTo})
 		}
 	}
 	if !isReadOnlyCommand(cmd) {

@@ -40,7 +40,7 @@ func (a *App) WriteTerminal(sessionID, data string) error {
 	return sshMgr.WriteInput(sessionID, data)
 }
 
-func (a *App) ResizeTerminal(sessionID, cols, rows int) error {
+func (a *App) ResizeTerminal(sessionID string, cols, rows int) error {
 	_, sshMgr, _, err := a.readyDeps()
 	if err != nil {
 		return err
