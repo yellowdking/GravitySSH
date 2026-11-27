@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Plus, RotateCcw, Sparkles, X } from 'lucide-react'
 import type { BuiltinTemplate } from '../types'
 import { api } from '../wailsApi'
@@ -13,7 +13,7 @@ interface Props {
   hasActiveSession: boolean
   onClose: () => void
   onImport: (tpl: BuiltinTemplate) => Promise<void>
-  onRunNow?: (tpl: BuiltinTemplate) => Promise<void>
+  onRunNow?: (tpl: BuiltinTemplate) => Promise<boolean | void>
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
 
@@ -26,23 +26,47 @@ export const ShortcutTemplatesModal: React.FC<Props> = ({ open, hasActiveSession
   const [saving, setSaving] = useState(false)
   const { confirm, dialogNode } = useActionDialogs()
 
+  const mountedRef = useRef(true)
+  const busyRef = useRef(false)
+  const loadingPresetsRef = useRef(false)
+  const savingRef = useRef(false)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
   const refresh = useCallback(async () => {
     try {
       const list = await api.listOpsTemplates()
-      setTemplates(list || [])
+      if (mountedRef.current) setTemplates(list || [])
     } catch (err) {
-      onToast(`读取运维模板失败: ${errMsg(err)}`, 'error')
+      if (mountedRef.current) onToast(`读取运维模板失败: ${errMsg(err)}`, 'error')
     }
   }, [onToast])
 
   useEffect(() => { if (open) void refresh() }, [open, refresh])
 
-  const openNew = () => setEditing({ id: '', name: '', category: '自定义', description: '', safetyNote: '', command: '' })
+  const anyBusy = busyId !== null || loadingPresets || saving
+  const isAnyBusyRef = () => busyRef.current || loadingPresetsRef.current || savingRef.current
+
+  const handleClose = () => {
+    if (isAnyBusyRef()) return
+    onClose()
+  }
+
+  const openNew = () => {
+    if (isAnyBusyRef()) return
+    setEditing({ id: '', name: '', category: '自定义', description: '', safetyNote: '', command: '' })
+  }
 
   const handleLoadPresets = async () => {
+    if (isAnyBusyRef()) return
+    loadingPresetsRef.current = true
     setLoadingPresets(true)
     try {
       const res = await api.loadPresetTemplates()
+      if (!mountedRef.current) return
       setTemplates(res.templates || [])
       if (res.added > 0) {
         onToast(`已加载 ${res.added} 个预置模板${res.skipped > 0 ? `（跳过 ${res.skipped} 个已存在的原预置模板）` : ''}`)
@@ -50,47 +74,82 @@ export const ShortcutTemplatesModal: React.FC<Props> = ({ open, hasActiveSession
         onToast(`原预置模板均已存在（已跳过 ${res.skipped} 个），未覆盖任何现有模板`)
       }
     } catch (err) {
-      onToast(`加载预置模板失败: ${errMsg(err)}`, 'error')
+      if (mountedRef.current) onToast(`加载预置模板失败: ${errMsg(err)}`, 'error')
     } finally {
-      setLoadingPresets(false)
+      loadingPresetsRef.current = false
+      if (mountedRef.current) setLoadingPresets(false)
     }
   }
 
   const handleSaveTemplate = async (draft: Partial<BuiltinTemplate>) => {
+    if (savingRef.current) return
+    savingRef.current = true
     setSaving(true)
     try {
       await api.saveOpsTemplate(draft)
+      if (!mountedRef.current) return
       setEditing(null)
       await refresh()
-      onToast(draft.id ? '运维模板已更新' : '新运维模板已保存')
+      if (mountedRef.current) onToast(draft.id ? '运维模板已更新' : '新运维模板已保存')
     } catch (err) {
-      onToast(errMsg(err), 'error')
+      if (mountedRef.current) onToast(errMsg(err), 'error')
     } finally {
-      setSaving(false)
+      savingRef.current = false
+      if (mountedRef.current) setSaving(false)
     }
   }
 
   const handleDeleteTemplate = async (tpl: BuiltinTemplate) => {
+    if (isAnyBusyRef()) return
     const ok = await confirm({
       title: '删除运维模板',
       message: `确定删除运维模板「${tpl.name}」吗？${tpl.presetId ? '\n（删除原预置模板后可随时点击「加载预置模板」重新恢复）' : ''}`,
       confirmLabel: '删除',
     })
-    if (!ok) return
+    if (!ok || isAnyBusyRef()) return
+    busyRef.current = true
     setBusyId(tpl.id)
     try {
       await api.deleteOpsTemplate(tpl.id)
       await refresh()
-      onToast(`已删除模板「${tpl.name}」`)
+      if (mountedRef.current) onToast(`已删除模板「${tpl.name}」`)
     } catch (err) {
-      onToast(errMsg(err), 'error')
+      if (mountedRef.current) onToast(errMsg(err), 'error')
     } finally {
-      setBusyId(null)
+      busyRef.current = false
+      if (mountedRef.current) setBusyId(null)
     }
   }
 
+  const handleImportCard = async (tpl: BuiltinTemplate) => {
+    if (isAnyBusyRef()) return
+    busyRef.current = true
+    setBusyId(tpl.id)
+    try {
+      await onImport(tpl)
+    } finally {
+      busyRef.current = false
+      if (mountedRef.current) setBusyId(null)
+    }
+  }
+
+  const handleRunCardNow = async (tpl: BuiltinTemplate) => {
+    if (!onRunNow || isAnyBusyRef()) return
+    busyRef.current = true
+    setBusyId(tpl.id)
+    let succeeded = false
+    try {
+      const res = await onRunNow(tpl)
+      succeeded = res !== false
+    } finally {
+      busyRef.current = false
+      if (mountedRef.current) setBusyId(null)
+    }
+    if (succeeded && mountedRef.current) onClose()
+  }
+
   return (
-    <ModalShell open={open} onClose={onClose}>
+    <ModalShell open={open} onClose={handleClose}>
       <div className="w-full max-w-2xl rounded-2xl bg-ag-panel border border-ag-borderStrong shadow-ag overflow-hidden flex flex-col max-h-[86vh]">
         <div className="px-5 py-3.5 border-b border-ag-border bg-[#11151f] flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5 min-w-0">
@@ -103,13 +162,13 @@ export const ShortcutTemplatesModal: React.FC<Props> = ({ open, hasActiveSession
             </div>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
-            <button type="button" disabled={loadingPresets} onClick={() => void handleLoadPresets()} title="补充缺失的原预置模板，自动跳过已有模板且不覆盖" className="ag-btn-secondary text-xs py-1 px-2.5">
+            <button type="button" disabled={anyBusy} onClick={() => void handleLoadPresets()} title="补充缺失的原预置模板，自动跳过已有模板且不覆盖" className="ag-btn-secondary text-xs py-1 px-2.5">
               <RotateCcw className={`w-3.5 h-3.5 text-emerald-400 ${loadingPresets ? 'animate-spin' : ''}`} />加载预置模板
             </button>
-            <button type="button" onClick={openNew} className="ag-btn-primary text-xs py-1 px-2.5">
+            <button type="button" disabled={anyBusy} onClick={openNew} className="ag-btn-primary text-xs py-1 px-2.5">
               <Plus className="w-3.5 h-3.5" />新建模板
             </button>
-            <button type="button" onClick={onClose} aria-label="关闭运维模板窗口" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text">
+            <button type="button" disabled={anyBusy} onClick={handleClose} aria-label="关闭运维模板窗口" className="p-1.5 rounded-lg hover:bg-ag-hover text-ag-muted hover:text-ag-text disabled:opacity-40 disabled:cursor-not-allowed">
               <X className="w-4 h-4" />
             </button>
           </div>
@@ -120,10 +179,10 @@ export const ShortcutTemplatesModal: React.FC<Props> = ({ open, hasActiveSession
             <div className="py-12 text-center space-y-3">
               <p className="text-xs text-ag-subtle">当前暂无运维模板</p>
               <div className="flex items-center justify-center gap-2">
-                <button type="button" onClick={() => void handleLoadPresets()} className="ag-btn-secondary text-xs">
-                  <RotateCcw className="w-3.5 h-3.5 text-emerald-400" />一键加载预置模板
+                <button type="button" disabled={anyBusy} onClick={() => void handleLoadPresets()} className="ag-btn-secondary text-xs">
+                  <RotateCcw className={`w-3.5 h-3.5 text-emerald-400 ${loadingPresets ? 'animate-spin' : ''}`} />一键加载预置模板
                 </button>
-                <button type="button" onClick={openNew} className="ag-btn-primary text-xs">
+                <button type="button" disabled={anyBusy} onClick={openNew} className="ag-btn-primary text-xs">
                   <Plus className="w-3.5 h-3.5" />新建自定义模板
                 </button>
               </div>
@@ -133,24 +192,24 @@ export const ShortcutTemplatesModal: React.FC<Props> = ({ open, hasActiveSession
               key={tpl.id}
               tpl={tpl}
               expanded={expandedId === tpl.id}
-              busy={busyId === tpl.id}
+              busy={anyBusy}
               hasActiveSession={hasActiveSession}
               onToggleExpand={() => setExpandedId(expandedId === tpl.id ? null : tpl.id)}
-              onEdit={() => setEditing(tpl)}
+              onEdit={() => { if (!isAnyBusyRef()) setEditing(tpl) }}
               onDelete={() => void handleDeleteTemplate(tpl)}
-              onImport={async () => { setBusyId(tpl.id); try { await onImport(tpl) } finally { setBusyId(null) } }}
-              onRunNow={onRunNow ? async () => { setBusyId(tpl.id); try { await onRunNow(tpl); onClose() } finally { setBusyId(null) } } : undefined}
+              onImport={() => void handleImportCard(tpl)}
+              onRunNow={onRunNow ? () => void handleRunCardNow(tpl) : undefined}
             />
           ))}
         </div>
 
         <div className="px-5 py-3 border-t border-ag-border bg-[#11151f] flex items-center justify-between text-[11px] text-ag-subtle">
           <span>共 {templates.length} 个运维模板 · 随加密配置保存</span>
-          <button type="button" onClick={onClose} className="ag-btn-ghost text-xs">关闭</button>
+          <button type="button" disabled={anyBusy} onClick={handleClose} className="ag-btn-ghost text-xs">关闭</button>
         </div>
       </div>
 
-      <TemplateEditorModal open={!!editing} initial={editing} saving={saving} onClose={() => setEditing(null)} onSubmit={handleSaveTemplate} />
+      <TemplateEditorModal open={!!editing} initial={editing} saving={saving} onClose={() => { if (!savingRef.current) setEditing(null) }} onSubmit={handleSaveTemplate} />
       {dialogNode}
     </ModalShell>
   )

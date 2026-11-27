@@ -70,7 +70,7 @@ export const SftpPanel: React.FC<SftpPanelProps> = React.memo(({ session, active
         )}
       </div>
 
-      <SftpTransferBar transfers={sftp.transfers} onDismiss={sftp.dismissTransfer} />
+      <SftpTransferBar transfers={sftp.transfers} onDismiss={sftp.dismissTransfer} onClearFinished={sftp.clearFinishedTransfers} />
 
       <div className="px-3 py-1.5 border-t border-ag-border/70 bg-[#0d1017] text-[10px] text-ag-subtle flex items-center justify-between gap-2">
         <span className="truncate">共 {sftp.visibleEntries.length} 项 · 双击编辑/解压/下载</span>

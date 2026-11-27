@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import type { BuiltinTemplate, CommandShortcut } from '../types'
 import { api } from '../wailsApi'
 import { errMsg } from '../utils/errors'
@@ -33,16 +33,24 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
     return Array.from(set)
   }, [shortcuts])
 
+  const activeCat = categories.includes(selectedCat) ? selectedCat : '全部'
+
+  useEffect(() => {
+    if (selectedCat !== '全部' && !categories.includes(selectedCat)) {
+      setSelectedCat('全部')
+    }
+  }, [categories, selectedCat])
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     return [...shortcuts]
       .filter((s) => {
-        if (selectedCat !== '全部' && (s.category || '常用') !== selectedCat) return false
+        if (activeCat !== '全部' && (s.category || '常用') !== activeCat) return false
         if (!q) return true
         return s.name.toLowerCase().includes(q) || s.command.toLowerCase().includes(q) || (s.description || '').toLowerCase().includes(q)
       })
       .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.useCount - a.useCount)
-  }, [shortcuts, search, selectedCat])
+  }, [shortcuts, search, activeCat])
 
   const handleSave = async (draft: Partial<CommandShortcut>) => {
     try {
@@ -68,17 +76,20 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
     }
   }
 
-  const handleRunTemplateNow = async (tpl: BuiltinTemplate) => {
+  const handleRunTemplateNow = async (tpl: BuiltinTemplate): Promise<boolean> => {
     if (!activeSessionId) {
       onToast('请先在左侧连接一台服务器', 'error')
-      return
+      return false
     }
-    if (!onRunCommand) return
+    if (!onRunCommand) return false
     try {
       const res = await onRunCommand(tpl.command, true)
-      if (res !== false) onToast(`已下发运维脚本：${tpl.name}`)
+      if (res === false) return false
+      onToast(`已下发运维脚本：${tpl.name}`)
+      return true
     } catch (err) {
       onToast(errMsg(err), 'error')
+      return false
     }
   }
 
@@ -112,7 +123,7 @@ export const ShortcutsPanel: React.FC<ShortcutsPanelProps> = ({
       <ShortcutsHeader
         search={search}
         categories={categories}
-        selectedCat={selectedCat}
+        selectedCat={activeCat}
         onSearchChange={setSearch}
         onSelectCat={setSelectedCat}
         onOpenTemplates={() => setTemplatesOpen(true)}

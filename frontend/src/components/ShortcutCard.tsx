@@ -30,14 +30,14 @@ export const ShortcutCard: React.FC<Props> = ({ sc, hasActiveSession, onTogglePi
               </span>
             )}
           </div>
-          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition shrink-0">
-            <button onClick={onTogglePin} title="置顶" className="p-1 rounded hover:bg-ag-hover text-ag-muted hover:text-amber-300">
+          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition shrink-0">
+            <button type="button" onClick={onTogglePin} title="置顶" aria-label="置顶快捷命令" className="p-1 rounded hover:bg-ag-hover text-ag-muted hover:text-amber-300">
               <Pin className="w-3 h-3" />
             </button>
-            <button onClick={onEdit} title="编辑" className="p-1 rounded hover:bg-ag-hover text-ag-muted hover:text-ag-text">
+            <button type="button" onClick={onEdit} title="编辑" aria-label="编辑快捷命令" className="p-1 rounded hover:bg-ag-hover text-ag-muted hover:text-ag-text">
               <Edit3 className="w-3 h-3" />
             </button>
-            <button onClick={onDelete} title="删除" className="p-1 rounded hover:bg-rose-500/20 text-ag-muted hover:text-rose-400">
+            <button type="button" onClick={onDelete} title="删除" aria-label="删除快捷命令" className="p-1 rounded hover:bg-rose-500/20 text-ag-muted hover:text-rose-400">
               <Trash2 className="w-3 h-3" />
             </button>
           </div>
