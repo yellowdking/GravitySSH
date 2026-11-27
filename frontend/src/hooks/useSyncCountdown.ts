@@ -5,24 +5,32 @@ export function fmtSec(n: number): string {
   return `${String(Math.floor(clamped / 60)).padStart(2, '0')}:${String(clamped % 60).padStart(2, '0')}`
 }
 
+function calcLeft(expiresAt: string | null | undefined): number {
+  if (!expiresAt) return 0
+  const expiresMs = new Date(expiresAt).getTime()
+  if (!Number.isFinite(expiresMs)) return 0
+  return Math.max(0, Math.floor((expiresMs - Date.now()) / 1000))
+}
+
 export function useSyncCountdown(expiresAt: string | null | undefined): number {
-  const [left, setLeft] = useState(0)
+  const key = expiresAt ?? ''
+  const [state, setState] = useState(() => ({ key, left: calcLeft(expiresAt) }))
 
   useEffect(() => {
     if (!expiresAt) {
-      setLeft(0)
+      setState({ key: '', left: 0 })
       return
     }
     const expiresMs = new Date(expiresAt).getTime()
     if (!Number.isFinite(expiresMs)) {
-      setLeft(0)
+      setState({ key: expiresAt, left: 0 })
       return
     }
 
     let id: ReturnType<typeof setInterval> | null = null
     const tick = () => {
       const rem = Math.max(0, Math.floor((expiresMs - Date.now()) / 1000))
-      setLeft(rem)
+      setState({ key: expiresAt, left: rem })
       if (rem <= 0 && id !== null) {
         clearInterval(id)
         id = null
@@ -56,5 +64,5 @@ export function useSyncCountdown(expiresAt: string | null | undefined): number {
     }
   }, [expiresAt])
 
-  return left
+  return state.key === key ? state.left : calcLeft(expiresAt)
 }

@@ -28,7 +28,7 @@ export const SessionWorkspace: React.FC<SessionWorkspaceProps> = React.memo(({
   const handleToggleSftp = useCallback(() => onToggleSftp(session.sessionId), [onToggleSftp, session.sessionId])
   const handleCdInTerminal = useCallback(
     (d: string) => {
-      void api.writeTerminal(session.sessionId, `cd '${d.replace(/'/g, "'\\''")}'\r`)
+      void api.writeTerminal(session.sessionId, `cd '${d.replace(/'/g, "'\\''")}'\r`).catch(() => {})
     },
     [session.sessionId]
   )

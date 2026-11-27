@@ -27,11 +27,26 @@ export function useSftpState(
   currentPathRef.current = currentPath
   const editingFileRef = useRef(editingFile)
   editingFileRef.current = editingFile
+  const editorTokenRef = useRef(0)
   const pathFocusedRef = useRef(false)
   const pathDirtyRef = useRef(false)
   const loadSeqRef = useRef(0)
   const dismissTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   const { confirm, prompt, dialogNode } = useActionDialogs()
+
+  const setActiveEditingFile = useCallback((file: { path: string; content: string } | null) => {
+    editorTokenRef.current++
+    editingFileRef.current = file
+    setEditingFile(file)
+  }, [])
+
+  const updateEditingFileIfCurrent = useCallback((token: number, file: { path: string; content: string }) => {
+    if (editorTokenRef.current !== token || !editingFileRef.current || editingFileRef.current.path !== file.path) {
+      return
+    }
+    editingFileRef.current = file
+    setEditingFile(file)
+  }, [])
 
   const handlePathInputChange = useCallback((next: string) => {
     pathDirtyRef.current = next !== currentPathRef.current
@@ -177,23 +192,25 @@ export function useSftpState(
         sessionId: session.sessionId,
         getCurrentPath: () => currentPathRef.current,
         getEditingFile: () => editingFileRef.current,
+        getEditorToken: () => editorTokenRef.current,
         addBusyPath,
         removeBusyPath,
         removeEntryLocally,
-        setEditingFile,
+        setEditingFile: setActiveEditingFile,
+        updateEditingFileIfCurrent,
         setSavingFile,
         loadDir: (p, syncCwd) => loadDir(p, syncCwd, false),
         confirm,
         prompt,
         onToast,
       }),
-    [session.sessionId, addBusyPath, removeBusyPath, removeEntryLocally, loadDir, confirm, prompt, onToast]
+    [session.sessionId, addBusyPath, removeBusyPath, removeEntryLocally, setActiveEditingFile, updateEditingFileIfCurrent, loadDir, confirm, prompt, onToast]
   )
 
   return {
     currentPath, pathInput, setPathInput: handlePathInputChange, onPathInputFocusChange: handlePathInputFocusChange,
     parentPath, visibleEntries, loading, busyPaths,
     showHidden, setShowHidden, error, transfers: transferList, dismissTransfer,
-    editingFile, setEditingFile, savingFile, loadDir, dialogNode, ...actions,
+    editingFile, setEditingFile: setActiveEditingFile, savingFile, loadDir, dialogNode, ...actions,
   }
 }

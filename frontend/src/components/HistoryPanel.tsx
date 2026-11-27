@@ -62,7 +62,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
       onShortcutSaved(saved)
       setSelectedIds([])
       setSavingDraft(null)
-      onToast(`已将命令加密保存为快捷方式 "${saved.name}"`)
+      onToast(`已将命令加密保存为快捷命令 "${saved.name}"`)
     } catch (err) { onToast(errMsg(err), 'error') }
   }
 
@@ -129,7 +129,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
           <span className="text-indigo-200 font-medium">已选 {selectedIds.length} 条命令</span>
           <div className="flex items-center gap-1.5">
             <button onClick={() => openSaveModal(filtered.filter((h) => selectedIds.includes(h.id)).map((h) => h.command))} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-indigo-500 hover:bg-indigo-400 text-white font-medium transition">
-              <BookmarkPlus className="w-3.5 h-3.5" />存为快捷方式
+              <BookmarkPlus className="w-3.5 h-3.5" />存为快捷命令
             </button>
             <button type="button" onClick={() => setSelectedIds([])} aria-label="取消选择" className="p-1 rounded hover:bg-ag-hover text-ag-muted"><X className="w-3.5 h-3.5" /></button>
           </div>
@@ -140,7 +140,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
         {filtered.length === 0 ? (
           <div className="py-14 text-center text-xs text-ag-subtle space-y-1">
             <p>暂无命令操作记录</p>
-            <p className="text-[11px]">在终端执行过的每条命令都会自动记录，支持勾选保存为快捷方式</p>
+            <p className="text-[11px]">在终端执行过的每条命令都会自动记录，支持勾选保存为快捷命令</p>
           </div>
         ) : (
           filtered.map((rec) => (
@@ -159,7 +159,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
         )}
       </div>
 
-      <ShortcutEditorModal open={!!savingDraft} initial={savingDraft} title="保存为加密快捷方式" onClose={() => setSavingDraft(null)} onSubmit={submitShortcut} />
+      <ShortcutEditorModal open={!!savingDraft} initial={savingDraft} title="保存为加密快捷命令" onClose={() => setSavingDraft(null)} onSubmit={submitShortcut} />
       {dialogNode}
     </div>
   )

@@ -33,6 +33,8 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
   const left = useSyncCountdown(sess?.expiresAt)
   const { copied, copy, reset: resetCopy } = useCopyFeedback()
 
+  const mountedRef = useRef(true)
+  const actionBusyRef = useRef(false)
   const sessRef = useRef<SyncSendSession | null>(null)
   sessRef.current = sess
   const stageRef = useRef<SendStage>(stage)
@@ -41,7 +43,9 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
   relayRef.current = relayUrl
 
   useEffect(() => {
+    mountedRef.current = true
     return () => {
+      mountedRef.current = false
       const s = sessRef.current
       if (s && isActiveStage(stageRef.current)) {
         void api.cancelSyncSend(s.sessionId, s.relayUrl || relayRef.current).catch(() => {})
@@ -50,20 +54,22 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
   }, [])
 
   useSyncPolling({
-    enabled: Boolean(sess && (stage === 'waiting' || stage === 'approved') && left > 0),
+    enabled: Boolean(sess && isActiveStage(stage)),
     intervalMs: 1500,
     poll: async () => {
       const current = sessRef.current
-      if (!current) return false
+      if (!current || !mountedRef.current) return false
       const res = await api.pollSyncSend(current.sessionId)
-      if (sessRef.current?.sessionId !== current.sessionId) return false
+      if (!mountedRef.current || sessRef.current?.sessionId !== current.sessionId) return false
       switch (res.status) {
         case 'waiting':
           return true
         case 'requested':
-          setPendingReq(res)
+          setPendingReq((prev) =>
+            prev?.requestId === res.requestId && prev?.receiverCode === res.receiverCode ? prev : res
+          )
           setStage('requested')
-          return false
+          return true
         case 'approved':
           setStage('approved')
           return true
@@ -92,12 +98,22 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
   })
 
   const gen = async () => {
+    if (actionBusyRef.current) return
+    actionBusyRef.current = true
     setBusy(true)
+    const prevSess = sessRef.current
+    const prevStage = stageRef.current
+    const targetRelay = relayUrl
     try {
-      if (sess && isActiveStage(stage)) {
-        await api.cancelSyncSend(sess.sessionId, sess.relayUrl || relayUrl).catch(() => {})
+      if (prevSess && isActiveStage(prevStage)) {
+        await api.cancelSyncSend(prevSess.sessionId, prevSess.relayUrl || targetRelay).catch(() => {})
       }
-      const next = await api.startSyncSend(relayUrl)
+      if (!mountedRef.current) return
+      const next = await api.startSyncSend(targetRelay)
+      if (!mountedRef.current) {
+        void api.cancelSyncSend(next.sessionId, next.relayUrl || relayRef.current).catch(() => {})
+        return
+      }
       setSess(next)
       setStage('waiting')
       setPendingReq(null)
@@ -105,66 +121,92 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
       resetCopy()
       onToast('同步码已生成，等待接收端确认后才会加密上传')
     } catch (e) {
-      onToast(errMsg(e), 'error')
+      if (mountedRef.current) onToast(errMsg(e), 'error')
     } finally {
-      setBusy(false)
+      actionBusyRef.current = false
+      if (mountedRef.current) setBusy(false)
     }
   }
 
   const revoke = async () => {
-    if (!sess) return
+    const current = sessRef.current
+    if (!current || actionBusyRef.current) return
+    const currentId = current.sessionId
+    actionBusyRef.current = true
     setRevoking(true)
     try {
-      await api.cancelSyncSend(sess.sessionId, sess.relayUrl || relayUrl)
+      await api.cancelSyncSend(currentId, current.relayUrl || relayUrl)
+      if (!mountedRef.current || sessRef.current?.sessionId !== currentId) return
       setSess(null)
       setPendingReq(null)
       setStage('waiting')
       setStatusMessage('')
       onToast('已撤销同步码')
     } catch (e) {
-      onToast(errMsg(e), 'error')
+      if (mountedRef.current && sessRef.current?.sessionId === currentId) onToast(errMsg(e), 'error')
     } finally {
-      setRevoking(false)
+      actionBusyRef.current = false
+      if (mountedRef.current) setRevoking(false)
     }
   }
 
   const approve = async () => {
-    if (!sess || !pendingReq?.requestId || !pendingReq.receiverCode) return
+    const current = sessRef.current
+    if (!current || !pendingReq?.requestId || !pendingReq.receiverCode || actionBusyRef.current) return
+    const currentId = current.sessionId
+    actionBusyRef.current = true
     setDecisionBusy(true)
     try {
-      await api.approveSyncSend(sess.sessionId, pendingReq.requestId, pendingReq.receiverCode)
+      await api.approveSyncSend(currentId, pendingReq.requestId, pendingReq.receiverCode)
+      if (!mountedRef.current || sessRef.current?.sessionId !== currentId) return
       setStage('approved')
       setStatusMessage('已同意并上传加密数据，等待接收端拉取...')
       onToast('已同意并上传双向加密数据')
     } catch (e) {
-      onToast(errMsg(e), 'error')
+      if (mountedRef.current && sessRef.current?.sessionId === currentId) {
+        const msg = errMsg(e)
+        if (msg.includes('已过期') || msg.includes('未找到')) {
+          setStage('expired')
+          setStatusMessage(msg)
+        }
+        onToast(msg, 'error')
+      }
     } finally {
-      setDecisionBusy(false)
+      actionBusyRef.current = false
+      if (mountedRef.current) setDecisionBusy(false)
     }
   }
 
   const reject = async () => {
-    if (!sess || !pendingReq?.requestId) return
+    const current = sessRef.current
+    if (!current || !pendingReq?.requestId || actionBusyRef.current) return
+    const currentId = current.sessionId
+    actionBusyRef.current = true
     setDecisionBusy(true)
     try {
-      await api.rejectSyncSend(sess.sessionId, pendingReq.requestId)
+      await api.rejectSyncSend(currentId, pendingReq.requestId)
+      if (!mountedRef.current || sessRef.current?.sessionId !== currentId) return
       setStage('rejected')
       setPendingReq(null)
       setStatusMessage('已拒绝该接收端请求，未上传任何保险库数据')
       onToast('已拒绝不一致的同步请求')
     } catch (e) {
-      onToast(errMsg(e), 'error')
+      if (mountedRef.current && sessRef.current?.sessionId === currentId) onToast(errMsg(e), 'error')
     } finally {
-      setDecisionBusy(false)
+      actionBusyRef.current = false
+      if (mountedRef.current) setDecisionBusy(false)
     }
   }
 
   const handleCopyCode = async () => {
     if (!sess) return
     const ok = await copy(sess.code)
+    if (!mountedRef.current) return
     if (ok) onToast('同步码已复制')
     else onToast('复制失败，请手动记录', 'error')
   }
+
+  const actionBusy = busy || decisionBusy || revoking
 
   if (!sess) {
     return (
@@ -177,7 +219,7 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
             生成同步码后暂不上传保险库数据。只有当接收端提交请求且您当面核对双方屏幕上的确认码一致并点击同意后，才使用双端密钥联合加密上传，领取即焚。
           </p>
         </div>
-        <button onClick={() => void gen()} disabled={busy} className="w-full py-3 rounded-xl bg-indigo-500 hover:bg-indigo-400 disabled:opacity-60 text-white text-sm font-medium transition shadow-glow flex items-center justify-center gap-2">
+        <button onClick={() => void gen()} disabled={actionBusy} className="w-full py-3 rounded-xl bg-indigo-500 hover:bg-indigo-400 disabled:opacity-60 text-white text-sm font-medium transition shadow-glow flex items-center justify-center gap-2">
           {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <QrCode className="w-4 h-4" />}
           {busy ? '正在初始化通道...' : '一键生成同步码'}
         </button>
@@ -197,7 +239,7 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
             接收端已使用双方同步码与确认码解密预览，中继服务器上的密文已自动销毁。
           </p>
         </div>
-        <button onClick={() => void gen()} disabled={busy} className="w-full py-2.5 rounded-xl bg-ag-elevated hover:bg-ag-hover border border-ag-border text-xs font-medium text-ag-text flex items-center justify-center gap-1.5">
+        <button onClick={() => void gen()} disabled={actionBusy} className="w-full py-2.5 rounded-xl bg-ag-elevated hover:bg-ag-hover border border-ag-border text-xs font-medium text-ag-text flex items-center justify-center gap-1.5 disabled:opacity-50">
           {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
           再次生成同步码
         </button>
@@ -205,7 +247,7 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
     )
   }
 
-  const expired = left <= 0 || stage === 'expired'
+  const expired = stage === 'expired'
   const stats = [['服务器', sess.serverCount], ['密钥', sess.keyCount], ['快捷', sess.shortcutCount], ['模板', sess.templateCount]]
   const isAndroidReq = (pendingReq?.receiverPlatform || '').toLowerCase() === 'android'
 
@@ -222,7 +264,8 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
             </button>
           </div>
           <div className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg border ${expired ? 'bg-rose-500/10 border-rose-500/30 text-rose-300' : 'bg-cyan-500/10 border-cyan-500/30 text-cyan-300'}`}>
-            <Clock className="w-3.5 h-3.5" /><span>{expired ? '已过期，请重新生成' : `倒计时 ${fmtSec(left)} · 双向确认后上传`}</span>
+            <Clock className="w-3.5 h-3.5" />
+            <span>{expired ? '已过期，请重新生成' : left <= 0 ? '即将过期 · 等待中继确认状态' : `倒计时 ${fmtSec(left)} · 双向确认后上传`}</span>
           </div>
           <div className="grid grid-cols-4 gap-1.5 pt-1 text-center">
             {stats.map(([k, v]) => (
@@ -235,7 +278,7 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
         </div>
       </div>
 
-      {stage === 'waiting' && !expired && (
+      {stage === 'waiting' && (
         <div className="rounded-xl bg-indigo-500/10 border border-indigo-500/25 px-4 py-3 flex items-center gap-2.5 text-xs text-indigo-200">
           <Loader2 className="w-4 h-4 animate-spin shrink-0 text-indigo-300" />
           <span>等待接收端输入同步码并提交确认...</span>
@@ -278,7 +321,7 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
             <button
               onClick={() => void reject()}
-              disabled={decisionBusy}
+              disabled={actionBusy || expired}
               className="py-2.5 px-3 rounded-xl text-xs font-medium bg-rose-500/[0.12] hover:bg-rose-500/20 text-rose-300 border border-rose-500/35 flex items-center justify-center gap-1.5 disabled:opacity-50"
             >
               <XCircle className="w-4 h-4" />
@@ -286,7 +329,7 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
             </button>
             <button
               onClick={() => void approve()}
-              disabled={decisionBusy}
+              disabled={actionBusy || expired}
               className="py-2.5 px-3 rounded-xl text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white shadow-glow flex items-center justify-center gap-1.5 disabled:opacity-50"
             >
               {decisionBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
@@ -303,18 +346,18 @@ export const SyncSendTab: React.FC<Props> = ({ relayUrl, onToast }) => {
         </div>
       )}
 
-      {(stage === 'rejected' || stage === 'error') && (
+      {(stage === 'rejected' || stage === 'error' || stage === 'expired') && (
         <div className="rounded-xl bg-rose-500/10 border border-rose-500/35 px-4 py-3 flex items-center gap-2.5 text-xs text-rose-200">
           <ShieldAlert className="w-4 h-4 shrink-0 text-rose-300" />
-          <span>{statusMessage || '配对已中止'}</span>
+          <span>{statusMessage || (stage === 'expired' ? '同步码已过期，请重新生成' : '配对已中止')}</span>
         </div>
       )}
 
       <div className="flex justify-between gap-2">
-        <button onClick={() => void revoke()} disabled={revoking || decisionBusy} className="px-3 py-2 rounded-lg text-xs font-medium bg-rose-500/[0.12] hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center gap-1.5 disabled:opacity-50">
+        <button onClick={() => void revoke()} disabled={actionBusy} className="px-3 py-2 rounded-lg text-xs font-medium bg-rose-500/[0.12] hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center gap-1.5 disabled:opacity-50">
           {revoking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}撤销同步码
         </button>
-        <button onClick={() => void gen()} disabled={busy || decisionBusy} className="px-3 py-2 rounded-lg text-xs font-medium bg-ag-elevated hover:bg-ag-hover text-ag-text border border-ag-border flex items-center gap-1.5 disabled:opacity-50">
+        <button onClick={() => void gen()} disabled={actionBusy} className="px-3 py-2 rounded-lg text-xs font-medium bg-ag-elevated hover:bg-ag-hover text-ag-text border border-ag-border flex items-center gap-1.5 disabled:opacity-50">
           {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}重新生成
         </button>
       </div>

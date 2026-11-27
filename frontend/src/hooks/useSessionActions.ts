@@ -11,6 +11,7 @@ interface ActionDeps {
   activeSessionId: string | null
   setActiveSessionId: (id: string | null) => void
   sessionsRef: MutableRefObject<SessionInfo[]>
+  closedSessionIdsRef: MutableRefObject<Set<string>>
   setSessions: React.Dispatch<React.SetStateAction<SessionInfo[]>>
   setSftpOpenBySession: React.Dispatch<React.SetStateAction<Record<string, boolean>>>
   setShortcuts: React.Dispatch<React.SetStateAction<CommandShortcut[]>>
@@ -28,6 +29,7 @@ export function createSessionActions(d: ActionDeps) {
       d.setActiveNav('servers')
       const { cols, rows } = d.estimatePty()
       const sess = await api.connectServer(srv.id, cols, rows)
+      d.closedSessionIdsRef.current.delete(sess.sessionId)
       d.setSessions((prev) => (prev.some((s) => s.sessionId === sess.sessionId) ? prev : [...prev, sess]))
       d.setActiveSessionId(sess.sessionId)
       if (d.settings.autoOpenSftp) d.setSftpOpenBySession((prev) => ({ ...prev, [sess.sessionId]: true }))
@@ -37,6 +39,13 @@ export function createSessionActions(d: ActionDeps) {
   }
 
   const handleCloseSession = async (sessionId: string) => {
+    const closed = d.closedSessionIdsRef.current
+    if (closed.has(sessionId)) return
+    closed.add(sessionId)
+    if (closed.size > 200) {
+      const oldest = closed.values().next().value
+      if (oldest) closed.delete(oldest)
+    }
     try {
       await api.disconnectSession(sessionId)
     } catch (err) {

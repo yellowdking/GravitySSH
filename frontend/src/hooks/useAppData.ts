@@ -49,12 +49,13 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
   const [securityInfo, setSecurityInfo] = useState<VaultSecurityInfo | null>(null)
   const [lockState, setLockState] = useState<VaultLockState | null>(null)
-  const [appVersion, setAppVersion] = useState('1.3.7')
+  const [appVersion, setAppVersion] = useState('1.3.8')
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null)
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sftpOpenBySession, setSftpOpenBySession] = useState<Record<string, boolean>>({})
 
+  const closedSessionIdsRef = useRef<Set<string>>(new Set())
   const autoOpenSftpRef = useRef(settings.autoOpenSftp)
   autoOpenSftpRef.current = settings.autoOpenSftp
 
@@ -125,6 +126,7 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
 
   useEffect(() => {
     const unsubStatus = api.onEvent<SessionInfo>('session:status', (info) => {
+      if (closedSessionIdsRef.current.has(info.sessionId)) return
       setSessions((prev) => {
         const idx = prev.findIndex((s) => s.sessionId === info.sessionId)
         if (idx === -1) return [...prev, info]
@@ -145,7 +147,7 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
   return {
     servers, sshKeys, shortcuts, setShortcuts, history, settings, setSettings,
     securityInfo, lockState, appVersion, updateInfo, setUpdateInfo,
-    sessions, setSessions, activeSessionId, setActiveSessionId,
+    sessions, setSessions, closedSessionIdsRef, activeSessionId, setActiveSessionId,
     sftpOpenBySession, setSftpOpenBySession,
     loadAll, reloadServers, reloadKeys, reloadShortcuts, reloadHistory,
   }

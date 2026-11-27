@@ -25,6 +25,16 @@ function formatSyncInput(raw: string): string {
   return clean.length > 4 ? `${clean.slice(0, 4)}-${clean.slice(4)}` : clean
 }
 
+function isRetryablePollError(msg: string): boolean {
+  return (
+    msg.includes('连接同步中继失败') ||
+    msg.includes('读取同步响应失败') ||
+    msg.includes('请求过于频繁') ||
+    /HTTP\s*5\d\d/.test(msg) ||
+    /timeout|timed out|ECONNRESET|network/i.test(msg)
+  )
+}
+
 export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast }) => {
   const [recvCode, setRecvCode] = useState('')
   const [inputCode, setInputCode] = useState('')
@@ -38,13 +48,16 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
 
   const waitLeft = useSyncCountdown(waitSess?.expiresAt)
 
+  const mountedRef = useRef(true)
   const waitSessRef = useRef<SyncReceiveWaitSession | null>(null)
   waitSessRef.current = waitSess
   const previewRef = useRef<SyncReceivePreview | null>(null)
   previewRef.current = preview
 
   useEffect(() => {
+    mountedRef.current = true
     return () => {
+      mountedRef.current = false
       if (waitSessRef.current) {
         void api.cancelSyncReceive(waitSessRef.current.waitId).catch(() => {})
       }
@@ -57,31 +70,42 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
   const refreshRecvCode = useCallback(async () => {
     try {
       const code = await api.generateReceiverCode()
-      setRecvCode(code)
+      if (mountedRef.current) setRecvCode(code)
     } catch (err) {
-      onToast(errMsg(err), 'error')
+      if (mountedRef.current) onToast(errMsg(err), 'error')
     }
   }, [onToast])
 
   useEffect(() => {
     let cancelled = false
     void api.generateReceiverCode().then((code) => {
-      if (!cancelled) setRecvCode(code)
+      if (!cancelled && mountedRef.current) setRecvCode(code)
     }).catch((err) => {
-      if (!cancelled) onToast(errMsg(err), 'error')
+      if (!cancelled && mountedRef.current) onToast(errMsg(err), 'error')
     })
     return () => { cancelled = true }
   }, [onToast])
 
   useSyncPolling({
-    enabled: Boolean(waitSess && waitLeft > 0),
+    enabled: Boolean(waitSess),
     intervalMs: 1500,
     poll: async () => {
       const current = waitSessRef.current
-      if (!current) return false
+      if (!current || !mountedRef.current) return false
       try {
         const res = await api.pollSyncReceive(current.waitId)
-        if (waitSessRef.current?.waitId !== current.waitId) return false
+        if (!mountedRef.current) {
+          if (res.status === 'ready' && res.preview) {
+            void api.clearSyncPreview(res.preview.previewId).catch(() => {})
+          }
+          return false
+        }
+        if (waitSessRef.current?.waitId !== current.waitId) {
+          if (res.status === 'ready' && res.preview) {
+            void api.clearSyncPreview(res.preview.previewId).catch(() => {})
+          }
+          return false
+        }
         switch (res.status) {
           case 'pending':
             return true
@@ -113,12 +137,13 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
             return true
         }
       } catch (err) {
-        if (waitSessRef.current?.waitId !== current.waitId) return false
+        if (!mountedRef.current || waitSessRef.current?.waitId !== current.waitId) return false
         const msg = errMsg(err)
-        if (msg.includes('解密') || msg.includes('校验')) {
+        if (!isRetryablePollError(msg)) {
           setWaitSess(null)
           setErrorBanner(msg)
           onToast(msg, 'error')
+          void refreshRecvCode()
           return false
         }
         return true
@@ -134,13 +159,19 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
     setSummary(null)
     try {
       const ws = await api.startSyncReceive(inputCode, recvCode, relayUrl)
+      if (!mountedRef.current) {
+        void api.cancelSyncReceive(ws.waitId).catch(() => {})
+        return
+      }
       setWaitSess(ws)
     } catch (err) {
-      const msg = errMsg(err)
-      setErrorBanner(msg)
-      onToast(msg, 'error')
+      if (mountedRef.current) {
+        const msg = errMsg(err)
+        setErrorBanner(msg)
+        onToast(msg, 'error')
+      }
     } finally {
-      setSubmitting(false)
+      if (mountedRef.current) setSubmitting(false)
     }
   }
 
@@ -164,16 +195,17 @@ export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onSynced, onToast })
     setApplying(true)
     try {
       const res = await api.applySyncReceive(preview.previewId, mode)
+      onSynced()
+      if (!mountedRef.current) return
       setSummary(res)
       setPreview(null)
       setInputCode('')
       setErrorBanner('')
-      onSynced()
       onToast(mode === 'merge' ? '已安全合并同步配置到本地保险库' : '已使用同步配置覆盖本地数据')
     } catch (err) {
-      onToast(errMsg(err), 'error')
+      if (mountedRef.current) onToast(errMsg(err), 'error')
     } finally {
-      setApplying(false)
+      if (mountedRef.current) setApplying(false)
     }
   }
 

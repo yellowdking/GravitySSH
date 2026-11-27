@@ -44,7 +44,7 @@ export default function App() {
 
   const act = createSessionActions({
     activeNav: nav, setActiveNav: setNav, activeSessionId: sid, setActiveSessionId: data.setActiveSessionId,
-    sessionsRef, setSessions: data.setSessions, setSftpOpenBySession, setShortcuts: data.setShortcuts,
+    sessionsRef, closedSessionIdsRef: data.closedSessionIdsRef, setSessions: data.setSessions, setSftpOpenBySession, setShortcuts: data.setShortcuts,
     settings, setSettings: data.setSettings, reloadServers, confirm, showToast: notify,
     estimatePty: () => lay.estimateInitialPty(wsRef.current, settings.terminalFontSize, settings.autoOpenSftp, drw !== 'none'),
   })
@@ -90,7 +90,7 @@ export default function App() {
                   visible={isVisible}
                   settings={settings}
                   showSftp={isSftpOpen}
-                  sftpWidth={isVisible && isSftpOpen ? lay.sftpWidth : 0}
+                  sftpWidth={isSftpOpen ? lay.sftpWidth : 0}
                   onSftpWidthChange={lay.setSftpWidth}
                   onSftpWidthCommit={lay.commitSftpWidth}
                   rightDrawer={isVisible ? drw : 'none'}

@@ -7,10 +7,12 @@ interface SftpActionDeps {
   sessionId: string
   getCurrentPath: () => string
   getEditingFile: () => { path: string; content: string } | null
+  getEditorToken: () => number
   addBusyPath: (p: string) => void
   removeBusyPath: (p: string) => void
   removeEntryLocally: (p: string) => void
   setEditingFile: (f: { path: string; content: string } | null) => void
+  updateEditingFileIfCurrent: (token: number, f: { path: string; content: string }) => void
   setSavingFile: (v: boolean) => void
   loadDir: (path: string, syncCwd?: boolean) => Promise<void>
   confirm: (opts: ConfirmOptions) => Promise<boolean>
@@ -61,10 +63,11 @@ export function createSftpActions(d: SftpActionDeps) {
     handleSaveFile: async (content: string) => {
       const currentFile = d.getEditingFile()
       if (!currentFile) return
+      const editorToken = d.getEditorToken()
       d.setSavingFile(true)
       try {
         await api.sftpWriteTextFile(d.sessionId, currentFile.path, content)
-        d.setEditingFile({ path: currentFile.path, content })
+        d.updateEditingFileIfCurrent(editorToken, { path: currentFile.path, content })
         d.onToast(`已保存并回传 ${currentFile.path}`)
         void reload()
       } catch (err) { fail('保存失败', err) }

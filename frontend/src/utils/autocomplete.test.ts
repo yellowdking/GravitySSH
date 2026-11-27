@@ -96,6 +96,16 @@ describe('autocomplete helpers', () => {
     expect(line).toBe('')
   })
 
+  it('unwraps bracketed paste sequences so single-line pastes stay in sync and multi-line pastes reset cleanly', () => {
+    expect(applyTerminalInputToLine('cd ', '\x1b[200~/var/log/ng\x1b[201~')).toBe('cd /var/log/ng')
+    expect(applyTerminalInputToLine('', '\x1b[200~docker compose \x1b[201~')).toBe('docker compose ')
+    expect(applyTerminalInputToLine('cd ', '\x1b[200~项目文档\x1b[201~')).toBe('cd 项目文档')
+    expect(applyTerminalInputToLine('cd ', '\x1b[200~\x1b[201~')).toBe('cd ')
+    expect(applyTerminalInputToLine('cd ', '\x1b[200~line1\nline2\x1b[201~')).toBe('')
+    expect(applyTerminalInputToLine('cd ', '\x1b[200~ls -la\r\x1b[201~')).toBe('')
+    expect(applyTerminalInputToLine('cd ', '\x1b[200~foo\x1b[Dbar\x1b[201~')).toBe('')
+  })
+
   it('extracts active token prefix by source for cyan prefix highlighting', () => {
     expect(getActiveTokenPrefix('cd /opt/ng', 'dir')).toBe('ng')
     expect(getActiveTokenPrefix('cd /opt/', 'dir')).toBe('')

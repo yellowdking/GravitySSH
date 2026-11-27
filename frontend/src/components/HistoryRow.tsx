@@ -45,7 +45,7 @@ export const HistoryRow: React.FC<Props> = ({
       }`}
     >
       <div className="flex items-start gap-2">
-        <button onClick={onToggle} className="mt-0.5 text-ag-muted hover:text-indigo-300 shrink-0" title="勾选以保存为快捷方式">
+        <button onClick={onToggle} className="mt-0.5 text-ag-muted hover:text-indigo-300 shrink-0" title="勾选以保存为快捷命令">
           {checked ? <CheckSquare className="w-4 h-4 text-indigo-400" /> : <Square className="w-4 h-4" />}
         </button>
         <div className="min-w-0 flex-1">
@@ -53,7 +53,7 @@ export const HistoryRow: React.FC<Props> = ({
           <div className="mt-1.5 flex items-center justify-between text-[10px] text-ag-subtle">
             <span className="truncate">{rec.serverName} · {timeStr}</span>
             <div className="flex items-center gap-0.5 opacity-80 group-hover:opacity-100">
-              <button onClick={onSaveAsShortcut} title="保存为加密快捷方式" className="p-1 rounded hover:bg-indigo-500/20 text-indigo-300"><BookmarkPlus className="w-3.5 h-3.5" /></button>
+              <button onClick={onSaveAsShortcut} title="保存为加密快捷命令" className="p-1 rounded hover:bg-indigo-500/20 text-indigo-300"><BookmarkPlus className="w-3.5 h-3.5" /></button>
               {hasActiveSession && (
                 <>
                   <button onClick={() => onRun(true)} title="立即执行" className="p-1 rounded hover:bg-emerald-500/20 text-emerald-400"><Play className="w-3.5 h-3.5" /></button>

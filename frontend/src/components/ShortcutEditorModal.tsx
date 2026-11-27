@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react'
-import { BookmarkPlus, X } from 'lucide-react'
+import React, { useEffect, useRef, useState } from 'react'
+import { BookmarkPlus, Loader2, X } from 'lucide-react'
 import type { CommandShortcut } from '../types'
 import { ModalShell } from './ModalShell'
 
@@ -13,9 +13,15 @@ interface Props {
 
 export const ShortcutEditorModal: React.FC<Props> = ({ open, initial, title, onClose, onSubmit }) => {
   const [draft, setDraft] = useState<Partial<CommandShortcut>>({})
+  const [saving, setSaving] = useState(false)
+  const savingRef = useRef(false)
 
   useEffect(() => {
-    if (open && initial) setDraft(initial)
+    if (open && initial) {
+      setDraft(initial)
+      savingRef.current = false
+      setSaving(false)
+    }
   }, [open, initial])
 
   if (!initial) return null
@@ -31,11 +37,19 @@ export const ShortcutEditorModal: React.FC<Props> = ({ open, initial, title, onC
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    await onSubmit(draft)
+    if (savingRef.current) return
+    savingRef.current = true
+    setSaving(true)
+    try {
+      await onSubmit(draft)
+    } finally {
+      savingRef.current = false
+      setSaving(false)
+    }
   }
 
   return (
-    <ModalShell open={open} onClose={onClose}>
+    <ModalShell open={open} onClose={saving ? () => {} : onClose}>
       <form
         onSubmit={handleSubmit}
         className="w-full max-w-2xl rounded-2xl bg-ag-panel border border-ag-borderStrong shadow-ag p-5 space-y-3.5 max-h-[90vh] flex flex-col"
@@ -45,14 +59,14 @@ export const ShortcutEditorModal: React.FC<Props> = ({ open, initial, title, onC
             <BookmarkPlus className="w-4 h-4 text-indigo-400" />
             {title}
           </h3>
-          <button type="button" onClick={onClose} aria-label="关闭快捷方式编辑器" className="p-1 text-ag-muted hover:text-ag-text">
+          <button type="button" onClick={onClose} disabled={saving} aria-label="关闭快捷命令编辑器" className="p-1 text-ag-muted hover:text-ag-text disabled:opacity-50">
             <X className="w-4 h-4" />
           </button>
         </div>
 
         <div className="grid grid-cols-2 gap-3 shrink-0">
           <div>
-            <label className="block text-xs text-ag-muted mb-1">快捷方式名称 *</label>
+            <label className="block text-xs text-ag-muted mb-1">快捷命令名称 *</label>
             <input
               required
               className="ag-input"
@@ -122,8 +136,11 @@ export const ShortcutEditorModal: React.FC<Props> = ({ open, initial, title, onC
         </div>
 
         <div className="flex justify-end gap-2 pt-2 shrink-0">
-          <button type="button" onClick={onClose} className="ag-btn-ghost">取消</button>
-          <button type="submit" className="ag-btn-primary">保存快捷方式</button>
+          <button type="button" onClick={onClose} disabled={saving} className="ag-btn-ghost disabled:opacity-50">取消</button>
+          <button type="submit" disabled={saving} className="ag-btn-primary">
+            {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            {saving ? '保存中...' : '保存快捷命令'}
+          </button>
         </div>
       </form>
     </ModalShell>

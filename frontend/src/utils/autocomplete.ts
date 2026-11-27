@@ -59,12 +59,22 @@ const RESET_ESCAPES = new Set([
  * Lightweight client-side input buffer mirror for zero-latency autocomplete triggering.
  */
 export function applyTerminalInputToLine(currentLine: string, rawData: string): string {
-  if (rawData.startsWith('\x1b')) {
-    return RESET_ESCAPES.has(rawData) ? '' : currentLine
+  let data = rawData
+  if (data.startsWith('\x1b[200~')) {
+    data = data.slice('\x1b[200~'.length)
+    if (data.endsWith('\x1b[201~')) {
+      data = data.slice(0, -'\x1b[201~'.length)
+    }
+    data = data.replace(/\x1b\[20[01]~/g, '')
+    if (data.includes('\x1b') || data.includes('\r') || data.includes('\n')) {
+      return ''
+    }
+  } else if (data.startsWith('\x1b')) {
+    return RESET_ESCAPES.has(data) ? '' : currentLine
   }
 
   let line = currentLine
-  for (const ch of rawData) {
+  for (const ch of data) {
     const code = ch.charCodeAt(0)
     if (ch === '\r' || ch === '\n' || ch === '\t' || code === 0x03 || code === 0x04 || code === 0x15) {
       line = ''

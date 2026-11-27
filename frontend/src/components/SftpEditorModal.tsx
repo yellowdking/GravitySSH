@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { FileCode2, Loader2, Save, X } from 'lucide-react'
 import { insertTabIndent } from '../utils/errors'
 import { useActionDialogs } from '../hooks/useActionDialogs'
@@ -15,6 +15,8 @@ interface Props {
 
 export const SftpEditorModal: React.FC<Props> = ({ open, remotePath, initialContent, saving, onSave, onClose }) => {
   const [content, setContent] = useState(initialContent)
+  const openRef = useRef(open)
+  openRef.current = open
   const { confirm, dialogNode } = useActionDialogs()
 
   useEffect(() => {
@@ -31,7 +33,7 @@ export const SftpEditorModal: React.FC<Props> = ({ open, remotePath, initialCont
         message: '文件有未保存的修改，确定放弃修改并关闭吗？',
         confirmLabel: '放弃并关闭',
       })
-      if (!ok) return
+      if (!ok || !openRef.current) return
     }
     onClose()
   }

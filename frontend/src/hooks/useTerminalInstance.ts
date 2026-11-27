@@ -114,6 +114,7 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
     sendResize(term.cols, term.rows)
 
     let dec = new TextDecoder('utf-8')
+    let decActive = false
     const hl = createLogHighlighter()
     let wasHighlighting = false
     let inAltScreen = term.buffer.active.type === 'alternate'
@@ -133,18 +134,31 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
       })
     }
 
-    const flushHighlightPipeline = (writeTail: boolean) => {
+    const flushHighlighter = (writeTail: boolean) => {
+      if (!wasHighlighting) return
+      wasHighlighting = false
+      const hlTail = hl.reset()
+      if (writeTail && hlTail) queuedWrite(hlTail)
+    }
+
+    const flushPipelineForRawMode = (writeTail: boolean) => {
       if (escTail) {
         const tail = escTail
         escTail = ''
         if (writeTail) queuedWrite(tail)
       }
-      if (!wasHighlighting) return
-      wasHighlighting = false
-      const decodedTail = dec.decode()
-      const hlOut = (decodedTail ? hl.highlight(decodedTail) : '') + hl.reset()
-      if (writeTail && hlOut) queuedWrite(hlOut)
-      dec = new TextDecoder('utf-8')
+      const decodedTail = decActive ? dec.decode() : ''
+      if (decActive) {
+        decActive = false
+        dec = new TextDecoder('utf-8')
+      }
+      if (wasHighlighting) {
+        wasHighlighting = false
+        const hlOut = (decodedTail ? hl.highlight(decodedTail) : '') + hl.reset()
+        if (writeTail && hlOut) queuedWrite(hlOut)
+      } else if (writeTail && decodedTail) {
+        queuedWrite(decodedTail)
+      }
     }
 
     const onBufferChange = term.buffer.onBufferChange((buf) => {
@@ -194,15 +208,18 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
       if (p.sessionId !== sessionId || !p.data) return
       const b = base64ToUint8Array(p.data)
       if (!sRef.current.keywordHighlightEnabled) {
-        flushHighlightPipeline(!inAltScreen)
+        flushPipelineForRawMode(true)
         queuedWrite(b)
         return
       }
       if (inAltScreen && !escTail && b.indexOf(0x1b) === -1) {
-        queuedWrite(b)
+        decActive = true
+        const text = dec.decode(b, { stream: true })
+        if (text) queuedWrite(text)
         return
       }
 
+      decActive = true
       let chunk = escTail + dec.decode(b, { stream: true })
       escTail = ''
       const tailMatch = INCOMPLETE_ALT_TAIL_RE.exec(chunk)
@@ -227,7 +244,7 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
           }
         }
         if (match[1] === 'h') {
-          if (!inAltScreen) flushHighlightPipeline(true)
+          if (!inAltScreen) flushHighlighter(true)
           inAltScreen = true
         } else {
           inAltScreen = false
