@@ -1,16 +1,31 @@
 package sshclient
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/pkg/sftp"
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
+
+const transferProgressMinInterval = 50 * time.Millisecond
+
+func (m *Manager) sessionStopCh(sessionID string) <-chan struct{} {
+	if sess := m.getSession(sessionID); sess != nil {
+		sess.mu.Lock()
+		ch := sess.stopCh
+		sess.mu.Unlock()
+		return ch
+	}
+	return nil
+}
 
 // SFTPUpload streams a local file directly to remoteDir (rebuilding a stale SFTP client on open error).
 func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
@@ -34,13 +49,17 @@ func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
 	transferID := uuid.NewString()
 	total := st.Size()
 
-	var dst *sftp.File
+	var (
+		dst    *sftp.File
+		usedSC *sftp.Client
+	)
 	err = m.withSFTP(sessionID, func(sc *sftp.Client) error {
 		f, oErr := sc.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 		if oErr != nil {
 			return oErr
 		}
 		dst = f
+		usedSC = sc
 		return nil
 	})
 	if err != nil {
@@ -58,7 +77,11 @@ func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
 		FileName: fileName, RemotePath: remotePath, LocalPath: localPath,
 		Total: total, Status: "running",
 	}
-	cpErr := m.copyChunked(dst, src, &prog)
+	tracker := newProgressTracker(m, &prog, m.sessionStopCh(sessionID))
+	tracker.emitInitial()
+	// Wrap src as plain io.Reader (not io.WriterTo) so io.Copy invokes dst.(*sftp.File).ReadFrom
+	// and engages pkg/sftp pipelined concurrent writes.
+	_, cpErr := io.Copy(dst, &progressReader{r: src, tracker: tracker})
 	closeErr := dst.Close()
 	if cpErr != nil || closeErr != nil {
 		finalErr := cpErr
@@ -66,21 +89,19 @@ func (m *Manager) SFTPUpload(sessionID, localPath, remoteDir string) error {
 			finalErr = closeErr
 		}
 		if isSFTPConnError(finalErr) {
-			if sc, scErr := m.getSFTP(sessionID); scErr == nil {
-				m.invalidateSFTP(sessionID, sc)
-			}
+			m.invalidateSFTP(sessionID, usedSC)
 		}
-		m.emitTransfer(models.TransferProgress{
-			TransferID: transferID, SessionID: sessionID, Direction: "upload",
-			FileName: fileName, RemotePath: remotePath, LocalPath: localPath,
-			Transferred: prog.Transferred, Total: total, Status: "error", Error: finalErr.Error(),
-		})
+		snap := tracker.snapshot()
+		snap.Status = "error"
+		snap.Error = finalErr.Error()
+		m.emitTransfer(snap)
 		return finalErr
 	}
 
-	prog.Percent = 100
-	prog.Status = "done"
-	m.emitTransfer(prog)
+	snap := tracker.snapshot()
+	snap.Percent = 100
+	snap.Status = "done"
+	m.emitTransfer(snap)
 	m.invalidateDirCache(sessionID, cleanDir)
 	return nil
 }
@@ -96,8 +117,9 @@ func (m *Manager) SFTPDownload(sessionID, remotePath, localPath string) error {
 	}
 
 	var (
-		src   *sftp.File
-		total int64
+		src    *sftp.File
+		usedSC *sftp.Client
+		total  int64
 	)
 	err := m.withSFTP(sessionID, func(sc *sftp.Client) error {
 		f, oErr := sc.Open(cleanRemote)
@@ -114,6 +136,7 @@ func (m *Manager) SFTPDownload(sessionID, remotePath, localPath string) error {
 			return fmt.Errorf("无法直接下载目录，请使用打包下载目录")
 		}
 		src = f
+		usedSC = sc
 		total = st.Size()
 		return nil
 	})
@@ -137,7 +160,11 @@ func (m *Manager) SFTPDownload(sessionID, remotePath, localPath string) error {
 		FileName: fileName, RemotePath: cleanRemote, LocalPath: localPath,
 		Total: total, Status: "running",
 	}
-	cpErr := m.copyChunked(dst, src, &prog)
+	tracker := newProgressTracker(m, &prog, m.sessionStopCh(sessionID))
+	tracker.emitInitial()
+	// Wrap dst as plain io.Writer (not io.ReaderFrom) so io.Copy invokes src.(*sftp.File).WriteTo
+	// and engages pkg/sftp pipelined concurrent reads.
+	_, cpErr := io.Copy(&progressWriter{w: dst, tracker: tracker}, src)
 	closeErr := dst.Close()
 	if cpErr != nil || closeErr != nil {
 		finalErr := cpErr
@@ -145,58 +172,132 @@ func (m *Manager) SFTPDownload(sessionID, remotePath, localPath string) error {
 			finalErr = closeErr
 		}
 		if isSFTPConnError(finalErr) {
-			if sc, scErr := m.getSFTP(sessionID); scErr == nil {
-				m.invalidateSFTP(sessionID, sc)
-			}
+			m.invalidateSFTP(sessionID, usedSC)
 		}
-		m.emitTransfer(models.TransferProgress{
-			TransferID: transferID, SessionID: sessionID, Direction: "download",
-			FileName: fileName, RemotePath: cleanRemote, LocalPath: localPath,
-			Transferred: prog.Transferred, Total: total, Status: "error", Error: finalErr.Error(),
-		})
+		snap := tracker.snapshot()
+		snap.Status = "error"
+		snap.Error = finalErr.Error()
+		m.emitTransfer(snap)
 		return finalErr
 	}
 
-	prog.Percent = 100
-	prog.Status = "done"
-	m.emitTransfer(prog)
+	snap := tracker.snapshot()
+	snap.Percent = 100
+	snap.Status = "done"
+	m.emitTransfer(snap)
 	return nil
 }
 
-func (m *Manager) copyChunked(dst io.Writer, src io.Reader, prog *models.TransferProgress) error {
-	buf := make([]byte, 64*1024)
-	lastPercent := -1
-	if prog.Total > 0 {
-		prog.Percent = int(prog.Transferred * 100 / prog.Total)
-		lastPercent = prog.Percent
-	}
-	m.emitTransfer(*prog)
+type progressTracker struct {
+	m           *Manager
+	mu          sync.Mutex
+	prog        *models.TransferProgress
+	stopCh      <-chan struct{}
+	lastPercent int
+	lastEmit    time.Time
+}
 
-	for {
-		n, readErr := src.Read(buf)
-		if n > 0 {
-			written, writeErr := dst.Write(buf[:n])
-			if writeErr != nil {
-				return writeErr
-			}
-			prog.Transferred += int64(written)
-			if prog.Total > 0 {
-				pct := int(prog.Transferred * 100 / prog.Total)
-				if pct > 100 {
-					pct = 100
-				}
-				if pct != lastPercent {
-					lastPercent = pct
-					prog.Percent = pct
-					m.emitTransfer(*prog)
-				}
-			}
-		}
-		if readErr == io.EOF {
-			return nil
-		}
-		if readErr != nil {
-			return readErr
-		}
+func newProgressTracker(m *Manager, prog *models.TransferProgress, stopCh <-chan struct{}) *progressTracker {
+	return &progressTracker{
+		m:           m,
+		prog:        prog,
+		stopCh:      stopCh,
+		lastPercent: -1,
 	}
+}
+
+func (p *progressTracker) checkCanceled() error {
+	if p.stopCh == nil {
+		return nil
+	}
+	select {
+	case <-p.stopCh:
+		return errors.New("会话已断开，传输已取消")
+	default:
+		return nil
+	}
+}
+
+func (p *progressTracker) emitInitial() {
+	p.mu.Lock()
+	if p.prog.Total > 0 {
+		p.prog.Percent = int(p.prog.Transferred * 100 / p.prog.Total)
+		p.lastPercent = p.prog.Percent
+	}
+	p.lastEmit = time.Now()
+	snap := *p.prog
+	p.mu.Unlock()
+	p.m.emitTransfer(snap)
+}
+
+func (p *progressTracker) add(n int64) {
+	if n <= 0 {
+		return
+	}
+	var (
+		shouldEmit bool
+		snap       models.TransferProgress
+	)
+	now := time.Now()
+	p.mu.Lock()
+	p.prog.Transferred += n
+	if p.prog.Total > 0 {
+		pct := int(p.prog.Transferred * 100 / p.prog.Total)
+		if pct > 100 {
+			pct = 100
+		}
+		if pct != p.lastPercent && (pct == 100 || now.Sub(p.lastEmit) >= transferProgressMinInterval) {
+			p.lastPercent = pct
+			p.prog.Percent = pct
+			p.lastEmit = now
+			snap = *p.prog
+			shouldEmit = true
+		}
+	} else if now.Sub(p.lastEmit) >= 100*time.Millisecond {
+		p.lastEmit = now
+		snap = *p.prog
+		shouldEmit = true
+	}
+	p.mu.Unlock()
+	if shouldEmit {
+		p.m.emitTransfer(snap)
+	}
+}
+
+func (p *progressTracker) snapshot() models.TransferProgress {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return *p.prog
+}
+
+type progressReader struct {
+	r       io.Reader
+	tracker *progressTracker
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	if err := pr.tracker.checkCanceled(); err != nil {
+		return 0, err
+	}
+	n, err := pr.r.Read(p)
+	if n > 0 {
+		pr.tracker.add(int64(n))
+	}
+	return n, err
+}
+
+type progressWriter struct {
+	w       io.Writer
+	tracker *progressTracker
+}
+
+func (pw *progressWriter) Write(p []byte) (int, error) {
+	if err := pw.tracker.checkCanceled(); err != nil {
+		return 0, err
+	}
+	n, err := pw.w.Write(p)
+	if n > 0 {
+		pw.tracker.add(int64(n))
+	}
+	return n, err
 }

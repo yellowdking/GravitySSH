@@ -37,6 +37,16 @@ func TestUnpackTarStreamAndPathTraversalGuard(t *testing.T) {
 	if _, err := unpackTarStream(&evil, dest); err == nil {
 		t.Fatal("expected traversal path to be rejected")
 	}
+
+	// Windows drive root & backslash traversal checks
+	if got, err := safeJoinLocal(`C:\`, "proj/app.conf"); err != nil || got != `C:\proj\app.conf` {
+		t.Fatalf("safeJoinLocal on Windows drive root failed: got=%q err=%v", got, err)
+	}
+	for _, bad := range []string{`..\..\evil.txt`, `D:evil.txt`, "bad\x00name"} {
+		if _, err := safeJoinLocal(dest, bad); err == nil {
+			t.Fatalf("expected unsafe path %q to be rejected", bad)
+		}
+	}
 }
 
 func TestBuildCompressCommand(t *testing.T) {
