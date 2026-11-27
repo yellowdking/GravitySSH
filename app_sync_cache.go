@@ -24,27 +24,48 @@ type syncPreviewEntry struct {
 }
 
 type pendingSyncSendSession struct {
-	sessionID     string
-	channelID     string
-	senderToken   string
-	sendCode      string
-	relayURL      string
-	bundle        models.SyncBundle
-	hasBundle     bool
-	expiresAt     time.Time
-	approving     bool
-	approved      bool
-	approvedReqID string
+	sessionID       string
+	channelID       string
+	senderToken     string
+	sendCode        string
+	relayURL        string
+	relayTarget     string
+	bundle          models.SyncBundle
+	hasBundle       bool
+	expiresAt       time.Time
+	approving       bool
+	approved        bool
+	approvedReqID   string
+	cachedReqID     string
+	cachedReqSalt   string
+	cachedReqNonce  string
+	cachedReqCipher string
+	cachedReqInfo   *syncclient.PairRequestPayload
+}
+
+func (s *pendingSyncSendSession) effectiveRelay() string {
+	if s.relayTarget != "" {
+		return s.relayTarget
+	}
+	return s.relayURL
 }
 
 type pendingSyncReceiveSession struct {
-	waitID    string
-	channelID string
-	sendCode  string
-	recvCode  string
-	requestID string
-	relayURL  string
-	expiresAt time.Time
+	waitID      string
+	channelID   string
+	sendCode    string
+	recvCode    string
+	requestID   string
+	relayURL    string
+	relayTarget string
+	expiresAt   time.Time
+}
+
+func (s *pendingSyncReceiveSession) effectiveRelay() string {
+	if s.relayTarget != "" {
+		return s.relayTarget
+	}
+	return s.relayURL
 }
 
 func cloneSyncBundle(b models.SyncBundle) models.SyncBundle {
@@ -90,6 +111,12 @@ func zeroSendSession(s *pendingSyncSendSession) {
 	s.hasBundle = false
 	s.senderToken = ""
 	s.sendCode = ""
+	s.relayTarget = ""
+	s.cachedReqID = ""
+	s.cachedReqSalt = ""
+	s.cachedReqNonce = ""
+	s.cachedReqCipher = ""
+	s.cachedReqInfo = nil
 }
 
 func evictOldest[V any](m map[string]V, maxEntries int, expires func(V) time.Time, onEvict func(V)) {
@@ -206,8 +233,65 @@ func (c *syncPreviewCache) getSend(sessionID string) (*pendingSyncSendSession, b
 	}
 	cp := *sess
 	cp.bundle = models.SyncBundle{}
+	cp.cachedReqInfo = nil
 	c.rescheduleLocked(now)
 	return &cp, true
+}
+
+func (c *syncPreviewCache) getCachedPairRequest(sessionID, requestID, salt, nonce, ciphertext string) (syncclient.PairRequestPayload, bool) {
+	if requestID == "" {
+		return syncclient.PairRequestPayload{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	sess, ok := c.pendingSends[sessionID]
+	if !ok || sess.cachedReqInfo == nil {
+		return syncclient.PairRequestPayload{}, false
+	}
+	if sess.cachedReqID != requestID ||
+		sess.cachedReqSalt != salt ||
+		sess.cachedReqNonce != nonce ||
+		sess.cachedReqCipher != ciphertext {
+		return syncclient.PairRequestPayload{}, false
+	}
+	return *sess.cachedReqInfo, true
+}
+
+func (c *syncPreviewCache) setCachedPairRequest(sessionID, requestID, salt, nonce, ciphertext string, info syncclient.PairRequestPayload) {
+	if requestID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if sess, ok := c.pendingSends[sessionID]; ok {
+		cp := info
+		sess.cachedReqID = requestID
+		sess.cachedReqSalt = salt
+		sess.cachedReqNonce = nonce
+		sess.cachedReqCipher = ciphertext
+		sess.cachedReqInfo = &cp
+	}
+}
+
+func (c *syncPreviewCache) drainAllOnLock() []*pendingSyncSendSession {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	sends := make([]*pendingSyncSendSession, 0, len(c.pendingSends))
+	for k, s := range c.pendingSends {
+		cp := *s
+		cp.bundle = models.SyncBundle{}
+		cp.cachedReqInfo = nil
+		sends = append(sends, &cp)
+		zeroSendSession(s)
+		delete(c.pendingSends, k)
+	}
+	for k, e := range c.entries {
+		zeroSyncBundle(&e.bundle)
+		delete(c.entries, k)
+	}
+	clear(c.pendingReceives)
+	c.rescheduleLocked(time.Now())
+	return sends
 }
 
 // beginSendApprove atomically marks a pending send session as approving and
@@ -335,10 +419,22 @@ func (c *syncPreviewCache) getReceive(waitID string) (*pendingSyncReceiveSession
 	return &cp, true
 }
 
+func zeroReceiveSession(r *pendingSyncReceiveSession) {
+	if r == nil {
+		return
+	}
+	r.sendCode = ""
+	r.recvCode = ""
+	r.relayTarget = ""
+}
+
 func (c *syncPreviewCache) removeReceive(waitID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.pendingReceives, waitID)
+	if r, ok := c.pendingReceives[waitID]; ok {
+		zeroReceiveSession(r)
+		delete(c.pendingReceives, waitID)
+	}
 	c.rescheduleLocked(time.Now())
 }
 
@@ -354,7 +450,10 @@ func (c *syncPreviewCache) clear(id string) {
 			zeroSendSession(s)
 			delete(c.pendingSends, k)
 		}
-		clear(c.pendingReceives)
+		for k, r := range c.pendingReceives {
+			zeroReceiveSession(r)
+			delete(c.pendingReceives, k)
+		}
 	} else {
 		if e, ok := c.entries[id]; ok {
 			zeroSyncBundle(&e.bundle)
@@ -376,7 +475,10 @@ func (c *syncPreviewCache) close() {
 		zeroSendSession(s)
 		delete(c.pendingSends, k)
 	}
-	clear(c.pendingReceives)
+	for k, r := range c.pendingReceives {
+		zeroReceiveSession(r)
+		delete(c.pendingReceives, k)
+	}
 	for k, e := range c.entries {
 		zeroSyncBundle(&e.bundle)
 		delete(c.entries, k)
@@ -398,6 +500,7 @@ func (c *syncPreviewCache) pruneLocked(now time.Time) {
 	}
 	for k, r := range c.pendingReceives {
 		if !now.Before(r.expiresAt.Add(syncClockSkewGrace)) {
+			zeroReceiveSession(r)
 			delete(c.pendingReceives, k)
 		}
 	}
