@@ -38,7 +38,7 @@ func (s *Store) SaveTemplate(tpl models.BuiltinTemplate) (models.BuiltinTemplate
 		tpl.Category = "自定义"
 	}
 
-	snapshot := cloneVaultData(s.data)
+	prevTemplates := cloneTemplates(s.data.Templates)
 	if tpl.ID == "" {
 		tpl.ID = uuid.NewString()
 		tpl.PresetID = ""
@@ -65,7 +65,7 @@ func (s *Store) SaveTemplate(tpl models.BuiltinTemplate) (models.BuiltinTemplate
 	}
 
 	if err := s.saveLocked(); err != nil {
-		s.data = snapshot
+		s.data.Templates = prevTemplates
 		return models.BuiltinTemplate{}, err
 	}
 	return tpl, nil
@@ -92,10 +92,10 @@ func (s *Store) DeleteTemplate(id string) error {
 	if !found {
 		return nil
 	}
-	snapshot := cloneVaultData(s.data)
+	prevTemplates := cloneTemplates(s.data.Templates)
 	s.data.Templates = next
 	if err := s.saveLocked(); err != nil {
-		s.data = snapshot
+		s.data.Templates = prevTemplates
 		return err
 	}
 	return nil
@@ -123,7 +123,7 @@ func (s *Store) LoadPresetTemplates() (models.PresetLoadResult, error) {
 		}
 	}
 
-	snapshot := cloneVaultData(s.data)
+	prevTemplates := cloneTemplates(s.data.Templates)
 	presets := BuiltinOpsTemplates()
 	added, skipped := 0, 0
 	for _, preset := range presets {
@@ -138,7 +138,7 @@ func (s *Store) LoadPresetTemplates() (models.PresetLoadResult, error) {
 
 	if added > 0 {
 		if err := s.saveLocked(); err != nil {
-			s.data = snapshot
+			s.data.Templates = prevTemplates
 			return models.PresetLoadResult{}, err
 		}
 	}

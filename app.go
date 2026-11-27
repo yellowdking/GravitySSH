@@ -184,6 +184,20 @@ func (a *App) UnlockVault(password string) error {
 	return store.Unlock(password)
 }
 
+// LockVault immediately locks a password-protected vault, clears secrets from memory,
+// and cancels/clears any in-flight sync send/receive sessions and previews.
+func (a *App) LockVault() error {
+	store, _, _, err := a.readyDeps()
+	if err != nil {
+		return err
+	}
+	if err := store.Lock(); err != nil {
+		return err
+	}
+	a.cancelAllSyncOnLock()
+	return nil
+}
+
 func (a *App) SetVaultPassword(currentPassword, newPassword string) error {
 	store, _, _, err := a.unlockedDeps()
 	if err != nil {
@@ -275,35 +289,93 @@ func (a *App) ImportSSHKeyFromText(name, pemContent, passphrase, comment string)
 	return store.ImportSSHKey(name, pemContent, passphrase, comment)
 }
 
-func readSSHKeyFileBounded(selected string, maxBytes int64) (string, error) {
+func readSSHKeyFileBytesBounded(selected string, maxBytes int64) ([]byte, error) {
 	f, err := os.Open(selected)
 	if err != nil {
-		return "", fmt.Errorf("读取密钥文件失败: %w", err)
+		return nil, fmt.Errorf("读取密钥文件失败: %w", err)
 	}
 	defer f.Close()
 
 	info, err := f.Stat()
 	if err != nil {
-		return "", fmt.Errorf("读取密钥文件失败: %w", err)
+		return nil, fmt.Errorf("读取密钥文件失败: %w", err)
 	}
 	if info.IsDir() {
-		return "", errors.New("所选路径是目录，不是有效的 SSH 私钥文件")
+		return nil, errors.New("所选路径是目录，不是有效的 SSH 私钥文件")
 	}
 	if !info.Mode().IsRegular() {
-		return "", errors.New("所选路径不是普通文件，无法作为 SSH 私钥读取")
+		return nil, errors.New("所选路径不是普通文件，无法作为 SSH 私钥读取")
 	}
 	if info.Size() > maxBytes {
-		return "", errors.New("文件体积过大，不是有效的 SSH 私钥文件")
+		return nil, errors.New("文件体积过大，不是有效的 SSH 私钥文件")
 	}
 	raw, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
 	if err != nil {
-		return "", fmt.Errorf("读取密钥文件失败: %w", err)
+		return nil, fmt.Errorf("读取密钥文件失败: %w", err)
+	}
+	if int64(len(raw)) > maxBytes {
+		clear(raw)
+		return nil, errors.New("文件体积过大，不是有效的 SSH 私钥文件")
+	}
+	return raw, nil
+}
+
+func readSSHKeyFileBounded(selected string, maxBytes int64) (string, error) {
+	raw, err := readSSHKeyFileBytesBounded(selected, maxBytes)
+	if err != nil {
+		return "", err
 	}
 	defer clear(raw)
-	if int64(len(raw)) > maxBytes {
-		return "", errors.New("文件体积过大，不是有效的 SSH 私钥文件")
-	}
 	return string(raw), nil
+}
+
+func (a *App) importSSHKeyFromPath(store *vault.Store, selected, name, passphrase, comment string) (*models.SSHKeyMeta, error) {
+	raw, err := readSSHKeyFileBytesBounded(selected, maxSSHKeyFileSize)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(raw)
+
+	keyName := strings.TrimSpace(name)
+	if keyName == "" {
+		base := filepath.Base(selected)
+		keyName = strings.TrimSpace(strings.TrimSuffix(base, filepath.Ext(base)))
+		if keyName == "" {
+			keyName = strings.TrimSpace(base)
+		}
+	}
+	meta, err := store.ImportSSHKey(keyName, string(raw), passphrase, comment)
+	if err != nil {
+		return nil, err
+	}
+	return &meta, nil
+}
+
+// ImportSSHKeyFromFile opens a native file dialog, reads & validates the chosen SSH private key
+// entirely inside Go without round-tripping raw PEM bytes through JS, zeroes the raw bytes on exit,
+// and returns the saved SSHKeyMeta (or nil, nil when cancelled).
+func (a *App) ImportSSHKeyFromFile(name, passphrase, comment string) (*models.SSHKeyMeta, error) {
+	store, _, ctx, err := a.unlockedDeps()
+	if err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		return nil, errors.New("应用上下文尚未就绪")
+	}
+	selected, err := runtime.OpenFileDialog(ctx, runtime.OpenDialogOptions{
+		Title: "选择 SSH 私钥文件",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "SSH 密钥文件 (*.pem, *.key, id_*)", Pattern: "*.pem;*.key;*.ppk;*"},
+			{DisplayName: "所有文件 (*.*)", Pattern: "*.*"},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if selected == "" {
+		return nil, nil
+	}
+	return a.importSSHKeyFromPath(store, selected, name, passphrase, comment)
 }
 
 func (a *App) PickAndReadSSHKeyFile() (map[string]string, error) {

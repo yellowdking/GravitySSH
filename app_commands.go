@@ -406,15 +406,8 @@ func (a *App) RunShortcut(sessionID, shortcutID string, execute bool) error {
 	if err != nil {
 		return err
 	}
-	var target *models.CommandShortcut
-	for _, sc := range store.ListShortcuts() {
-		if sc.ID == shortcutID {
-			cp := sc
-			target = &cp
-			break
-		}
-	}
-	if target == nil {
+	target, ok := store.GetShortcut(shortcutID)
+	if !ok {
 		return errors.New("快捷命令不存在")
 	}
 	store.IncrementShortcutUse(shortcutID)
@@ -445,16 +438,18 @@ func (a *App) SuggestCommandsForSession(input, serverID, sessionID string) ([]mo
 
 	var cwd, homeDir string
 	var cwdEntries, targetEntries []models.SFTPFileEntry
+	var parsed autocomplete.ParsedLine
 	if sessionID != "" {
 		cwd = sshMgr.GetSessionCWD(sessionID)
 		homeDir = sshMgr.GetSessionHomeDir(sessionID)
 		cwdEntries = sshMgr.PeekCachedDirEntries(sessionID, cwd)
-		if targetDir, active := autocomplete.ExtractPathContextWithHome(input, cwd, homeDir); active {
-			if targetDir == cwd {
-				targetEntries = cwdEntries
-			} else {
-				targetEntries = sshMgr.PeekCachedDirEntries(sessionID, targetDir)
-			}
+	}
+	parsed = autocomplete.ParseLine(input, cwd, homeDir)
+	if sessionID != "" && parsed.PathActive {
+		if parsed.TargetDir == cwd {
+			targetEntries = cwdEntries
+		} else {
+			targetEntries = sshMgr.PeekCachedDirEntries(sessionID, parsed.TargetDir)
 		}
 	}
 
@@ -476,7 +471,7 @@ func (a *App) SuggestCommandsForSession(input, serverID, sessionID string) ([]mo
 
 	items := autocomplete.SuggestWithContext(autocomplete.SuggestRequest{
 		Input: input, CWD: cwd, HomeDir: homeDir, ServerID: serverID,
-		CWDEntries: cwdEntries, TargetEntries: targetEntries,
+		Parsed: &parsed, CWDEntries: cwdEntries, TargetEntries: targetEntries,
 		History: history, IncludeHistory: settings.AutocompleteFromHistory, Limit: 5,
 	})
 	if items == nil {
