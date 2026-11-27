@@ -8,7 +8,10 @@ import (
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
-const dirCacheTTL = 20 * time.Second
+const (
+	dirCacheTTL        = 20 * time.Second
+	maxDirCacheEntries = 64
+)
 
 func (m *Manager) getSession(id string) *sessionState {
 	m.mu.RLock()
@@ -78,20 +81,60 @@ func cloneDirEntries(src []models.SFTPFileEntry) []models.SFTPFileEntry {
 
 func peekCacheLocked(s *sessionState, target string) ([]models.SFTPFileEntry, bool) {
 	c, ok := s.dirCache[target]
-	if !ok || time.Since(c.fetchedAt) >= dirCacheTTL {
+	if !ok {
 		return nil, false
 	}
+	if time.Since(c.fetchedAt) >= dirCacheTTL {
+		delete(s.dirCache, target)
+		return nil, false
+	}
+	s.dirCacheSeq++
+	c.lastSeq = s.dirCacheSeq
+	s.dirCache[target] = c
 	return cloneDirEntries(c.entries), true
 }
 
 func putDirCacheIfGen(s *sessionState, target string, entries []models.SFTPFileEntry, expectedGen uint64) {
 	cp := cloneDirEntries(entries)
+	now := time.Now()
 	s.mu.Lock()
 	if s.dirCacheGen == expectedGen {
 		if s.dirCache == nil {
 			s.dirCache = make(map[string]dirCacheEntry)
 		}
-		s.dirCache[target] = dirCacheEntry{entries: cp, fetchedAt: time.Now()}
+		for k, v := range s.dirCache {
+			if k != target && !v.fetchedAt.IsZero() && now.Sub(v.fetchedAt) >= dirCacheTTL {
+				delete(s.dirCache, k)
+			}
+		}
+		s.dirCacheSeq++
+		s.dirCache[target] = dirCacheEntry{
+			entries:   cp,
+			fetchedAt: now,
+			lastSeq:   s.dirCacheSeq,
+		}
+		for len(s.dirCache) > maxDirCacheEntries {
+			var (
+				evictKey string
+				evictEnt dirCacheEntry
+				hasEvict bool
+			)
+			for k, v := range s.dirCache {
+				if k == target {
+					continue
+				}
+				if !hasEvict || v.lastSeq < evictEnt.lastSeq ||
+					(v.lastSeq == evictEnt.lastSeq && v.fetchedAt.Before(evictEnt.fetchedAt)) {
+					evictKey = k
+					evictEnt = v
+					hasEvict = true
+				}
+			}
+			if !hasEvict {
+				break
+			}
+			delete(s.dirCache, evictKey)
+		}
 	}
 	s.mu.Unlock()
 }

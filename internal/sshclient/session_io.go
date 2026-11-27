@@ -272,7 +272,11 @@ func (m *Manager) initSessionSFTP(sess *sessionState, client *ssh.Client, defaul
 	default:
 	}
 
-	sc, scErr := newSFTPClient(client)
+	sess.mu.Lock()
+	sessionID := sess.info.SessionID
+	sess.mu.Unlock()
+
+	sc, scErr := m.getSFTP(sessionID)
 	if scErr != nil {
 		timer := time.NewTimer(300 * time.Millisecond)
 		select {
@@ -281,7 +285,7 @@ func (m *Manager) initSessionSFTP(sess *sessionState, client *ssh.Client, defaul
 			return
 		case <-timer.C:
 		}
-		sc, scErr = newSFTPClient(client)
+		sc, scErr = m.getSFTP(sessionID)
 	}
 	if scErr != nil {
 		return
@@ -299,13 +303,7 @@ func (m *Manager) initSessionSFTP(sess *sessionState, client *ssh.Client, defaul
 	sess.mu.Lock()
 	if sess.closed || sess.userClosed || sess.dialRes == nil || sess.dialRes.Client != client {
 		sess.mu.Unlock()
-		_ = sc.Close()
 		return
-	}
-	if sess.sftpClient != nil {
-		_ = sc.Close()
-	} else {
-		sess.sftpClient = sc
 	}
 	sess.info.SFTPReady = true
 	sess.info.HomeDir = homeDir
