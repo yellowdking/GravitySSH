@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"fmt"
 	"slices"
 	"strings"
@@ -8,6 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/yellowdking/GravitySSH/internal/models"
+	"github.com/yellowdking/GravitySSH/internal/sshkey"
+	"golang.org/x/crypto/ssh"
 )
 
 func fillEmptyString(dst *string, fallback string) {
@@ -30,25 +33,128 @@ func remapID(idMap map[string]string, id string) string {
 }
 
 func recordIDOrNew(id string) string {
-	if strings.TrimSpace(id) == "" {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
 		return uuid.NewString()
 	}
-	return id
+	return trimmed
+}
+
+func formatAuthorizedPubKey(basePub, comment string) string {
+	basePub = strings.TrimSpace(basePub)
+	if comment != "" {
+		return basePub + " " + comment
+	}
+	return basePub
+}
+
+func parseStrictPublicKey(rawPub, comment string) (keyType, fingerprint, cleanPub string, ok bool) {
+	if strings.ContainsAny(rawPub, "\x00\r\n") {
+		return "", "", "", false
+	}
+	trimmed := strings.TrimSpace(rawPub)
+	if trimmed == "" {
+		return "", "", "", false
+	}
+	pub, parsedComment, opts, rest, err := ssh.ParseAuthorizedKey([]byte(trimmed))
+	if err != nil || len(opts) > 0 || len(bytes.TrimSpace(rest)) > 0 {
+		return "", "", "", false
+	}
+	base := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))
+	if base == "" {
+		return "", "", "", false
+	}
+	c := sshkey.SanitizeComment(comment)
+	if c == "" {
+		c = sshkey.SanitizeComment(parsedComment)
+	}
+	return pub.Type(), ssh.FingerprintSHA256(pub), formatAuthorizedPubKey(base, c), true
+}
+
+func sanitizeIncomingSSHKey(raw models.SSHKeyRecord) (models.SSHKeyRecord, bool, bool) {
+	k := raw
+	k.ID = strings.TrimSpace(k.ID)
+	k.Name = strings.TrimSpace(k.Name)
+	k.KeyType = strings.TrimSpace(k.KeyType)
+	k.Fingerprint = strings.TrimSpace(k.Fingerprint)
+	k.PublicKey = strings.TrimSpace(k.PublicKey)
+	k.PrivateKeyPEM = strings.TrimSpace(k.PrivateKeyPEM)
+	k.Comment = sshkey.SanitizeComment(k.Comment)
+
+	if k.PrivateKeyPEM != "" {
+		parsed, err := sshkey.ParsePrivateKey(k.PrivateKeyPEM, k.Passphrase)
+		if err != nil {
+			return models.SSHKeyRecord{}, false, false
+		}
+		k.KeyType = parsed.KeyType
+		k.Fingerprint = parsed.Fingerprint
+		pubComment := k.Comment
+		if pubComment == "" && k.PublicKey != "" && !strings.ContainsAny(k.PublicKey, "\x00\r\n") {
+			if pub, cmt, opts, rest, pErr := ssh.ParseAuthorizedKey([]byte(k.PublicKey)); pErr == nil && len(opts) == 0 && len(bytes.TrimSpace(rest)) == 0 && ssh.FingerprintSHA256(pub) == parsed.Fingerprint {
+				pubComment = sshkey.SanitizeComment(cmt)
+			}
+		}
+		k.PublicKey = formatAuthorizedPubKey(parsed.PublicKey, pubComment)
+		if k.Name == "" {
+			k.Name = k.KeyType
+		}
+		return k, true, true
+	}
+
+	if k.PublicKey != "" {
+		kt, fp, cleanPub, ok := parseStrictPublicKey(k.PublicKey, k.Comment)
+		if !ok {
+			return models.SSHKeyRecord{}, false, false
+		}
+		k.KeyType = kt
+		k.Fingerprint = fp
+		k.PublicKey = cleanPub
+		return k, false, true
+	}
+
+	// Metadata-only update (no PEM, no PublicKey) is only usable if it can match an existing local key.
+	if k.ID == "" && k.Fingerprint == "" {
+		return models.SSHKeyRecord{}, false, false
+	}
+	return k, false, true
 }
 
 func (s *Store) mergeSSHKeys(incoming []models.SSHKeyRecord, sum *models.SyncImportSummary) map[string]string {
 	idMap := make(map[string]string, len(incoming))
-	for _, k := range incoming {
+	for _, rawKey := range incoming {
+		k, hasPEM, ok := sanitizeIncomingSSHKey(rawKey)
+		if !ok {
+			continue
+		}
 		origID := k.ID
-		k.ID = recordIDOrNew(k.ID)
 		idx := slices.IndexFunc(s.data.SSHKeys, func(cur models.SSHKeyRecord) bool {
 			return (origID != "" && cur.ID == origID) || (k.Fingerprint != "" && cur.Fingerprint == k.Fingerprint)
 		})
 		if idx >= 0 {
 			local := s.data.SSHKeys[idx]
 			k.ID = local.ID
-			fillEmptyString(&k.PrivateKeyPEM, local.PrivateKeyPEM)
-			fillEmptyString(&k.Passphrase, local.Passphrase)
+			fillEmptyString(&k.Name, local.Name)
+			if !hasPEM {
+				// Preserve local private key & matching public identity so incoming metadata
+				// cannot overwrite local.PublicKey/Fingerprint while keeping local.PrivateKeyPEM.
+				k.PrivateKeyPEM = local.PrivateKeyPEM
+				k.Passphrase = local.Passphrase
+				if local.PrivateKeyPEM != "" {
+					if local.KeyType != "" {
+						k.KeyType = local.KeyType
+					}
+					if local.Fingerprint != "" {
+						k.Fingerprint = local.Fingerprint
+					}
+					if local.PublicKey != "" {
+						k.PublicKey = local.PublicKey
+					}
+				} else {
+					fillEmptyString(&k.KeyType, local.KeyType)
+					fillEmptyString(&k.Fingerprint, local.Fingerprint)
+					fillEmptyString(&k.PublicKey, local.PublicKey)
+				}
+			}
 			preserveZeroTime(&k.CreatedAt, local.CreatedAt)
 			s.data.SSHKeys[idx] = k
 			if origID != "" {
@@ -56,6 +162,11 @@ func (s *Store) mergeSSHKeys(incoming []models.SSHKeyRecord, sum *models.SyncImp
 			}
 			sum.KeysUpdated++
 		} else {
+			if !hasPEM {
+				// Do not insert blank or private-key-less records as brand new vault SSH keys.
+				continue
+			}
+			k.ID = recordIDOrNew(origID)
 			s.data.SSHKeys = append(s.data.SSHKeys, k)
 			if origID != "" {
 				idMap[origID] = k.ID
@@ -163,6 +274,24 @@ func (s *Store) mergeServers(incoming []models.ServerConfig, keyMap map[string]s
 			s.data.Servers[idx].JumpHost.ServerID = remapID(srvIDMap, s.data.Servers[idx].JumpHost.ServerID)
 		}
 	}
+	breakJumpCycles(s.data.Servers, importedIndices)
+}
+
+func breakJumpCycles(servers []models.ServerConfig, indices []int) {
+	for _, idx := range indices {
+		if idx < 0 || idx >= len(servers) {
+			continue
+		}
+		srv := &servers[idx]
+		if srv.JumpHost.Mode != models.JumpServer {
+			continue
+		}
+		jumpID := strings.TrimSpace(srv.JumpHost.ServerID)
+		if jumpID == "" || jumpID == srv.ID || hasJumpCycle(servers, srv.ID, jumpID) {
+			srv.JumpHost.Mode = models.JumpNone
+			srv.JumpHost.ServerID = ""
+		}
+	}
 }
 
 func (s *Store) mergeShortcuts(incoming []models.CommandShortcut, sum *models.SyncImportSummary) {
@@ -235,38 +364,57 @@ func (s *Store) mergeTemplates(incoming []models.BuiltinTemplate, sum *models.Sy
 }
 
 func sanitizeKeys(in []models.SSHKeyRecord) []models.SSHKeyRecord {
+	seenID := make(map[string]bool, len(in))
 	out := make([]models.SSHKeyRecord, 0, len(in))
-	for _, k := range in {
+	for _, rawKey := range in {
+		k, hasPEM, ok := sanitizeIncomingSSHKey(rawKey)
+		if !ok || !hasPEM {
+			continue
+		}
 		k.ID = recordIDOrNew(k.ID)
+		if seenID[k.ID] {
+			k.ID = uuid.NewString()
+		}
+		seenID[k.ID] = true
 		out = append(out, k)
 	}
 	return out
 }
 
 func sanitizeServer(srv models.ServerConfig, defaultKeepAlive int) (models.ServerConfig, bool) {
+	srv.ID = recordIDOrNew(srv.ID)
 	if !normalizeServerConfig(&srv, defaultKeepAlive) {
 		return models.ServerConfig{}, false
 	}
-	srv.ID = recordIDOrNew(srv.ID)
 	return srv, true
 }
 
 func sanitizeServers(in []models.ServerConfig, defaultKeepAlive int) []models.ServerConfig {
 	out := make([]models.ServerConfig, 0, len(in))
+	indices := make([]int, 0, len(in))
 	for _, srv := range in {
 		if clean, ok := sanitizeServer(srv, defaultKeepAlive); ok {
+			indices = append(indices, len(out))
 			out = append(out, clean)
 		}
 	}
+	breakJumpCycles(out, indices)
 	return out
 }
 
 func sanitizeShortcuts(in []models.CommandShortcut) []models.CommandShortcut {
 	out := make([]models.CommandShortcut, 0, len(in))
 	for _, sc := range in {
-		if strings.TrimSpace(sc.Command) == "" {
+		sc.Command = strings.TrimSpace(sc.Command)
+		if sc.Command == "" {
 			continue
 		}
+		sc.Name = strings.TrimSpace(sc.Name)
+		if sc.Name == "" {
+			sc.Name = sc.Command
+		}
+		sc.Category = strings.TrimSpace(sc.Category)
+		sc.Description = strings.TrimSpace(sc.Description)
 		sc.ID = recordIDOrNew(sc.ID)
 		out = append(out, sc)
 	}
