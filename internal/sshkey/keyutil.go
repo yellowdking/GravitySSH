@@ -1,6 +1,7 @@
 package sshkey
 
 import (
+	"crypto"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -25,10 +27,17 @@ type ParsedKeyInfo struct {
 	Signer      ssh.Signer
 }
 
-// SanitizeComment removes carriage returns and newlines from an SSH key comment
-// so it cannot inject extra lines into remote authorized_keys files.
+// SanitizeComment removes control characters (including NUL, CR, LF, tabs, and ANSI controls)
+// from an SSH key comment so it cannot inject extra lines or control sequences into
+// remote authorized_keys files.
 func SanitizeComment(comment string) string {
-	return strings.TrimSpace(strings.NewReplacer("\r", "", "\n", "").Replace(comment))
+	cleaned := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, comment)
+	return strings.TrimSpace(cleaned)
 }
 
 // ParsePrivateKey validates and parses a private key PEM (with optional passphrase).
@@ -73,29 +82,38 @@ func ParsePrivateKey(pemContent string, passphrase string) (*ParsedKeyInfo, erro
 }
 
 // GenerateKeyPair generates a new Ed25519 or RSA (4096-bit) key pair in OpenSSH format.
+// Generated raw private key bytes are zeroed before returning, so info.Signer is nil;
+// callers needing an active ssh.Signer should parse privatePEM via ParsePrivateKey.
 func GenerateKeyPair(algorithm string, comment string, passphrase string) (privatePEM string, info *ParsedKeyInfo, err error) {
 	comment = SanitizeComment(comment)
 
-	var priv any
+	var (
+		priv   any
+		pubKey crypto.PublicKey
+	)
 	switch strings.ToLower(strings.TrimSpace(algorithm)) {
 	case "", "ed25519":
-		_, privKey, genErr := ed25519.GenerateKey(rand.Reader)
+		pub, privKey, genErr := ed25519.GenerateKey(rand.Reader)
 		if genErr != nil {
 			return "", nil, fmt.Errorf("generate ed25519 key: %w", genErr)
 		}
+		defer clear(privKey)
 		priv = privKey
+		pubKey = pub
 	case "rsa", "rsa4096":
 		privKey, genErr := rsa.GenerateKey(rand.Reader, 4096)
 		if genErr != nil {
 			return "", nil, fmt.Errorf("generate rsa key: %w", genErr)
 		}
 		priv = privKey
+		pubKey = &privKey.PublicKey
 	case "rsa2048":
 		privKey, genErr := rsa.GenerateKey(rand.Reader, 2048)
 		if genErr != nil {
 			return "", nil, fmt.Errorf("generate rsa2048 key: %w", genErr)
 		}
 		priv = privKey
+		pubKey = &privKey.PublicKey
 	default:
 		return "", nil, fmt.Errorf("unsupported key algorithm: %s", algorithm)
 	}
@@ -117,11 +135,10 @@ func GenerateKeyPair(algorithm string, comment string, passphrase string) (priva
 	defer clear(pemBytes)
 	pemStr := string(pemBytes)
 
-	signer, err := ssh.NewSignerFromKey(priv)
+	pub, err := ssh.NewPublicKey(pubKey)
 	if err != nil {
-		return "", nil, fmt.Errorf("create ssh signer: %w", err)
+		return "", nil, fmt.Errorf("create ssh public key: %w", err)
 	}
-	pub := signer.PublicKey()
 	pubStr := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))
 	if comment != "" {
 		pubStr = pubStr + " " + comment
@@ -130,7 +147,6 @@ func GenerateKeyPair(algorithm string, comment string, passphrase string) (priva
 		KeyType:     pub.Type(),
 		Fingerprint: ssh.FingerprintSHA256(pub),
 		PublicKey:   pubStr,
-		Signer:      signer,
 	}
 	return pemStr, parsed, nil
 }

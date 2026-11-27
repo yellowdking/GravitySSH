@@ -9,6 +9,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/pkg/sftp"
@@ -172,7 +173,11 @@ func (m *Manager) SFTPList(sessionID, remotePath string) (models.SFTPListResult,
 			return fmt.Errorf("读取目录 %s 失败: %w", d, rErr)
 		}
 		dir = d
-		entries = buildSFTPEntries(sc, d, infos)
+		built, bErr := buildSFTPEntries(sc, d, infos)
+		if bErr != nil {
+			return bErr
+		}
+		entries = built
 		return nil
 	})
 	if err != nil {
@@ -191,7 +196,7 @@ func (m *Manager) SFTPList(sessionID, remotePath string) (models.SFTPListResult,
 	return models.SFTPListResult{Path: dir, Parent: path.Dir(dir), Entries: entries}, nil
 }
 
-func buildSFTPEntries(sc *sftp.Client, dir string, infos []os.FileInfo) []models.SFTPFileEntry {
+func buildSFTPEntries(sc *sftp.Client, dir string, infos []os.FileInfo) ([]models.SFTPFileEntry, error) {
 	entries := make([]models.SFTPFileEntry, len(infos))
 	var symlinks []int
 	for i, info := range infos {
@@ -206,12 +211,21 @@ func buildSFTPEntries(sc *sftp.Client, dir string, infos []os.FileInfo) []models
 		}
 	}
 	if len(symlinks) > 0 {
-		var connBroken atomic.Bool
+		var (
+			connBroken atomic.Bool
+			errMu      sync.Mutex
+			connErr    error
+		)
 		runBounded(len(symlinks), 8, connBroken.Load, func(pos int) {
 			i := symlinks[pos]
 			st, err := sc.Stat(entries[i].Path)
 			if err != nil {
 				if isSFTPConnError(err) {
+					errMu.Lock()
+					if connErr == nil {
+						connErr = err
+					}
+					errMu.Unlock()
 					connBroken.Store(true)
 				}
 				return
@@ -220,8 +234,11 @@ func buildSFTPEntries(sc *sftp.Client, dir string, infos []os.FileInfo) []models
 				entries[i].IsDir = true
 			}
 		})
+		if connBroken.Load() {
+			return nil, connErr
+		}
 	}
-	return entries
+	return entries, nil
 }
 
 func renameRemote(sc *sftp.Client, oldPath, newPath string, hadOld bool) error {

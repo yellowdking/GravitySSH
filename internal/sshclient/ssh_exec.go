@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -127,10 +128,21 @@ func runSSHExec(ctx context.Context, client *ssh.Client, cmd string, timeout tim
 	}
 }
 
+func tailUTF8Safe(s string, maxBytes int) string {
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	start := len(s) - maxBytes
+	for start < len(s) && !utf8.RuneStart(s[start]) {
+		start++
+	}
+	return s[start:]
+}
+
 func formatExecError(prefix string, out []byte, runErr error, maxLen int) error {
 	snippet := strings.TrimSpace(string(out))
 	if maxLen > 0 && len(snippet) > maxLen {
-		snippet = snippet[len(snippet)-maxLen:]
+		snippet = tailUTF8Safe(snippet, maxLen)
 	}
 	if snippet != "" {
 		return fmt.Errorf("%s: %s", prefix, snippet)

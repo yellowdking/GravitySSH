@@ -30,7 +30,7 @@ func (m *Manager) SFTPExtractArchive(sessionID, remotePath string) (string, erro
 	}
 
 	out, runErr := runSSHExec(context.Background(), client, cmd, 180*time.Second, true)
-	m.invalidateDirCache(sessionID, dir)
+	m.invalidateDirTreeCache(sessionID, dir)
 
 	if runErr != nil {
 		return "", formatExecError(fmt.Sprintf("解压 %s 失败", base), out, runErr, 240)
@@ -59,7 +59,7 @@ func buildExtractCommand(dir, base string) (string, error) {
 	switch {
 	case strings.HasSuffix(lower, ".zip"):
 		install := autoInstallSnippet("unzip", "unzip", "unzip", "unzip", "unzip", "unzip")
-		return fmt.Sprintf("cd -- %s && { if ! command -v unzip >/dev/null 2>&1; then %s; fi; unzip -o %s -d .; }", qDir, install, qBase), nil
+		return fmt.Sprintf("cd -- %s && { if ! command -v unzip >/dev/null 2>&1; then %s; fi && unzip -o %s -d .; }", qDir, install, qBase), nil
 	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
 		return fmt.Sprintf("cd -- %s && tar -xzf %s", qDir, qBase), nil
 	case strings.HasSuffix(lower, ".tar.bz2"), strings.HasSuffix(lower, ".tbz2"):
@@ -70,7 +70,7 @@ func buildExtractCommand(dir, base string) (string, error) {
 		return fmt.Sprintf("cd -- %s && tar -xf %s", qDir, qBase), nil
 	case strings.HasSuffix(lower, ".7z"):
 		install := autoInstallSnippet("p7zip-full", "p7zip", "p7zip", "p7zip", "7zip", "p7zip")
-		return fmt.Sprintf("cd -- %s && { if ! command -v 7z >/dev/null 2>&1; then %s; fi; 7z x -y -- %s; }", qDir, install, qBase), nil
+		return fmt.Sprintf("cd -- %s && { if ! command -v 7z >/dev/null 2>&1; then %s; fi && 7z x -y -- %s; }", qDir, install, qBase), nil
 	case strings.HasSuffix(lower, ".gz"):
 		return fmt.Sprintf("cd -- %s && gunzip -kf -- %s", qDir, qBase), nil
 	default:
@@ -78,10 +78,11 @@ func buildExtractCommand(dir, base string) (string, error) {
 	}
 }
 
-// safeRelativeName prefixes "./" when a relative filename starts with "-" so
-// CLI tools (tar, zip, unzip, gunzip, 7z) never interpret it as an option flag.
+// safeRelativeName prefixes "./" when a relative filename starts with "-" or contains ":"
+// so CLI tools (tar, zip, unzip, gunzip, 7z) never interpret it as an option flag or
+// as a remote rsh/ssh host specification (GNU tar treats host:file as remote without '/').
 func safeRelativeName(name string) string {
-	if strings.HasPrefix(name, "-") {
+	if strings.HasPrefix(name, "-") || strings.Contains(name, ":") {
 		return "./" + name
 	}
 	return name
