@@ -23,73 +23,108 @@ type ParsedLine struct {
 	PreserveLeadingEnvVar           bool
 }
 
-func splitActiveSegment(s string) (string, string) {
+func parseActiveSegmentTokens(s string) (segPrefix, activeSeg string, toks []Token, endsWithSpace bool) {
+	n := len(s)
+	segStart := 0
+	inSegLeadingWS := true
+	inTok := false
+	tokStart := 0
 	var q byte
-	esc, last := false, 0
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if esc {
-			esc = false
-		} else if q != 0 {
-			if q == '"' && c == '\\' {
-				esc = true
-			} else if c == q {
-				q = 0
-			}
-		} else if c == '\\' {
-			esc = true
-		} else if c == '\'' || c == '"' {
-			q = c
-		} else if (c == '&' || c == '|') && i+1 < len(s) && (s[i+1] == c || (c == '|' && s[i+1] == '&')) {
-			last, i = i+2, i+1
-		} else if c == ';' || c == '|' || (c == '&' && (i == 0 || (s[i-1] != '>' && s[i-1] != '<')) && (i+1 >= len(s) || s[i+1] != '>')) {
-			last = i + 1
-		}
-	}
-	for last < len(s) && (s[last] == ' ' || s[last] == '\t') {
-		last++
-	}
-	return s[:last], s[last:]
-}
+	var b strings.Builder
 
-func tokenizeSegment(s string) ([]Token, bool) {
-	var toks []Token
-	for i, n := 0, len(s); i < n; {
-		for i < n && (s[i] == ' ' || s[i] == '\t') {
-			i++
+	flushTok := func(end int) {
+		if !inTok {
+			return
 		}
-		if i >= n {
-			return toks, true
-		}
-		st, q := i, byte(0)
-		var b strings.Builder
-		for ; i < n; i++ {
-			c := s[i]
-			if q != 0 {
-				if c == q {
-					q = 0
-				} else if q == '"' && c == '\\' && i+1 < n && strings.IndexByte("\\\"$`", s[i+1]) >= 0 {
-					i++
-					b.WriteByte(s[i])
-				} else {
-					b.WriteByte(c)
-				}
-			} else if c == ' ' || c == '\t' {
-				break
-			} else if c == '\'' || c == '"' {
-				q = c
-			} else if c == '\\' {
-				if i+1 < n {
-					i++
-					b.WriteByte(s[i])
-				}
+		toks = append(toks, Token{
+			Raw:      s[tokStart:end],
+			Unquoted: b.String(),
+			Start:    tokStart - segStart,
+			End:      end - segStart,
+			Quote:    q,
+		})
+		b.Reset()
+		inTok = false
+		q = 0
+	}
+
+	resetSeg := func(next int) {
+		b.Reset()
+		toks = toks[:0]
+		inTok = false
+		q = 0
+		segStart = next
+		inSegLeadingWS = true
+		endsWithSpace = false
+	}
+
+	for i := 0; i < n; i++ {
+		c := s[i]
+		if q != 0 {
+			if c == q {
+				q = 0
+			} else if q == '"' && c == '\\' && i+1 < n && strings.IndexByte("\\\"$`", s[i+1]) >= 0 {
+				i++
+				b.WriteByte(s[i])
 			} else {
 				b.WriteByte(c)
 			}
+			continue
 		}
-		toks = append(toks, Token{s[st:i], b.String(), st, i, q})
+
+		// Check unquoted shell command separators (&&, ||, |&, ;, |, standalone &).
+		if (c == '&' || c == '|') && i+1 < n && (s[i+1] == c || (c == '|' && s[i+1] == '&')) {
+			resetSeg(i + 2)
+			i++
+			continue
+		}
+		if c == ';' || c == '|' || (c == '&' && (i == 0 || (s[i-1] != '>' && s[i-1] != '<')) && (i+1 >= n || s[i+1] != '>')) {
+			resetSeg(i + 1)
+			continue
+		}
+
+		if c == ' ' || c == '\t' {
+			if inSegLeadingWS {
+				segStart = i + 1
+				continue
+			}
+			if inTok {
+				flushTok(i)
+			}
+			endsWithSpace = true
+			continue
+		}
+
+		inSegLeadingWS = false
+		endsWithSpace = false
+		if !inTok {
+			inTok = true
+			tokStart = i
+		}
+		if c == '\'' || c == '"' {
+			q = c
+		} else if c == '\\' {
+			if i+1 < n {
+				i++
+				b.WriteByte(s[i])
+			}
+		} else {
+			b.WriteByte(c)
+		}
 	}
-	return toks, false
+
+	if inTok {
+		flushTok(n)
+	}
+	if len(toks) == 0 {
+		toks = nil
+	}
+	return s[:segStart], s[segStart:], toks, endsWithSpace
+}
+
+func splitActiveSegment(s string) (string, string) {
+	segP, act, _, _ := parseActiveSegmentTokens(s)
+	return segP, act
 }
 
 func isEnvAssign(s string) bool {
@@ -184,8 +219,7 @@ func stripWrappers(toks []Token, endSp bool) []string {
 
 func ParseLine(input, cwd, homeDir string) ParsedLine {
 	hp, lo := strings.HasPrefix, strings.ToLower
-	segP, act := splitActiveSegment(input)
-	toks, endSp := tokenizeSegment(act)
+	segP, act, toks, endSp := parseActiveSegmentTokens(input)
 	eff := stripWrappers(toks, endSp)
 	p := ParsedLine{SegPrefix: segP, ActiveSeg: act, Tokens: toks, Effective: eff, EndsWithSpace: endSp}
 	if n := len(toks); endSp || n == 0 {
@@ -200,7 +234,7 @@ func ParseLine(input, cwd, homeDir string) ParsedLine {
 		}
 	}
 	cur := p.CurTok.Unquoted
-	if strings.TrimSpace(act) == "" || (hp(cur, "-") && !strings.Contains(cur, "/")) {
+	if len(toks) == 0 || (hp(cur, "-") && !strings.Contains(cur, "/")) {
 		return p
 	}
 	cmd := ""

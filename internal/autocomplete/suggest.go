@@ -10,6 +10,7 @@ import (
 
 type SuggestRequest struct {
 	Input, CWD, HomeDir, ServerID string
+	Parsed                        *ParsedLine
 	CWDEntries, TargetEntries     []models.SFTPFileEntry
 	History                       []models.CommandRecord
 	IncludeHistory                bool
@@ -56,8 +57,13 @@ func SuggestWithContext(req SuggestRequest) []models.CompletionItem {
 	if limit <= 0 {
 		limit = 5
 	}
-	p := ParseLine(req.Input, req.CWD, req.HomeDir)
-	if strings.TrimSpace(p.ActiveSeg) == "" {
+	var p ParsedLine
+	if req.Parsed != nil {
+		p = *req.Parsed
+	} else {
+		p = ParseLine(req.Input, req.CWD, req.HomeDir)
+	}
+	if len(p.Tokens) == 0 && strings.TrimSpace(p.ActiveSeg) == "" {
 		return nil
 	}
 	sig, cur := ScanFolderSignals(req.CWDEntries, req.CWD), p.CurTok.Unquoted

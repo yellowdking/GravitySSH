@@ -116,8 +116,7 @@ func isDangerousRMTarget(a string) bool {
 	return false
 }
 
-func isDestructiveSeg(seg string) bool {
-	toks, _ := tokenizeSegment(seg)
+func isDestructiveTokens(toks []Token) bool {
 	eff := stripWrappers(toks, true)
 	if len(eff) == 0 {
 		return false
@@ -186,8 +185,8 @@ func isNoisyOrDestructive(cmd string) bool {
 		}
 	}
 	for rem := cmd; rem != ""; {
-		pre, act := splitActiveSegment(rem)
-		if isDestructiveSeg(act) {
+		pre, _, toks, _ := parseActiveSegmentTokens(rem)
+		if isDestructiveTokens(toks) {
 			return true
 		}
 		nxt := strings.TrimRight(strings.TrimRight(pre, " \t"), "&|;")
@@ -264,7 +263,7 @@ func rankHistoryCandidates(p ParsedLine, input, srvID string, history []models.C
 		if strings.HasPrefix(key, loFull) {
 			ins, qRunes = leadWS+a.cmd, loFullRunes
 		} else if chained && strings.HasPrefix(key, loSeg) {
-			if sp, _ := splitActiveSegment(a.cmd); strings.TrimSpace(sp) == "" {
+			if sp, _, _, _ := parseActiveSegmentTokens(a.cmd); strings.TrimSpace(sp) == "" {
 				ins, qRunes = p.SegPrefix+a.cmd, loSegRunes
 			}
 		}
