@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,10 +16,7 @@ import (
 const syncRelayCallTimeout = 15 * time.Second
 
 func (a *App) syncContext() context.Context {
-	if a.ctx != nil {
-		return a.ctx
-	}
-	return context.Background()
+	return a.bgContext()
 }
 
 func (a *App) syncRelayContext() (context.Context, context.CancelFunc) {
@@ -37,8 +35,11 @@ func (a *App) resolveRelayURL(relayURL string) string {
 	if trimmed := strings.TrimSpace(relayURL); trimmed != "" {
 		return trimmed
 	}
-	if a.store != nil {
-		if saved := strings.TrimSpace(a.store.GetSettings().SyncRelayURL); saved != "" {
+	a.mu.RLock()
+	store := a.store
+	a.mu.RUnlock()
+	if store != nil {
+		if saved := strings.TrimSpace(store.GetSettings().SyncRelayURL); saved != "" {
 			return saved
 		}
 	}
@@ -46,23 +47,69 @@ func (a *App) resolveRelayURL(relayURL string) string {
 }
 
 func (a *App) syncClient(relayURL string) (*syncclient.Client, string, error) {
-	cleanURL, mode, err := syncclient.NormalizeRelayURL(a.resolveRelayURL(relayURL))
+	cleanURL, mode, pin, err := syncclient.NormalizeRelayURLWithPin(a.resolveRelayURL(relayURL))
 	if err != nil {
 		return nil, "", err
 	}
+	cacheKey := cleanURL + "|" + strconv.Itoa(int(mode)) + "|" + pin
+	now := time.Now()
+
 	a.syncClientMu.Lock()
-	defer a.syncClientMu.Unlock()
 	if a.syncClients == nil {
-		a.syncClients = make(map[string]*syncclient.Client)
+		a.syncClients = make(map[string]*cachedSyncClient)
 	}
-	if cli, ok := a.syncClients[cleanURL]; ok {
+	if entry, ok := a.syncClients[cacheKey]; ok && entry != nil && entry.client != nil {
+		entry.lastUsed = now
+		cli := entry.client
+		a.syncClientMu.Unlock()
 		return cli, cleanURL, nil
 	}
-	cli, err := syncclient.NewClientWithMode(cleanURL, syncclient.AppGateKey, syncclient.PinnedSPKISHA256, mode)
+	a.syncClientMu.Unlock()
+
+	cli, err := syncclient.NewClientWithMode(cleanURL, syncclient.AppGateKey, pin, mode)
 	if err != nil {
 		return nil, "", err
 	}
-	a.syncClients[cleanURL] = cli
+
+	var evicted []*syncclient.Client
+	a.syncClientMu.Lock()
+	if a.syncClients == nil {
+		a.syncClients = make(map[string]*cachedSyncClient)
+	}
+	if existing, ok := a.syncClients[cacheKey]; ok && existing != nil && existing.client != nil {
+		existing.lastUsed = now
+		ret := existing.client
+		a.syncClientMu.Unlock()
+		cli.CloseIdleConnections()
+		return ret, cleanURL, nil
+	}
+	for len(a.syncClients) >= maxCachedSyncClients {
+		var (
+			oldestKey  string
+			oldestTime time.Time
+		)
+		for k, v := range a.syncClients {
+			if oldestKey == "" || v == nil || v.lastUsed.Before(oldestTime) {
+				oldestKey = k
+				if v != nil {
+					oldestTime = v.lastUsed
+				}
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		if old := a.syncClients[oldestKey]; old != nil && old.client != nil {
+			evicted = append(evicted, old.client)
+		}
+		delete(a.syncClients, oldestKey)
+	}
+	a.syncClients[cacheKey] = &cachedSyncClient{client: cli, lastUsed: now}
+	a.syncClientMu.Unlock()
+
+	for _, old := range evicted {
+		old.CloseIdleConnections()
+	}
 	return cli, cleanURL, nil
 }
 
@@ -105,13 +152,14 @@ func (a *App) TestSyncRelay(relayURL string) (int64, error) {
 }
 
 func (a *App) StartSyncSend(relayURL string) (models.SyncSendSession, error) {
-	if err := a.ensureUnlocked(); err != nil {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
 		return models.SyncSendSession{}, err
 	}
 	if a.syncCache == nil {
 		return models.SyncSendSession{}, errors.New("同步缓存未初始化")
 	}
-	bundle, err := a.store.ExportSyncBundle(resolveHostName())
+	bundle, err := store.ExportSyncBundle(resolveHostName())
 	if err != nil {
 		return models.SyncSendSession{}, err
 	}
@@ -193,11 +241,16 @@ func (a *App) PollSyncSend(sessionID string) (models.SyncSendPollResult, error) 
 		return models.SyncSendPollResult{}, err
 	}
 	if res.NotFound || res.State == "gone" {
-		a.syncCache.popSend(sessionID)
-		if sess.approved {
+		popped, poppedOK := a.syncCache.popSend(sessionID)
+		wasApproved := sess.approved || (poppedOK && popped.approved)
+		approvedReqID := sess.approvedReqID
+		if poppedOK && popped.approvedReqID != "" {
+			approvedReqID = popped.approvedReqID
+		}
+		if wasApproved {
 			return models.SyncSendPollResult{
 				Status:    "consumed",
-				RequestID: sess.approvedReqID,
+				RequestID: approvedReqID,
 				Message:   "对方已领取并销毁中继数据",
 			}, nil
 		}
@@ -453,15 +506,23 @@ func (a *App) CancelSyncReceive(waitID string) {
 }
 
 func (a *App) ApplySyncReceive(previewID, mode string) (models.SyncImportSummary, error) {
-	if err := a.ensureUnlocked(); err != nil {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
 		return models.SyncImportSummary{}, err
 	}
 	if a.syncCache == nil {
 		return models.SyncImportSummary{}, errors.New("同步缓存未初始化")
 	}
-	bundle, ok := a.syncCache.pop(previewID)
+	bundle, ok := a.syncCache.peekClone(previewID)
 	if !ok {
 		return models.SyncImportSummary{}, errors.New("预览已过期或已导入，请重新获取同步码")
 	}
-	return a.store.ImportSyncBundle(bundle, mode)
+	defer zeroSyncBundle(&bundle)
+
+	summary, err := store.ImportSyncBundle(bundle, mode)
+	if err != nil {
+		return models.SyncImportSummary{}, err
+	}
+	a.syncCache.clear(previewID)
+	return summary, nil
 }
