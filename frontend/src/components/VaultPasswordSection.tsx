@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { AlertCircle, FolderLock, KeyRound, Loader2, Lock, Unlock } from 'lucide-react'
 import type { VaultLockState, VaultSecurityInfo } from '../types'
 import { api } from '../wailsApi'
@@ -8,6 +8,7 @@ interface Props {
   securityInfo: VaultSecurityInfo | null
   lockState: VaultLockState | null
   onLockStateChanged: () => void
+  onBusyChange?: (busy: boolean) => void
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
 
@@ -15,6 +16,7 @@ export const VaultPasswordSection: React.FC<Props> = ({
   securityInfo,
   lockState,
   onLockStateChanged,
+  onBusyChange,
   onToast,
 }) => {
   const hasPassword = !!lockState?.hasPassword
@@ -27,7 +29,19 @@ export const VaultPasswordSection: React.FC<Props> = ({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
-  const reset = () => {
+  const mountedRef = useRef(true)
+  const busyRef = useRef(false)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      if (busyRef.current) onBusyChange?.(false)
+    }
+  }, [onBusyChange])
+
+  const reset = (force = false) => {
+    if (!force && busyRef.current) return
     setAction('none')
     setCurrentPwd('')
     setNewPwd('')
@@ -37,6 +51,7 @@ export const VaultPasswordSection: React.FC<Props> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (busyRef.current) return
     setError('')
 
     if (action === 'set' || action === 'change') {
@@ -47,20 +62,25 @@ export const VaultPasswordSection: React.FC<Props> = ({
       if (!currentPwd) return setError('请输入当前加密密码以确认移除')
     }
 
+    busyRef.current = true
     setBusy(true)
+    onBusyChange?.(true)
     try {
       const cur = action === 'set' ? '' : currentPwd
       const next = action === 'remove' ? '' : newPwd
       await api.setVaultPassword(cur, next)
       onLockStateChanged()
+      if (!mountedRef.current) return
       if (action === 'set') onToast('已设置配置文件加密密码，下次启动时将要求解锁')
       else if (action === 'change') onToast('配置文件加密密码已修改')
       else onToast('已移除自定义密码，恢复默认自动加密')
-      reset()
+      reset(true)
     } catch (err) {
-      setError(errMsg(err))
+      if (mountedRef.current) setError(errMsg(err))
     } finally {
-      setBusy(false)
+      busyRef.current = false
+      onBusyChange?.(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -108,12 +128,13 @@ export const VaultPasswordSection: React.FC<Props> = ({
             )}
           </div>
         ) : (
-          <form onSubmit={handleSubmit} className="space-y-2.5 pt-1">
+          <form onSubmit={(e) => void handleSubmit(e)} className="space-y-2.5 pt-1">
             {(action === 'change' || action === 'remove') && (
               <input
                 type="password"
                 autoFocus
-                className="ag-input font-mono text-xs py-1.5"
+                disabled={busy}
+                className="ag-input font-mono text-xs py-1.5 disabled:opacity-60"
                 placeholder="输入当前加密密码"
                 value={currentPwd}
                 onChange={(e) => { setCurrentPwd(e.target.value); setError('') }}
@@ -124,14 +145,16 @@ export const VaultPasswordSection: React.FC<Props> = ({
                 <input
                   type="password"
                   autoFocus={action === 'set'}
-                  className="ag-input font-mono text-xs py-1.5"
+                  disabled={busy}
+                  className="ag-input font-mono text-xs py-1.5 disabled:opacity-60"
                   placeholder="输入新密码"
                   value={newPwd}
                   onChange={(e) => { setNewPwd(e.target.value); setError('') }}
                 />
                 <input
                   type="password"
-                  className="ag-input font-mono text-xs py-1.5"
+                  disabled={busy}
+                  className="ag-input font-mono text-xs py-1.5 disabled:opacity-60"
                   placeholder="再次确认新密码"
                   value={confirmPwd}
                   onChange={(e) => { setConfirmPwd(e.target.value); setError('') }}
@@ -147,7 +170,7 @@ export const VaultPasswordSection: React.FC<Props> = ({
             )}
 
             <div className="flex items-center justify-end gap-2 pt-1">
-              <button type="button" onClick={reset} disabled={busy} className="ag-btn-ghost text-xs py-1">
+              <button type="button" onClick={() => reset()} disabled={busy} className="ag-btn-ghost text-xs py-1">
                 取消
               </button>
               <button type="submit" disabled={busy} className="ag-btn-primary text-xs py-1.5 px-3">

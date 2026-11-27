@@ -61,7 +61,7 @@ export const UpdateCheckSection: React.FC<Props> = ({
             {updateInfo?.hasUpdate && (
               <button
                 type="button"
-                onClick={() => void api.openExternalURL(updateInfo.downloadUrl || updateInfo.releaseUrl)}
+                onClick={() => void api.openExternalURL(updateInfo.releaseUrl || updateInfo.downloadUrl).catch((err) => onToast(errMsg(err), 'error'))}
                 className="ag-btn-primary text-xs py-1 px-2.5"
               >
                 <ExternalLink className="w-3 h-3" />前往下载

@@ -37,6 +37,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = React.memo(({
 }) => {
   const inputLineRef = useRef('')
   const focusTermRef = useRef<() => void>(() => {})
+  const searchInputRef = useRef<HTMLInputElement | null>(null)
   const [showSearch, setShowSearch] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
   const [pendingPaste, setPendingPaste] = useState<PendingPaste | null>(null)
@@ -54,6 +55,17 @@ export const TerminalPane: React.FC<TerminalPaneProps> = React.memo(({
     ac.clearSuggestions(false)
   }, [ac.clearSuggestions])
 
+  const openSearch = useCallback(() => {
+    setShowSearch(true)
+    requestAnimationFrame(() => {
+      const input = searchInputRef.current
+      if (input) {
+        input.focus()
+        input.select()
+      }
+    })
+  }, [])
+
   const { containerRef, termRef, searchAddonRef, pasteText, commitPaste } = useTerminalInstance({
     sessionId: session.sessionId,
     status: session.status,
@@ -69,7 +81,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = React.memo(({
     onResetAutocomplete: resetInputLine,
     onMoveSelection: ac.moveSelection,
     onApplySelected: ac.applySelected,
-    onOpenSearch: () => setShowSearch(true),
+    onOpenSearch: openSearch,
     onPasteGuard: (text, inspection, bracketedPasteActive) =>
       setPendingPaste({ text, inspection, bracketedPasteActive }),
   })
@@ -90,14 +102,24 @@ export const TerminalPane: React.FC<TerminalPaneProps> = React.memo(({
   }, [searchAddonRef, termRef])
 
   const toggleSearch = useCallback(() => {
-    setShowSearch((prev) => {
-      if (prev) {
+    if (showSearch) {
+      closeSearch()
+    } else {
+      openSearch()
+    }
+  }, [showSearch, closeSearch, openSearch])
+
+  const handleSearchChange = useCallback(
+    (v: string) => {
+      setSearchTerm(v)
+      if (!v) {
         searchAddonRef.current?.clearDecorations()
-        termRef.current?.focus()
+        return
       }
-      return !prev
-    })
-  }, [searchAddonRef, termRef])
+      searchAddonRef.current?.findNext(v, { incremental: true })
+    },
+    [searchAddonRef]
+  )
 
   return (
     <div className="flex flex-col h-full min-w-0 flex-1 bg-ag-bg relative">
@@ -136,9 +158,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = React.memo(({
       {showSearch && (
         <TerminalSearchBar
           value={searchTerm}
-          onChange={(v) => { setSearchTerm(v); searchAddonRef.current?.findNext(v) }}
-          onPrev={() => searchAddonRef.current?.findPrevious(searchTerm)}
-          onNext={() => searchAddonRef.current?.findNext(searchTerm)}
+          inputRef={searchInputRef}
+          onChange={handleSearchChange}
+          onPrev={() => { if (searchTerm) searchAddonRef.current?.findPrevious(searchTerm) }}
+          onNext={() => { if (searchTerm) searchAddonRef.current?.findNext(searchTerm) }}
           onClose={closeSearch}
         />
       )}
@@ -161,7 +184,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = React.memo(({
           <AutocompletePopup
             suggestions={ac.suggestions}
             selectedIdx={ac.selectedIdx}
-            inputLine={inputLineRef.current}
+            inputLine={ac.queryLine}
             onSelectIndex={ac.setSelectedIdx}
             onApply={(item) => void ac.applySuggestion(item)}
           />
