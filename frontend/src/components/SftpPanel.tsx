@@ -1,4 +1,4 @@
-import React, { Suspense, lazy } from 'react'
+import React, { Suspense, lazy, useCallback, useRef } from 'react'
 import { Loader2 } from 'lucide-react'
 import type { SessionInfo } from '../types'
 import { useSftpState } from '../hooks/useSftpState'
@@ -19,9 +19,17 @@ interface SftpPanelProps {
 
 export const SftpPanel: React.FC<SftpPanelProps> = React.memo(({ session, active, width, followTerminal, onCdInTerminal, onToast }) => {
   const sftp = useSftpState(session, active, followTerminal, onToast)
+  const currentPathRef = useRef(sftp.currentPath)
+  currentPathRef.current = sftp.currentPath
+
+  const handleCdInTerminal = useCallback(() => {
+    onCdInTerminal(currentPathRef.current)
+  }, [onCdInTerminal])
+
+  const panelWidth = width > 0 ? `var(--gssh-sftp-width, ${width}px)` : 'var(--gssh-sftp-width, 360px)'
 
   return (
-    <div style={{ width: width > 0 ? width : 360 }} className="shrink-0 bg-ag-sidebar border-l border-ag-border flex flex-col h-full min-w-0 select-none">
+    <div style={{ width: panelWidth }} className="shrink-0 bg-ag-sidebar border-l border-ag-border flex flex-col h-full min-w-0 select-none">
       <SftpHeader
         sftpReady={session.sftpReady}
         loading={sftp.loading}
@@ -30,14 +38,14 @@ export const SftpPanel: React.FC<SftpPanelProps> = React.memo(({ session, active
         showHidden={sftp.showHidden}
         onPathInputChange={sftp.setPathInput}
         onPathInputFocusChange={sftp.onPathInputFocusChange}
-        onSubmitPath={() => void sftp.loadDir(sftp.pathInput, true, true)}
-        onGoHome={() => void sftp.loadDir(session.homeDir || '~', true, true)}
-        onGoUp={() => void sftp.loadDir(sftp.parentPath, true, true)}
-        onUpload={() => void sftp.handleUpload()}
-        onMkdir={() => void sftp.handleMkdir()}
-        onToggleHidden={() => sftp.setShowHidden((v) => !v)}
-        onRefresh={() => void sftp.loadDir(sftp.currentPath, true, true)}
-        onCdInTerminal={() => onCdInTerminal(sftp.currentPath)}
+        onSubmitPath={sftp.handleSubmitPath}
+        onGoHome={sftp.handleGoHome}
+        onGoUp={sftp.handleGoUp}
+        onUpload={sftp.handleUpload}
+        onMkdir={sftp.handleMkdir}
+        onToggleHidden={sftp.handleToggleHidden}
+        onRefresh={sftp.handleRefresh}
+        onCdInTerminal={handleCdInTerminal}
       />
 
       <div className="flex-1 overflow-y-auto">
@@ -57,20 +65,24 @@ export const SftpPanel: React.FC<SftpPanelProps> = React.memo(({ session, active
           <SftpFileList
             entries={sftp.visibleEntries}
             busyPaths={sftp.busyPaths}
-            onOpenDir={(p) => void sftp.loadDir(p, true, true)}
-            onEditFile={(e) => void sftp.handleEditFile(e)}
-            onDownload={(e) => void sftp.handleDownload(e)}
-            onDownloadFolder={(e) => void sftp.handleDownloadFolder(e)}
-            onCompress={(e) => void sftp.handleCompress(e)}
-            onExtract={(e) => void sftp.handleExtract(e)}
-            onAlignPerms={(e) => void sftp.handleAlignPerms(e)}
-            onRename={(e) => void sftp.handleRename(e)}
-            onDelete={(e) => void sftp.handleDelete(e)}
+            onOpenDir={sftp.handleOpenDir}
+            onEditFile={sftp.handleEditFile}
+            onDownload={sftp.handleDownload}
+            onDownloadFolder={sftp.handleDownloadFolder}
+            onCompress={sftp.handleCompress}
+            onExtract={sftp.handleExtract}
+            onAlignPerms={sftp.handleAlignPerms}
+            onRename={sftp.handleRename}
+            onDelete={sftp.handleDelete}
           />
         )}
       </div>
 
-      <SftpTransferBar transfers={sftp.transfers} onDismiss={sftp.dismissTransfer} onClearFinished={sftp.clearFinishedTransfers} />
+      <SftpTransferBar
+        sessionId={session.sessionId}
+        sessionStatus={session.status}
+        onUploadDone={sftp.handleUploadProgressDone}
+      />
 
       <div className="px-3 py-1.5 border-t border-ag-border/70 bg-[#0d1017] text-[10px] text-ag-subtle flex items-center justify-between gap-2">
         <span className="truncate">共 {sftp.visibleEntries.length} 项 · 双击编辑/解压/下载</span>
@@ -86,7 +98,7 @@ export const SftpPanel: React.FC<SftpPanelProps> = React.memo(({ session, active
             initialContent={sftp.editingFile.content}
             saving={sftp.savingFile}
             onSave={sftp.handleSaveFile}
-            onClose={() => sftp.setEditingFile(null)}
+            onClose={sftp.handleCloseEditor}
           />
         </Suspense>
       )}

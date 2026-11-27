@@ -19,7 +19,7 @@ interface Props {
   onCdInTerminal: () => void
 }
 
-export const SftpHeader: React.FC<Props> = ({
+export const SftpHeader: React.FC<Props> = React.memo(({
   sftpReady,
   loading,
   currentPath,
@@ -76,4 +76,4 @@ export const SftpHeader: React.FC<Props> = ({
       <button onClick={onCdInTerminal} disabled={!sftpReady} title="在终端 cd 到此目录" className="p-1.5 rounded hover:bg-ag-hover text-ag-muted hover:text-indigo-300 shrink-0"><Terminal className="w-3.5 h-3.5" /></button>
     </div>
   </>
-)
+))

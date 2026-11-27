@@ -40,7 +40,7 @@ function fileIcon(entry: SFTPFileEntry) {
 const actBtn = 'p-1 rounded text-ag-muted disabled:opacity-40'
 const badgeCls = 'text-[9px] px-1 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/25 shrink-0'
 
-export const SftpFileList: React.FC<Props> = ({
+export const SftpFileList: React.FC<Props> = React.memo(({
   entries, busyPaths, onOpenDir, onEditFile, onDownload, onDownloadFolder, onCompress, onExtract, onAlignPerms, onRename, onDelete,
 }) => (
   <div className="divide-y divide-ag-border/40">
@@ -110,4 +110,4 @@ export const SftpFileList: React.FC<Props> = ({
       )
     })}
   </div>
-)
+))
