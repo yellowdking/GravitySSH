@@ -64,8 +64,14 @@ export const KeyFormDrawer: React.FC<Props> = ({
         <div>
           <div className="flex items-center justify-between mb-1">
             <label className="text-xs text-ag-muted">私钥内容 (OpenSSH / PEM / RSA / Ed25519) *</label>
-            <button type="button" disabled={busy} onClick={onPickFile} className="text-[11px] text-sky-400 hover:underline disabled:opacity-40 disabled:cursor-not-allowed">
-              选择本地私钥文件...
+            <button
+              type="button"
+              disabled={busy}
+              onClick={onPickFile}
+              title="在后端直接读取并加密保存，私钥明文不经过界面"
+              className="text-[11px] text-sky-400 hover:underline disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              从文件直接导入...
             </button>
           </div>
           <textarea

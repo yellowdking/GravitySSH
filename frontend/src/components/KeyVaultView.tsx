@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { FolderOpen, KeyRound, Loader2, Plus, SlidersHorizontal, Zap } from 'lucide-react'
 import type { ServerView, SSHKeyMeta } from '../types'
 import { api } from '../wailsApi'
@@ -82,6 +82,38 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
 
   const handlePickKeyFile = async () => {
     if (busyRef.current) return
+    const hasNativeImport = typeof window.go?.main?.App?.ImportSSHKeyFromFile === 'function'
+    if (hasNativeImport) {
+      const fromImportDrawer = mode === 'import'
+      const targetName = fromImportDrawer ? name.trim() : ''
+      const targetPass = fromImportDrawer ? passphrase : ''
+      const targetComment = fromImportDrawer ? comment.trim() : ''
+      busyRef.current = true
+      setBusy(true)
+      try {
+        const imported = await api.importSSHKeyFromFile(targetName, targetPass, targetComment)
+        if (!imported) return
+        onRefresh()
+        if (!mountedRef.current) return
+        onToast(`已导入 SSH 私钥 "${imported.name}"`)
+        if (fromImportDrawer) resetForm(true)
+      } catch (err) {
+        if (!mountedRef.current) return
+        const msg = errMsg(err)
+        if (!fromImportDrawer && /口令|passphrase/i.test(msg)) {
+          clearFormFields()
+          setMode('import')
+          onToast('该私钥受口令保护，请在下方填写 Passphrase 后点击「从文件直接导入」', 'error')
+        } else {
+          onToast(msg, 'error')
+        }
+      } finally {
+        busyRef.current = false
+        if (mountedRef.current) setBusy(false)
+      }
+      return
+    }
+
     try {
       const res = await api.pickAndReadSSHKeyFile()
       if (!mountedRef.current || res.cancelled === 'true' || busyRef.current) return
@@ -139,7 +171,7 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
     }
   }
 
-  const handleDelete = async (k: SSHKeyMeta) => {
+  const handleDelete = useCallback(async (k: SSHKeyMeta) => {
     const ok = await confirm({
       title: '删除 SSH 密钥',
       message: `确定要永久删除密钥 "${k.name}" 吗？`,
@@ -153,7 +185,10 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
     } catch (err) {
       onToast(errMsg(err), 'error')
     }
-  }
+  }, [confirm, onRefresh, onToast])
+
+  const handleSelectDeploy = useCallback((item: SSHKeyMeta) => setDeployKey(item), [])
+  const handleDeleteCb = useCallback((item: SSHKeyMeta) => { void handleDelete(item) }, [handleDelete])
 
   return (
     <div className="h-full overflow-y-auto p-6 bg-ag-bg">
@@ -197,7 +232,7 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
         ) : (
           <div className="grid grid-cols-1 gap-2.5">
             {keys.map((k) => (
-              <KeyCardItem key={k.id} item={k} onDeploy={(item) => setDeployKey(item)} onDelete={(item) => void handleDelete(item)} />
+              <KeyCardItem key={k.id} item={k} onDeploy={handleSelectDeploy} onDelete={handleDeleteCb} onToast={onToast} />
             ))}
           </div>
         )}

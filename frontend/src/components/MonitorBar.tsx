@@ -32,7 +32,7 @@ function fmtMem(mb: number): string {
   return `${mb}M`
 }
 
-export const MonitorBar: React.FC<Props> = ({ sessionId, status, active, enabled }) => {
+export const MonitorBar: React.FC<Props> = React.memo(({ sessionId, status, active, enabled }) => {
   const [m, setM] = useState<HostMetrics | null>(null)
   const unsupportedSessionRef = useRef<string | null>(null)
 
@@ -173,4 +173,4 @@ export const MonitorBar: React.FC<Props> = ({ sessionId, status, active, enabled
       )}
     </div>
   )
-}
+})
