@@ -7,10 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+)
+
+const (
+	maxDropPayloadBytes  = 2 * 1024 * 1024
+	maxResponseBodyBytes = 4 * 1024 * 1024
 )
 
 // Client communicates with a gssh-sync-v1 relay over TLS 1.3 with App Gate HMAC auth.
@@ -31,17 +37,6 @@ func NewClient(relayURL string) (*Client, error) {
 	return NewClientWithMode(cleanURL, AppGateKey, PinnedSPKISHA256, mode)
 }
 
-// NewCustomClient creates a client with explicit credentials and pinning control.
-func NewCustomClient(relayURL, appGateKey, spkiSHA256 string, usePin bool) (*Client, error) {
-	mode := RelayTLSModeSystemCA
-	if usePin {
-		mode = RelayTLSModePinned
-	} else if IsRawIPHost(relayURL) {
-		mode = RelayTLSModeSelfSignedIP
-	}
-	return NewClientWithMode(relayURL, appGateKey, spkiSHA256, mode)
-}
-
 // NewClientWithMode creates a client with explicit credentials and TLS mode.
 func NewClientWithMode(relayURL, appGateKey, spkiSHA256 string, mode RelayTLSMode) (*Client, error) {
 	if strings.TrimSpace(appGateKey) == "" {
@@ -52,9 +47,15 @@ func NewClientWithMode(relayURL, appGateKey, spkiSHA256 string, mode RelayTLSMod
 		return nil, err
 	}
 	tr := &http.Transport{
-		TLSClientConfig:     tlsCfg,
-		TLSHandshakeTimeout: 10 * time.Second,
-		DisableKeepAlives:   true,
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSClientConfig:       tlsCfg,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
+		DisableKeepAlives:     true,
 	}
 	return &Client{
 		relayURL:   strings.TrimRight(relayURL, "/"),
@@ -68,6 +69,9 @@ func (c *Client) postJSON(ctx context.Context, path string, reqBody any) (int, [
 	raw, err := json.Marshal(reqBody)
 	if err != nil {
 		return 0, nil, err
+	}
+	if len(raw) > maxDropPayloadBytes {
+		return 0, nil, errors.New("同步数据体积超过中继限制（2 MiB）")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.relayURL+path, bytes.NewReader(raw))
 	if err != nil {
@@ -84,9 +88,12 @@ func (c *Client) postJSON(ctx context.Context, path string, reqBody any) (int, [
 		return 0, nil, fmt.Errorf("连接同步中继失败: %w", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes+1))
 	if err != nil {
 		return resp.StatusCode, nil, fmt.Errorf("读取同步响应失败: %w", err)
+	}
+	if len(body) > maxResponseBodyBytes {
+		return resp.StatusCode, nil, errors.New("同步中继响应体积超过安全上限（4 MiB）")
 	}
 	return resp.StatusCode, body, nil
 }
