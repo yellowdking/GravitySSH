@@ -26,17 +26,7 @@ func (s *Store) ListSSHKeys() []models.SSHKeyMeta {
 
 	out := make([]models.SSHKeyMeta, 0, len(s.data.SSHKeys))
 	for _, k := range s.data.SSHKeys {
-		out = append(out, models.SSHKeyMeta{
-			ID:            k.ID,
-			Name:          k.Name,
-			KeyType:       k.KeyType,
-			Fingerprint:   k.Fingerprint,
-			PublicKey:     k.PublicKey,
-			HasPassphrase: k.Passphrase != "",
-			Comment:       k.Comment,
-			UsageCount:    usage[k.ID],
-			CreatedAt:     k.CreatedAt,
-		})
+		out = append(out, keyMetaFromRecord(k, usage[k.ID]))
 	}
 	return out
 }
@@ -54,6 +44,9 @@ func (s *Store) GetSSHKeyInternal(id string) (*models.SSHKeyRecord, error) {
 }
 
 func (s *Store) ImportSSHKey(name, pemContent, passphrase, comment string) (models.SSHKeyMeta, error) {
+	if s.IsLocked() {
+		return models.SSHKeyMeta{}, errVaultLocked
+	}
 	parsed, err := sshkey.ParsePrivateKey(pemContent, passphrase)
 	if err != nil {
 		return models.SSHKeyMeta{}, err
@@ -71,26 +64,35 @@ func (s *Store) ImportSSHKey(name, pemContent, passphrase, comment string) (mode
 		PublicKey:     parsed.PublicKey,
 		PrivateKeyPEM: strings.TrimSpace(pemContent),
 		Passphrase:    passphrase,
-		Comment:       strings.TrimSpace(comment),
+		Comment:       sshkey.SanitizeComment(comment),
 		CreatedAt:     time.Now(),
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.locked {
+		return models.SSHKeyMeta{}, errVaultLocked
+	}
+	snapshot := cloneVaultData(s.data)
 	s.data.SSHKeys = append(s.data.SSHKeys, rec)
 	if err := s.saveLocked(); err != nil {
+		s.data = snapshot
 		return models.SSHKeyMeta{}, err
 	}
-	return keyMetaFromRecord(rec), nil
+	return keyMetaFromRecord(rec, 0), nil
 }
 
 func (s *Store) GenerateSSHKey(name, algorithm, passphrase, comment string) (models.SSHKeyMeta, error) {
+	if s.IsLocked() {
+		return models.SSHKeyMeta{}, errVaultLocked
+	}
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = fmt.Sprintf("GravitySSH-%s", time.Now().Format("20060102-1504"))
 	}
-	if strings.TrimSpace(comment) == "" {
-		comment = name
+	comment = sshkey.SanitizeComment(comment)
+	if comment == "" {
+		comment = sshkey.SanitizeComment(name)
 	}
 
 	pemStr, parsed, err := sshkey.GenerateKeyPair(algorithm, comment, passphrase)
@@ -112,14 +114,19 @@ func (s *Store) GenerateSSHKey(name, algorithm, passphrase, comment string) (mod
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.locked {
+		return models.SSHKeyMeta{}, errVaultLocked
+	}
+	snapshot := cloneVaultData(s.data)
 	s.data.SSHKeys = append(s.data.SSHKeys, rec)
 	if err := s.saveLocked(); err != nil {
+		s.data = snapshot
 		return models.SSHKeyMeta{}, err
 	}
-	return keyMetaFromRecord(rec), nil
+	return keyMetaFromRecord(rec, 0), nil
 }
 
-func keyMetaFromRecord(rec models.SSHKeyRecord) models.SSHKeyMeta {
+func keyMetaFromRecord(rec models.SSHKeyRecord, usageCount int) models.SSHKeyMeta {
 	return models.SSHKeyMeta{
 		ID:            rec.ID,
 		Name:          rec.Name,
@@ -128,7 +135,7 @@ func keyMetaFromRecord(rec models.SSHKeyRecord) models.SSHKeyMeta {
 		PublicKey:     rec.PublicKey,
 		HasPassphrase: rec.Passphrase != "",
 		Comment:       rec.Comment,
-		UsageCount:    0,
+		UsageCount:    usageCount,
 		CreatedAt:     rec.CreatedAt,
 	}
 }
@@ -136,8 +143,12 @@ func keyMetaFromRecord(rec models.SSHKeyRecord) models.SSHKeyMeta {
 func (s *Store) DeleteSSHKey(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.locked {
+		return errVaultLocked
+	}
 	for i, k := range s.data.SSHKeys {
 		if k.ID == id {
+			snapshot := cloneVaultData(s.data)
 			s.data.SSHKeys = append(s.data.SSHKeys[:i], s.data.SSHKeys[i+1:]...)
 			for j := range s.data.Servers {
 				if s.data.Servers[j].SSHKeyID == id {
@@ -147,7 +158,11 @@ func (s *Store) DeleteSSHKey(id string) error {
 					s.data.Servers[j].JumpHost.SSHKeyID = ""
 				}
 			}
-			return s.saveLocked()
+			if err := s.saveLocked(); err != nil {
+				s.data = snapshot
+				return err
+			}
+			return nil
 		}
 	}
 	return nil

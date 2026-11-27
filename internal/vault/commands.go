@@ -20,6 +20,9 @@ func (s *Store) ListShortcuts() []models.CommandShortcut {
 func (s *Store) SaveShortcut(sc models.CommandShortcut) (models.CommandShortcut, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.locked {
+		return models.CommandShortcut{}, errVaultLocked
+	}
 
 	sc.Name = strings.TrimSpace(sc.Name)
 	sc.Command = strings.TrimSpace(sc.Command)
@@ -28,8 +31,9 @@ func (s *Store) SaveShortcut(sc models.CommandShortcut) (models.CommandShortcut,
 	}
 	if sc.Name == "" {
 		firstLine := strings.Split(sc.Command, "\n")[0]
-		if len(firstLine) > 32 {
-			firstLine = firstLine[:32] + "..."
+		runes := []rune(firstLine)
+		if len(runes) > 32 {
+			firstLine = string(runes[:32]) + "..."
 		}
 		sc.Name = firstLine
 	}
@@ -39,6 +43,7 @@ func (s *Store) SaveShortcut(sc models.CommandShortcut) (models.CommandShortcut,
 
 	now := time.Now()
 	sc.UpdatedAt = now
+	snapshot := cloneVaultData(s.data)
 
 	for i, existing := range s.data.Shortcuts {
 		if sc.ID != "" && existing.ID == sc.ID {
@@ -46,6 +51,7 @@ func (s *Store) SaveShortcut(sc models.CommandShortcut) (models.CommandShortcut,
 			sc.UseCount = existing.UseCount
 			s.data.Shortcuts[i] = sc
 			if err := s.saveLocked(); err != nil {
+				s.data = snapshot
 				return models.CommandShortcut{}, err
 			}
 			return sc, nil
@@ -56,6 +62,7 @@ func (s *Store) SaveShortcut(sc models.CommandShortcut) (models.CommandShortcut,
 	sc.CreatedAt = now
 	s.data.Shortcuts = append([]models.CommandShortcut{sc}, s.data.Shortcuts...)
 	if err := s.saveLocked(); err != nil {
+		s.data = snapshot
 		return models.CommandShortcut{}, err
 	}
 	return sc, nil
@@ -64,10 +71,18 @@ func (s *Store) SaveShortcut(sc models.CommandShortcut) (models.CommandShortcut,
 func (s *Store) DeleteShortcut(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.locked {
+		return errVaultLocked
+	}
 	for i, sc := range s.data.Shortcuts {
 		if sc.ID == id {
+			snapshot := cloneVaultData(s.data)
 			s.data.Shortcuts = append(s.data.Shortcuts[:i], s.data.Shortcuts[i+1:]...)
-			return s.saveLocked()
+			if err := s.saveLocked(); err != nil {
+				s.data = snapshot
+				return err
+			}
+			return nil
 		}
 	}
 	return nil
@@ -76,10 +91,16 @@ func (s *Store) DeleteShortcut(id string) error {
 func (s *Store) IncrementShortcutUse(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.locked {
+		return
+	}
 	for i := range s.data.Shortcuts {
 		if s.data.Shortcuts[i].ID == id {
+			prevCount := s.data.Shortcuts[i].UseCount
 			s.data.Shortcuts[i].UseCount++
-			_ = s.saveLocked()
+			if err := s.saveLocked(); err != nil {
+				s.data.Shortcuts[i].UseCount = prevCount
+			}
 			return
 		}
 	}
@@ -93,6 +114,9 @@ func (s *Store) RecordCommand(serverID, serverName, sessionID, command string) (
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.locked {
+		return nil, errVaultLocked
+	}
 	if !s.data.Settings.RecordCommands {
 		return nil, nil
 	}
@@ -115,9 +139,7 @@ func (s *Store) RecordCommand(serverID, serverName, sessionID, command string) (
 		s.data.History = s.data.History[:maxEntries]
 	}
 
-	if err := s.saveLocked(); err != nil {
-		return nil, err
-	}
+	s.scheduleFlushLocked()
 	return &rec, nil
 }
 
@@ -143,10 +165,18 @@ func (s *Store) ListHistory(serverID string, limit int) []models.CommandRecord {
 func (s *Store) DeleteHistoryEntry(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.locked {
+		return errVaultLocked
+	}
 	for i, h := range s.data.History {
 		if h.ID == id {
+			snapshot := cloneVaultData(s.data)
 			s.data.History = append(s.data.History[:i], s.data.History[i+1:]...)
-			return s.saveLocked()
+			if err := s.saveLocked(); err != nil {
+				s.data = snapshot
+				return err
+			}
+			return nil
 		}
 	}
 	return nil
@@ -155,6 +185,10 @@ func (s *Store) DeleteHistoryEntry(id string) error {
 func (s *Store) ClearHistory(serverID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.locked {
+		return errVaultLocked
+	}
+	snapshot := cloneVaultData(s.data)
 	if serverID == "" {
 		s.data.History = []models.CommandRecord{}
 	} else {
@@ -166,7 +200,11 @@ func (s *Store) ClearHistory(serverID string) error {
 		}
 		s.data.History = kept
 	}
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.data = snapshot
+		return err
+	}
+	return nil
 }
 
 func (s *Store) GetSettings() models.AppSettings {
@@ -178,6 +216,9 @@ func (s *Store) GetSettings() models.AppSettings {
 func (s *Store) SaveSettings(settings models.AppSettings) (models.AppSettings, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.locked {
+		return models.AppSettings{}, errVaultLocked
+	}
 	d := models.DefaultSettings()
 	if settings.TerminalFontFamily == "" {
 		settings.TerminalFontFamily = d.TerminalFontFamily
@@ -191,16 +232,12 @@ func (s *Store) SaveSettings(settings models.AppSettings) (models.AppSettings, e
 	if settings.MaxHistoryEntries < 100 {
 		settings.MaxHistoryEntries = 100
 	}
-	if settings.SFTPPanelPosition != "right" && settings.SFTPPanelPosition != "bottom" {
-		settings.SFTPPanelPosition = "right"
-	}
-	if settings.Language != "zh" && settings.Language != "en" {
-		settings.Language = "zh"
-	}
 	settings.SyncRelayURL = strings.TrimSpace(settings.SyncRelayURL)
 
+	prev := s.data.Settings
 	s.data.Settings = settings
 	if err := s.saveLocked(); err != nil {
+		s.data.Settings = prev
 		return models.AppSettings{}, err
 	}
 	return settings, nil

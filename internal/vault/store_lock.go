@@ -48,21 +48,27 @@ func (s *Store) Unlock(password string) error {
 	if err != nil {
 		return fmt.Errorf("读取配置文件失败: %w", err)
 	}
-	plain, err := s.enc.OpenWithPassword(raw, password)
+	plain, pwSalt, pwKey, err := s.enc.OpenWithPasswordAndKey(raw, password)
 	if err != nil {
 		if errors.Is(err, crypto.ErrWrongPassword) {
 			return errors.New("解锁密码不正确，请重试")
 		}
 		return fmt.Errorf("解密配置文件失败: %w", err)
 	}
+	defer crypto.ZeroBytes(plain)
 
 	var loaded models.VaultData
 	if err := json.Unmarshal(plain, &loaded); err != nil {
+		crypto.ZeroBytes(pwKey)
+		crypto.ZeroBytes(pwSalt)
 		return fmt.Errorf("解析配置文件失败: %w", err)
 	}
 	normalizeVault(&loaded)
+	crypto.ZeroBytes(s.pwKey)
+	crypto.ZeroBytes(s.pwSalt)
 	s.data = loaded
-	s.password = password
+	s.pwSalt = pwSalt
+	s.pwKey = pwKey
 	s.hasPassword = true
 	s.locked = false
 	return nil
@@ -77,22 +83,47 @@ func (s *Store) SetPassword(currentPassword, newPassword string) error {
 	}
 
 	if s.hasPassword {
-		if subtle.ConstantTimeCompare([]byte(currentPassword), []byte(s.password)) != 1 {
+		if currentPassword == "" || len(s.pwSalt) == 0 || len(s.pwKey) == 0 {
+			return errors.New("当前密码不正确")
+		}
+		checkKey, _, err := crypto.DerivePasswordKey(currentPassword, s.pwSalt)
+		if err != nil {
+			return errors.New("当前密码不正确")
+		}
+		match := subtle.ConstantTimeCompare(checkKey, s.pwKey) == 1
+		crypto.ZeroBytes(checkKey)
+		if !match {
 			return errors.New("当前密码不正确")
 		}
 	}
 
-	prevPassword := s.password
+	var newKey, newSalt []byte
+	if newPassword != "" {
+		var err error
+		newKey, newSalt, err = crypto.DerivePasswordKey(newPassword, nil)
+		if err != nil {
+			return err
+		}
+	}
+
+	prevSalt := s.pwSalt
+	prevKey := s.pwKey
 	prevHasPassword := s.hasPassword
 
-	s.password = newPassword
+	s.pwSalt = newSalt
+	s.pwKey = newKey
 	s.hasPassword = newPassword != ""
 
 	if err := s.saveLocked(); err != nil {
-		s.password = prevPassword
+		s.pwSalt = prevSalt
+		s.pwKey = prevKey
 		s.hasPassword = prevHasPassword
+		crypto.ZeroBytes(newKey)
+		crypto.ZeroBytes(newSalt)
 		return err
 	}
+	crypto.ZeroBytes(prevKey)
+	crypto.ZeroBytes(prevSalt)
 	return nil
 }
 
@@ -106,6 +137,7 @@ func (s *Store) BindSSHKeyToServer(serverID, keyID string) error {
 	}
 	for i := range s.data.Servers {
 		if s.data.Servers[i].ID == serverID {
+			prev := s.data.Servers[i]
 			s.data.Servers[i].SSHKeyID = keyID
 			if s.data.Servers[i].Password != "" {
 				s.data.Servers[i].AuthType = models.AuthBoth
@@ -113,7 +145,11 @@ func (s *Store) BindSSHKeyToServer(serverID, keyID string) error {
 				s.data.Servers[i].AuthType = models.AuthKey
 			}
 			s.data.Servers[i].UpdatedAt = time.Now()
-			return s.saveLocked()
+			if err := s.saveLocked(); err != nil {
+				s.data.Servers[i] = prev
+				return err
+			}
+			return nil
 		}
 	}
 	return fmt.Errorf("服务器不存在: %s", serverID)

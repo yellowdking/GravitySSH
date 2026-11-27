@@ -14,7 +14,12 @@ import (
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
 
-const vaultSchemaVersion = 5
+const (
+	vaultSchemaVersion      = 5
+	defaultRecordFlushDelay = 1500 * time.Millisecond
+)
+
+var errVaultLocked = errors.New("配置文件处于锁定状态，请先输入密码解锁")
 
 type Store struct {
 	mu          sync.RWMutex
@@ -23,7 +28,12 @@ type Store struct {
 	data        models.VaultData
 	locked      bool
 	hasPassword bool
-	password    string
+	pwSalt      []byte
+	pwKey       []byte
+	dirty       bool
+	closed      bool
+	flushTimer  *time.Timer
+	flushDelay  time.Duration
 }
 
 func Open(filePath string, protector crypto.KeyProtector) (*Store, error) {
@@ -39,14 +49,15 @@ func Open(filePath string, protector crypto.KeyProtector) (*Store, error) {
 	}
 
 	s := &Store{
-		filePath: filePath,
-		enc:      crypto.NewEnvelopeCrypto(protector),
+		filePath:   filePath,
+		enc:        crypto.NewEnvelopeCrypto(protector),
+		flushDelay: defaultRecordFlushDelay,
 		data: models.VaultData{
 			Version:   vaultSchemaVersion,
 			Servers:   []models.ServerConfig{},
 			SSHKeys:   []models.SSHKeyRecord{},
-			Shortcuts: defaultShortcuts(),
-			Templates: BuiltinOpsTemplates(),
+			Shortcuts: []models.CommandShortcut{},
+			Templates: []models.BuiltinTemplate{},
 			History:   []models.CommandRecord{},
 			Settings:  models.DefaultSettings(),
 		},
@@ -55,6 +66,8 @@ func Open(filePath string, protector crypto.KeyProtector) (*Store, error) {
 	raw, err := os.ReadFile(filePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			s.data.Shortcuts = defaultShortcuts()
+			s.data.Templates = BuiltinOpsTemplates()
 			if err := s.saveLocked(); err != nil {
 				return nil, fmt.Errorf("initialize encrypted vault: %w", err)
 			}
@@ -77,6 +90,7 @@ func Open(filePath string, protector crypto.KeyProtector) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer crypto.ZeroBytes(plain)
 
 	var loaded models.VaultData
 	if err := json.Unmarshal(plain, &loaded); err != nil {
@@ -132,12 +146,37 @@ func normalizeVault(v *models.VaultData) {
 	if v.Settings.MaxHistoryEntries <= 0 {
 		v.Settings.MaxHistoryEntries = d.MaxHistoryEntries
 	}
-	if v.Settings.SFTPPanelPosition == "" {
-		v.Settings.SFTPPanelPosition = d.SFTPPanelPosition
+}
+
+func cloneVaultData(d models.VaultData) models.VaultData {
+	out := d
+	if d.Servers != nil {
+		out.Servers = make([]models.ServerConfig, len(d.Servers))
+		for i, srv := range d.Servers {
+			if srv.LastConnectedAt != nil {
+				t := *srv.LastConnectedAt
+				srv.LastConnectedAt = &t
+			}
+			out.Servers[i] = srv
+		}
 	}
-	if v.Settings.Language == "" {
-		v.Settings.Language = d.Language
+	if d.SSHKeys != nil {
+		out.SSHKeys = make([]models.SSHKeyRecord, len(d.SSHKeys))
+		copy(out.SSHKeys, d.SSHKeys)
 	}
+	if d.Shortcuts != nil {
+		out.Shortcuts = make([]models.CommandShortcut, len(d.Shortcuts))
+		copy(out.Shortcuts, d.Shortcuts)
+	}
+	if d.Templates != nil {
+		out.Templates = make([]models.BuiltinTemplate, len(d.Templates))
+		copy(out.Templates, d.Templates)
+	}
+	if d.History != nil {
+		out.History = make([]models.CommandRecord, len(d.History))
+		copy(out.History, d.History)
+	}
+	return out
 }
 
 func defaultShortcuts() []models.CommandShortcut {
@@ -181,7 +220,10 @@ func defaultShortcuts() []models.CommandShortcut {
 
 func (s *Store) saveLocked() error {
 	if s.locked {
-		return errors.New("配置文件处于锁定状态，请先输入密码解锁")
+		return errVaultLocked
+	}
+	if s.hasPassword && (len(s.pwSalt) == 0 || len(s.pwKey) == 0) {
+		return errors.New("加密密钥状态异常，请重新解锁配置文件")
 	}
 	if s.data.Version < vaultSchemaVersion {
 		s.data.Version = vaultSchemaVersion
@@ -190,23 +232,145 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return fmt.Errorf("marshal vault: %w", err)
 	}
-	sealed, err := s.enc.SealWithPassword(plain, s.password)
+	defer crypto.ZeroBytes(plain)
+
+	var sealed []byte
+	if s.hasPassword {
+		sealed, err = s.enc.SealV2WithCachedKey(plain, s.pwSalt, s.pwKey)
+	} else {
+		sealed, err = s.enc.SealV2WithCachedKey(plain, nil, nil)
+	}
 	if err != nil {
 		return fmt.Errorf("encrypt vault: %w", err)
 	}
 
-	tmpPath := s.filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, sealed, 0o600); err != nil {
+	if err := writeFileAtomic(s.filePath, sealed); err != nil {
+		return err
+	}
+	if s.flushTimer != nil {
+		s.flushTimer.Stop()
+		s.flushTimer = nil
+	}
+	s.dirty = false
+	return nil
+}
+
+// writeFileAtomic writes data to a unique temp file in the target directory,
+// flushes it to disk via Sync+Close, and replaces targetPath without ever
+// deleting the existing vault file before the new copy is safely in place.
+func writeFileAtomic(targetPath string, data []byte) error {
+	dir := filepath.Dir(targetPath)
+	tmpFile, err := os.CreateTemp(dir, ".vault-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp vault: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := tmpFile.Chmod(0o600); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("chmod temp vault: %w", err)
+	}
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
 		return fmt.Errorf("write temp vault: %w", err)
 	}
-	if err := os.Rename(tmpPath, s.filePath); err != nil {
-		_ = os.Remove(s.filePath)
-		if err2 := os.Rename(tmpPath, s.filePath); err2 != nil {
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("commit vault file: %w", err2)
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("sync temp vault: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close temp vault: %w", err)
+	}
+
+	// Retry direct rename briefly to absorb transient Windows AV/indexer locks.
+	var renameErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt*20) * time.Millisecond)
+		}
+		renameErr = os.Rename(tmpPath, targetPath)
+		if renameErr == nil {
+			cleanupTmp = false
+			return nil
 		}
 	}
-	return nil
+
+	// Safe backup-and-swap fallback: move old file to a backup instead of deleting it,
+	// and restore the backup if moving the new temp file into place fails.
+	if _, statErr := os.Stat(targetPath); statErr == nil {
+		bakPath := tmpPath + ".bak"
+		if bakErr := os.Rename(targetPath, bakPath); bakErr == nil {
+			if err2 := os.Rename(tmpPath, targetPath); err2 == nil {
+				cleanupTmp = false
+				_ = os.Remove(bakPath)
+				return nil
+			} else {
+				_ = os.Rename(bakPath, targetPath)
+				return fmt.Errorf("commit vault file: %w", err2)
+			}
+		}
+	}
+	return fmt.Errorf("commit vault file: %w", renameErr)
+}
+
+func (s *Store) scheduleFlushLocked() {
+	s.dirty = true
+	if s.flushTimer != nil || s.closed {
+		return
+	}
+	delay := s.flushDelay
+	if delay <= 0 {
+		delay = defaultRecordFlushDelay
+	}
+	s.flushTimer = time.AfterFunc(delay, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.flushTimer = nil
+		if s.closed || !s.dirty || s.locked {
+			return
+		}
+		_ = s.saveLocked()
+	})
+}
+
+// Flush immediately persists any coalesced dirty writes (such as recent command history).
+func (s *Store) Flush() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.flushTimer != nil {
+		s.flushTimer.Stop()
+		s.flushTimer = nil
+	}
+	if !s.dirty || s.locked {
+		return nil
+	}
+	return s.saveLocked()
+}
+
+// Close flushes pending writes, stops background timers, and zeros cached key material.
+func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.flushTimer != nil {
+		s.flushTimer.Stop()
+		s.flushTimer = nil
+	}
+	var err error
+	if s.dirty && !s.locked {
+		err = s.saveLocked()
+	}
+	s.closed = true
+	crypto.ZeroBytes(s.pwKey)
+	crypto.ZeroBytes(s.pwSalt)
+	s.pwKey = nil
+	s.pwSalt = nil
+	return err
 }
 
 func (s *Store) SecurityInfo() models.VaultSecurityInfo {
