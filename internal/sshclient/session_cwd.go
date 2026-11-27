@@ -87,14 +87,27 @@ func peekCacheLocked(s *sessionState, target string) ([]models.SFTPFileEntry, bo
 	return cloneDirEntries(c.entries), true
 }
 
-func putDirCache(s *sessionState, target string, entries []models.SFTPFileEntry) {
+func putDirCacheIfGen(s *sessionState, target string, entries []models.SFTPFileEntry, expectedGen uint64) {
 	cp := cloneDirEntries(entries)
 	s.mu.Lock()
-	if s.dirCache == nil {
-		s.dirCache = make(map[string]dirCacheEntry)
+	if s.dirCacheGen == expectedGen {
+		if s.dirCache == nil {
+			s.dirCache = make(map[string]dirCacheEntry)
+		}
+		s.dirCache[target] = dirCacheEntry{entries: cp, fetchedAt: time.Now()}
 	}
-	s.dirCache[target] = dirCacheEntry{entries: cp, fetchedAt: time.Now()}
 	s.mu.Unlock()
+}
+
+func (m *Manager) getDirCacheGen(sid string) (uint64, bool) {
+	s := m.getSession(sid)
+	if s == nil {
+		return 0, false
+	}
+	s.mu.Lock()
+	gen := s.dirCacheGen
+	s.mu.Unlock()
+	return gen, true
 }
 
 // PeekCachedDirEntries returns fresh cached entries without blocking on SFTP,
@@ -137,6 +150,7 @@ func (m *Manager) CachedDirEntries(sid, dir string) []models.SFTPFileEntry {
 		s.mu.Unlock()
 		return out
 	}
+	gen := s.dirCacheGen
 	s.mu.Unlock()
 	if sc == nil {
 		return nil
@@ -149,19 +163,20 @@ func (m *Manager) CachedDirEntries(sid, dir string) []models.SFTPFileEntry {
 		return nil
 	}
 	entries := buildSFTPEntries(sc, target, infos)
-	putDirCache(s, target, entries)
+	putDirCacheIfGen(s, target, entries, gen)
 	return entries
 }
 
-func (m *Manager) updateDirCache(sid, dir string, entries []models.SFTPFileEntry) {
+func (m *Manager) updateDirCacheIfGen(sid, dir string, entries []models.SFTPFileEntry, expectedGen uint64) {
 	if s := m.getSession(sid); s != nil {
-		putDirCache(s, dir, entries)
+		putDirCacheIfGen(s, dir, entries, expectedGen)
 	}
 }
 
 func (m *Manager) invalidateDirCache(sid, dir string) {
 	if s := m.getSession(sid); s != nil {
 		s.mu.Lock()
+		s.dirCacheGen++
 		delete(s.dirCache, path.Clean(dir))
 		s.mu.Unlock()
 	}
@@ -175,6 +190,7 @@ func (m *Manager) invalidateDirTreeCache(sid, target string) {
 	clean := path.Clean(target)
 	prefix := clean + "/"
 	s.mu.Lock()
+	s.dirCacheGen++
 	delete(s.dirCache, path.Dir(clean))
 	delete(s.dirCache, clean)
 	for k := range s.dirCache {
@@ -236,7 +252,93 @@ func (m *Manager) updateCWDFromCommand(s *sessionState, cmd string) {
 			}
 		}
 	}
-	s.mu.Lock()
-	clear(s.dirCache)
-	s.mu.Unlock()
+	if !isReadOnlyCommand(cmd) {
+		s.mu.Lock()
+		clear(s.dirCache)
+		s.dirCacheGen++
+		s.mu.Unlock()
+	}
+}
+
+var readOnlyBaseCommands = map[string]bool{
+	"cd": true, "ls": true, "ll": true, "la": true, "l": true, "dir": true,
+	"pwd": true, "cat": true, "head": true, "tail": true, "less": true, "more": true,
+	"bat": true, "grep": true, "egrep": true, "fgrep": true, "rg": true, "ag": true,
+	"fd": true, "locate": true, "which": true, "whereis": true, "type": true,
+	"stat": true, "file": true, "wc": true, "tree": true, "du": true, "df": true,
+	"free": true, "top": true, "htop": true, "ps": true, "pgrep": true,
+	"uptime": true, "uname": true, "hostname": true, "whoami": true, "id": true,
+	"w": true, "who": true, "last": true, "date": true, "cal": true,
+	"env": true, "printenv": true, "echo": true, "printf": true, "history": true,
+	"clear": true, "man": true, "help": true, "netstat": true, "ss": true,
+	"ifconfig": true, "ping": true, "dig": true, "nslookup": true, "traceroute": true,
+	"lsof": true, "dmesg": true, "journalctl": true, "nvidia-smi": true,
+}
+
+func isReadOnlyCommand(cmd string) bool {
+	s := strings.TrimSpace(cmd)
+	if s == "" {
+		return true
+	}
+	// Any output redirection or subshell substitution may mutate the filesystem.
+	if strings.ContainsAny(s, ">`") || strings.Contains(s, "$(") {
+		return false
+	}
+	// Split across command separators ;, &&, ||, |
+	normalized := strings.NewReplacer("&&", "\n", "||", "\n", ";", "\n", "|", "\n").Replace(s)
+	for _, seg := range strings.Split(normalized, "\n") {
+		fields := strings.Fields(seg)
+		if len(fields) == 0 {
+			continue
+		}
+		// Skip leading env assignments (e.g. LC_ALL=C ls)
+		idx := 0
+		for idx < len(fields) && strings.Contains(fields[idx], "=") && !strings.HasPrefix(fields[idx], "-") {
+			idx++
+		}
+		if idx >= len(fields) {
+			continue
+		}
+		base := fields[idx]
+		rest := fields[idx+1:]
+		if readOnlyBaseCommands[base] {
+			continue
+		}
+		switch base {
+		case "find":
+			for _, arg := range rest {
+				if arg == "-delete" || arg == "-exec" || arg == "-execdir" || arg == "-ok" {
+					return false
+				}
+			}
+			continue
+		case "git":
+			if len(rest) > 0 {
+				switch rest[0] {
+				case "status", "log", "diff", "show", "rev-parse", "remote":
+					continue
+				}
+			}
+			return false
+		case "docker":
+			if len(rest) > 0 {
+				switch rest[0] {
+				case "ps", "images", "logs", "inspect", "stats", "info", "version":
+					continue
+				}
+			}
+			return false
+		case "systemctl":
+			if len(rest) > 0 {
+				switch rest[0] {
+				case "status", "is-active", "is-enabled", "list-units", "list-unit-files":
+					continue
+				}
+			}
+			return false
+		default:
+			return false
+		}
+	}
+	return true
 }

@@ -9,10 +9,8 @@ import (
 const writeChunkSize = 1024
 
 func (m *Manager) WriteInput(sessionID, data string) error {
-	m.mu.RLock()
-	sess, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if !ok {
+	sess := m.getSession(sessionID)
+	if sess == nil {
 		return fmt.Errorf("会话不存在: %s", sessionID)
 	}
 	sess.mu.Lock()
@@ -44,10 +42,8 @@ func (m *Manager) WriteInput(sessionID, data string) error {
 }
 
 func (m *Manager) CurrentInputLine(sessionID string) string {
-	m.mu.RLock()
-	sess, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if !ok || sess.recorder == nil {
+	sess := m.getSession(sessionID)
+	if sess == nil || sess.recorder == nil {
 		return ""
 	}
 	return sess.recorder.CurrentLine()
@@ -59,10 +55,8 @@ func (m *Manager) Resize(sessionID string, cols, rows int) error {
 	if cols <= 0 || rows <= 0 {
 		return nil
 	}
-	m.mu.RLock()
-	sess, ok := m.sessions[sessionID]
-	m.mu.RUnlock()
-	if !ok {
+	sess := m.getSession(sessionID)
+	if sess == nil {
 		return nil
 	}
 	sess.mu.Lock()
@@ -86,7 +80,12 @@ func (m *Manager) Disconnect(sessionID string) {
 	if ok {
 		sess.mu.Lock()
 		sess.userClosed = true
+		cancelDial := sess.cancelDial
+		sess.cancelDial = nil
 		sess.mu.Unlock()
+		if cancelDial != nil {
+			cancelDial()
+		}
 		m.markDisconnected(sess, "已主动断开连接")
 	}
 }
@@ -102,7 +101,12 @@ func (m *Manager) CloseAll() {
 	for _, s := range all {
 		s.mu.Lock()
 		s.userClosed = true
+		cancelDial := s.cancelDial
+		s.cancelDial = nil
 		s.mu.Unlock()
+		if cancelDial != nil {
+			cancelDial()
+		}
 		m.markDisconnected(s, "应用关闭")
 	}
 }

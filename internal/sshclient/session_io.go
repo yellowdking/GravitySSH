@@ -11,7 +11,21 @@ import (
 )
 
 func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv *models.ServerConfig, cols, rows int) {
-	m.sendTerminalText(sess.info.SessionID, fmt.Sprintf("\x1b[38;5;105m● 正在连接 %s (%s@%s:%d)...\x1b[0m\r\n", srv.Name, srv.Username, srv.Host, defaultPort(srv.Port)))
+	defer func() {
+		sess.mu.Lock()
+		cancel := sess.cancelDial
+		sess.cancelDial = nil
+		sess.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+	}()
+
+	sess.mu.Lock()
+	sessionID := sess.info.SessionID
+	sess.mu.Unlock()
+
+	m.sendTerminalText(sessionID, fmt.Sprintf("\x1b[38;5;105m● 正在连接 %s (%s@%s:%d)...\x1b[0m\r\n", srv.Name, srv.Username, srv.Host, defaultPort(srv.Port)))
 
 	dialRes, err := DialServer(ctx, srv, m.store)
 	if err != nil {
@@ -90,10 +104,10 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 	var sftpClient *sftp.Client
 	homeDir := srv.DefaultRemotePath
 	sftpReady := false
-	sc, scErr := sftp.NewClient(dialRes.Client)
+	sc, scErr := newSFTPClient(dialRes.Client)
 	if scErr != nil {
 		time.Sleep(300 * time.Millisecond)
-		sc, scErr = sftp.NewClient(dialRes.Client)
+		sc, scErr = newSFTPClient(dialRes.Client)
 	}
 	if scErr == nil {
 		sftpClient = sc
@@ -140,21 +154,21 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 	m.store.MarkServerConnected(srv.ID)
 
 	if dialRes.ViaSummary != "" {
-		m.sendTerminalText(sess.info.SessionID, fmt.Sprintf("\x1b[38;5;78m✓ 已连接 · 链路: %s → %s\x1b[0m\r\n", dialRes.ViaSummary, srv.Host))
+		m.sendTerminalText(sessionID, fmt.Sprintf("\x1b[38;5;78m✓ 已连接 · 链路: %s → %s\x1b[0m\r\n", dialRes.ViaSummary, srv.Host))
 	} else {
-		m.sendTerminalText(sess.info.SessionID, "\x1b[38;5;78m✓ SSH 与 SFTP 已自动就绪\x1b[0m\r\n")
+		m.sendTerminalText(sessionID, "\x1b[38;5;78m✓ SSH 与 SFTP 已自动就绪\x1b[0m\r\n")
 	}
 	m.emit("session:status", infoSnap)
 
 	if srv.StartupCommand != "" {
 		go func() {
 			time.Sleep(450 * time.Millisecond)
-			_ = m.WriteInput(sess.info.SessionID, srv.StartupCommand+"\n")
+			_ = m.WriteInput(sessionID, srv.StartupCommand+"\n")
 		}()
 	}
 
-	go m.pumpOutput(sess.info.SessionID, stdout)
-	go m.pumpOutput(sess.info.SessionID, stderr)
+	go m.pumpOutput(sessionID, stdout)
+	go m.pumpOutput(sessionID, stderr)
 
 	kaSec := srv.KeepAliveSeconds
 	if kaSec <= 0 {
@@ -170,11 +184,15 @@ func (m *Manager) establishSession(ctx context.Context, sess *sessionState, srv 
 
 func (m *Manager) failSession(sess *sessionState, errMsg string) {
 	sess.mu.Lock()
+	if sess.userClosed || sess.closed {
+		sess.mu.Unlock()
+		return
+	}
 	sess.info.Status = "error"
 	sess.info.Error = errMsg
 	infoSnap := sess.info
 	sess.mu.Unlock()
-	m.sendTerminalText(sess.info.SessionID, fmt.Sprintf("\r\n\x1b[38;5;203m✗ 连接失败: %s\x1b[0m\r\n", errMsg))
+	m.sendTerminalText(infoSnap.SessionID, fmt.Sprintf("\r\n\x1b[38;5;203m✗ 连接失败: %s\x1b[0m\r\n", errMsg))
 	m.emit("session:status", infoSnap)
 }
 
@@ -185,6 +203,8 @@ func (m *Manager) markDisconnected(sess *sessionState, reason string) {
 		return
 	}
 	sess.closed = true
+	cancelDial := sess.cancelDial
+	sess.cancelDial = nil
 	if sess.stopCh != nil {
 		select {
 		case <-sess.stopCh:
@@ -192,6 +212,7 @@ func (m *Manager) markDisconnected(sess *sessionState, reason string) {
 			close(sess.stopCh)
 		}
 	}
+	sess.stdin = nil
 	if sess.sftpClient != nil {
 		_ = sess.sftpClient.Close()
 		sess.sftpClient = nil
@@ -212,6 +233,10 @@ func (m *Manager) markDisconnected(sess *sessionState, reason string) {
 	infoSnap := sess.info
 	sess.mu.Unlock()
 
-	m.sendTerminalText(sess.info.SessionID, fmt.Sprintf("\r\n\x1b[38;5;245m● %s\x1b[0m\r\n", reason))
+	if cancelDial != nil {
+		cancelDial()
+	}
+
+	m.sendTerminalText(infoSnap.SessionID, fmt.Sprintf("\r\n\x1b[38;5;245m● %s\x1b[0m\r\n", reason))
 	m.emit("session:status", infoSnap)
 }
