@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"strconv"
@@ -14,6 +16,8 @@ import (
 )
 
 const syncRelayCallTimeout = 15 * time.Second
+
+var decryptPairRequestFn = syncclient.DecryptPairRequest
 
 func (a *App) syncContext() context.Context {
 	return a.bgContext()
@@ -47,11 +51,14 @@ func (a *App) resolveRelayURL(relayURL string) string {
 }
 
 func (a *App) syncClient(relayURL string) (*syncclient.Client, string, error) {
-	cleanURL, mode, pin, err := syncclient.NormalizeRelayURLWithPin(a.resolveRelayURL(relayURL))
+	cfg, err := syncclient.NormalizeRelayConfig(a.resolveRelayURL(relayURL))
 	if err != nil {
 		return nil, "", err
 	}
-	cacheKey := cleanURL + "|" + strconv.Itoa(int(mode)) + "|" + pin
+	gateKey := cfg.EffectiveGateKey()
+	gateSum := sha256.Sum256([]byte(gateKey))
+	pinsJoined := strings.Join(cfg.SPKIPins, ",")
+	cacheKey := cfg.URL + "|" + strconv.Itoa(int(cfg.TLSMode)) + "|" + pinsJoined + "|" + hex.EncodeToString(gateSum[:8])
 	now := time.Now()
 
 	a.syncClientMu.Lock()
@@ -62,11 +69,11 @@ func (a *App) syncClient(relayURL string) (*syncclient.Client, string, error) {
 		entry.lastUsed = now
 		cli := entry.client
 		a.syncClientMu.Unlock()
-		return cli, cleanURL, nil
+		return cli, cfg.URL, nil
 	}
 	a.syncClientMu.Unlock()
 
-	cli, err := syncclient.NewClientWithMode(cleanURL, syncclient.AppGateKey, pin, mode)
+	cli, err := syncclient.NewClientWithPins(cfg.URL, gateKey, cfg.SPKIPins, cfg.TLSMode)
 	if err != nil {
 		return nil, "", err
 	}
@@ -81,7 +88,7 @@ func (a *App) syncClient(relayURL string) (*syncclient.Client, string, error) {
 		ret := existing.client
 		a.syncClientMu.Unlock()
 		cli.CloseIdleConnections()
-		return ret, cleanURL, nil
+		return ret, cfg.URL, nil
 	}
 	for len(a.syncClients) >= maxCachedSyncClients {
 		var (
@@ -110,7 +117,29 @@ func (a *App) syncClient(relayURL string) (*syncclient.Client, string, error) {
 	for _, old := range evicted {
 		old.CloseIdleConnections()
 	}
-	return cli, cleanURL, nil
+	return cli, cfg.URL, nil
+}
+
+func (a *App) cancelAllSyncOnLock() {
+	if a.syncCache == nil {
+		return
+	}
+	sends := a.syncCache.drainAllOnLock()
+	for _, sess := range sends {
+		if sess == nil || sess.channelID == "" || sess.senderToken == "" {
+			continue
+		}
+		s := sess
+		go func() {
+			client, _, err := a.syncClient(s.effectiveRelay())
+			if err != nil {
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = client.PairCancel(ctx, s.channelID, s.senderToken)
+		}()
+	}
 }
 
 func (a *App) buildSyncPreview(bundle models.SyncBundle) models.SyncReceivePreview {
@@ -185,7 +214,8 @@ func (a *App) StartSyncSend(relayURL string) (models.SyncSendSession, error) {
 		return models.SyncSendSession{}, err
 	}
 	channelID := syncclient.DeriveChannelID(canonicalSend)
-	client, cleanURL, err := a.syncClient(relayURL)
+	resolvedRelay := a.resolveRelayURL(relayURL)
+	client, cleanURL, err := a.syncClient(resolvedRelay)
 	if err != nil {
 		return models.SyncSendSession{}, err
 	}
@@ -202,6 +232,7 @@ func (a *App) StartSyncSend(relayURL string) (models.SyncSendSession, error) {
 		senderToken: senderToken,
 		sendCode:    canonicalSend,
 		relayURL:    cleanURL,
+		relayTarget: resolvedRelay,
 		bundle:      bundle,
 		hasBundle:   true,
 		expiresAt:   expiresAt,
@@ -230,7 +261,7 @@ func (a *App) PollSyncSend(sessionID string) (models.SyncSendPollResult, error) 
 	if !ok {
 		return models.SyncSendPollResult{Status: "expired", Message: "同步会话已过期或已撤销"}, nil
 	}
-	client, _, err := a.syncClient(sess.relayURL)
+	client, _, err := a.syncClient(sess.effectiveRelay())
 	if err != nil {
 		return models.SyncSendPollResult{}, err
 	}
@@ -263,15 +294,24 @@ func (a *App) PollSyncSend(sessionID string) (models.SyncSendPollResult, error) 
 	case "waiting":
 		return models.SyncSendPollResult{Status: "waiting"}, nil
 	case "requested":
-		info, decErr := syncclient.DecryptPairRequest(sess.sendCode, res.EncryptedPayload)
-		if decErr != nil {
-			_ = client.PairReject(ctx, sess.channelID, sess.senderToken, res.RequestID)
-			a.syncCache.popSend(sessionID)
-			return models.SyncSendPollResult{
-				Status:    "error",
-				RequestID: res.RequestID,
-				Message:   "接收端验证请求解密失败，已自动拒绝此次配对",
-			}, nil
+		var (
+			info   syncclient.PairRequestPayload
+			decErr error
+		)
+		if cached, ok := a.syncCache.getCachedPairRequest(sessionID, res.RequestID, res.Salt, res.Nonce, res.Ciphertext); ok {
+			info = cached
+		} else {
+			info, decErr = decryptPairRequestFn(sess.sendCode, res.EncryptedPayload)
+			if decErr != nil {
+				_ = client.PairReject(ctx, sess.channelID, sess.senderToken, res.RequestID)
+				a.syncCache.popSend(sessionID)
+				return models.SyncSendPollResult{
+					Status:    "error",
+					RequestID: res.RequestID,
+					Message:   "接收端验证请求解密失败，已自动拒绝此次配对",
+				}, nil
+			}
+			a.syncCache.setCachedPairRequest(sessionID, res.RequestID, res.Salt, res.Nonce, res.Ciphertext, info)
 		}
 		canonicalRecv, _ := syncclient.CanonicalizeCode(info.ReceiverCode)
 		return models.SyncSendPollResult{
@@ -325,7 +365,7 @@ func (a *App) ApproveSyncSend(sessionID, requestID, receiverCode string) error {
 	if !a.syncCache.isSendApproving(sessionID) {
 		return errors.New("同步会话已取消或已过期")
 	}
-	client, _, err := a.syncClient(sess.relayURL)
+	client, _, err := a.syncClient(sess.effectiveRelay())
 	if err != nil {
 		return err
 	}
@@ -350,7 +390,7 @@ func (a *App) RejectSyncSend(sessionID, requestID string) error {
 	if !ok {
 		return nil
 	}
-	client, _, err := a.syncClient(sess.relayURL)
+	client, _, err := a.syncClient(sess.effectiveRelay())
 	if err != nil {
 		return err
 	}
@@ -374,7 +414,7 @@ func (a *App) CancelSyncSend(sessionIDOrCode, relayURL string) error {
 	if !ok {
 		return nil
 	}
-	targetURL := sess.relayURL
+	targetURL := sess.effectiveRelay()
 	if strings.TrimSpace(targetURL) == "" {
 		targetURL = relayURL
 	}
@@ -427,7 +467,8 @@ func (a *App) StartSyncReceive(sendCode, recvCode, relayURL string) (models.Sync
 	if err != nil {
 		return models.SyncReceiveWaitSession{}, err
 	}
-	client, cleanURL, err := a.syncClient(relayURL)
+	resolvedRelay := a.resolveRelayURL(relayURL)
+	client, cleanURL, err := a.syncClient(resolvedRelay)
 	if err != nil {
 		return models.SyncReceiveWaitSession{}, err
 	}
@@ -440,13 +481,14 @@ func (a *App) StartSyncReceive(sendCode, recvCode, relayURL string) (models.Sync
 	}
 	waitID := uuid.NewString()
 	a.syncCache.putReceive(&pendingSyncReceiveSession{
-		waitID:    waitID,
-		channelID: channelID,
-		sendCode:  canonicalSend,
-		recvCode:  canonicalRecv,
-		requestID: requestID,
-		relayURL:  cleanURL,
-		expiresAt: expiresAt,
+		waitID:      waitID,
+		channelID:   channelID,
+		sendCode:    canonicalSend,
+		recvCode:    canonicalRecv,
+		requestID:   requestID,
+		relayURL:    cleanURL,
+		relayTarget: resolvedRelay,
+		expiresAt:   expiresAt,
 	})
 	return models.SyncReceiveWaitSession{
 		WaitID:       waitID,
@@ -466,7 +508,7 @@ func (a *App) PollSyncReceive(waitID string) (models.SyncReceivePollResult, erro
 	if !ok {
 		return models.SyncReceivePollResult{Status: "expired", Message: "配对等待已过期或已取消"}, nil
 	}
-	client, _, err := a.syncClient(sess.relayURL)
+	client, _, err := a.syncClient(sess.effectiveRelay())
 	if err != nil {
 		return models.SyncReceivePollResult{}, err
 	}

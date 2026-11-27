@@ -36,8 +36,13 @@ func newTestAppWithVault(t *testing.T) (*App, *vault.Store) {
 }
 
 func TestAppVersionLifecycleNilCtxGuardsAndReadSSHKeyFileBounded(t *testing.T) {
-	if AppVersion != "1.4.2" {
-		t.Fatalf("expected fallback AppVersion=1.4.2, got %q", AppVersion)
+	rawVersion, err := os.ReadFile("VERSION")
+	if err != nil {
+		t.Fatalf("read VERSION: %v", err)
+	}
+	wantVersion := strings.TrimSpace(string(rawVersion))
+	if AppVersion != wantVersion || AppVersion != "1.4.3" {
+		t.Fatalf("expected fallback AppVersion=%q (1.4.3), got %q", wantVersion, AppVersion)
 	}
 
 	app, store := newTestAppWithVault(t)
