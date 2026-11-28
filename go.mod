@@ -6,6 +6,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/pkg/sftp v1.13.9
 	github.com/wailsapp/wails/v2 v2.17.1
+	github.com/yellowdking/synctool v0.3.0
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.60.0
 	golang.org/x/sys v0.48.0
