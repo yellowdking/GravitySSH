@@ -33,15 +33,15 @@ func (a *App) DisconnectSession(sessionID string) error {
 }
 
 func (a *App) WriteTerminal(sessionID, data string) error {
-	_, sshMgr, _, err := a.readyDeps()
+	_, sshMgr, _, err := a.unlockedDeps()
 	if err != nil {
 		return err
 	}
 	return sshMgr.WriteInput(sessionID, data)
 }
 
-func (a *App) ResizeTerminal(sessionID string, cols, rows int) error {
-	_, sshMgr, _, err := a.readyDeps()
+func (a *App) ResizeTerminal(sessionID, cols, rows int) error {
+	_, sshMgr, _, err := a.unlockedDeps()
 	if err != nil {
 		return err
 	}
@@ -49,7 +49,7 @@ func (a *App) ResizeTerminal(sessionID string, cols, rows int) error {
 }
 
 func (a *App) SetSessionCWD(sessionID, remotePath string) error {
-	_, sshMgr, _, err := a.readyDeps()
+	_, sshMgr, _, err := a.unlockedDeps()
 	if err != nil {
 		return err
 	}
@@ -58,26 +58,26 @@ func (a *App) SetSessionCWD(sessionID, remotePath string) error {
 }
 
 func (a *App) GetSessionMetrics(sessionID string) (models.HostMetrics, error) {
-	_, sshMgr, _, err := a.readyDeps()
+	_, sshMgr, _, err := a.unlockedDeps()
 	if err != nil {
 		return models.HostMetrics{}, err
 	}
 	return sshMgr.GetSessionMetrics(sessionID)
 }
 
-// SwitchTerminalIME switches Windows IME to English when enabled in settings.
+// SwitchTerminalIME switches Windows IME to English when unlocked and enabled in settings.
 func (a *App) SwitchTerminalIME() {
 	a.mu.RLock()
 	store := a.store
 	a.mu.RUnlock()
-	if store != nil && !store.GetSettings().AutoSwitchEnglishIME {
+	if store == nil || store.IsLocked() || !store.GetSettings().AutoSwitchEnglishIME {
 		return
 	}
 	ime.SwitchToEnglish()
 }
 
 func (a *App) SFTPList(sessionID, remotePath string) (models.SFTPListResult, error) {
-	_, sshMgr, _, err := a.readyDeps()
+	_, sshMgr, _, err := a.unlockedDeps()
 	if err != nil {
 		return models.SFTPListResult{}, err
 	}
@@ -85,7 +85,7 @@ func (a *App) SFTPList(sessionID, remotePath string) (models.SFTPListResult, err
 }
 
 func (a *App) SFTPMkdir(sessionID, remotePath string) error {
-	_, sshMgr, _, err := a.readyDeps()
+	_, sshMgr, _, err := a.unlockedDeps()
 	if err != nil {
 		return err
 	}
@@ -93,7 +93,7 @@ func (a *App) SFTPMkdir(sessionID, remotePath string) error {
 }
 
 func (a *App) SFTPRename(sessionID, oldPath, newPath string) error {
-	_, sshMgr, _, err := a.readyDeps()
+	_, sshMgr, _, err := a.unlockedDeps()
 	if err != nil {
 		return err
 	}
@@ -101,7 +101,7 @@ func (a *App) SFTPRename(sessionID, oldPath, newPath string) error {
 }
 
 func (a *App) SFTPDelete(sessionID, remotePath string) error {
-	_, sshMgr, _, err := a.readyDeps()
+	_, sshMgr, _, err := a.unlockedDeps()
 	if err != nil {
 		return err
 	}
@@ -109,7 +109,7 @@ func (a *App) SFTPDelete(sessionID, remotePath string) error {
 }
 
 func (a *App) SFTPAlignPermissions(sessionID, remotePath string) (string, error) {
-	_, sshMgr, _, err := a.readyDeps()
+	_, sshMgr, _, err := a.unlockedDeps()
 	if err != nil {
 		return "", err
 	}
@@ -117,7 +117,7 @@ func (a *App) SFTPAlignPermissions(sessionID, remotePath string) (string, error)
 }
 
 func (a *App) SFTPExtractArchive(sessionID, remotePath string) (string, error) {
-	_, sshMgr, _, err := a.readyDeps()
+	_, sshMgr, _, err := a.unlockedDeps()
 	if err != nil {
 		return "", err
 	}
@@ -125,7 +125,7 @@ func (a *App) SFTPExtractArchive(sessionID, remotePath string) (string, error) {
 }
 
 func (a *App) SFTPReadTextFile(sessionID, remotePath string) (models.RemoteFileContent, error) {
-	_, sshMgr, _, err := a.readyDeps()
+	_, sshMgr, _, err := a.unlockedDeps()
 	if err != nil {
 		return models.RemoteFileContent{}, err
 	}
@@ -133,7 +133,7 @@ func (a *App) SFTPReadTextFile(sessionID, remotePath string) (models.RemoteFileC
 }
 
 func (a *App) SFTPWriteTextFile(sessionID, remotePath, content string) error {
-	_, sshMgr, _, err := a.readyDeps()
+	_, sshMgr, _, err := a.unlockedDeps()
 	if err != nil {
 		return err
 	}
@@ -141,7 +141,7 @@ func (a *App) SFTPWriteTextFile(sessionID, remotePath, content string) error {
 }
 
 func (a *App) SFTPCompress(sessionID, remoteDir string, names []string, format string) (string, error) {
-	_, sshMgr, _, err := a.readyDeps()
+	_, sshMgr, _, err := a.unlockedDeps()
 	if err != nil {
 		return "", err
 	}
@@ -149,7 +149,7 @@ func (a *App) SFTPCompress(sessionID, remoteDir string, names []string, format s
 }
 
 func (a *App) SFTPDownloadFolderDialog(sessionID, remotePath string) (map[string]any, error) {
-	_, sshMgr, ctx, err := a.readyDeps()
+	_, sshMgr, ctx, err := a.unlockedDeps()
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +170,7 @@ func (a *App) SFTPDownloadFolderDialog(sessionID, remotePath string) (map[string
 }
 
 func (a *App) SFTPUploadDialog(sessionID, remoteDir string) (int, error) {
-	_, _, ctx, err := a.readyDeps()
+	_, _, ctx, err := a.unlockedDeps()
 	if err != nil {
 		return 0, err
 	}
@@ -187,7 +187,7 @@ func (a *App) SFTPUploadDialog(sessionID, remoteDir string) (int, error) {
 }
 
 func (a *App) SFTPUploadFiles(sessionID string, localPaths []string, remoteDir string) (int, error) {
-	_, sshMgr, _, err := a.readyDeps()
+	_, sshMgr, _, err := a.unlockedDeps()
 	if err != nil {
 		return 0, err
 	}
@@ -205,7 +205,7 @@ func (a *App) SFTPUploadFiles(sessionID string, localPaths []string, remoteDir s
 }
 
 func (a *App) SFTPDownloadDialog(sessionID, remotePath string) (string, error) {
-	_, sshMgr, ctx, err := a.readyDeps()
+	_, sshMgr, ctx, err := a.unlockedDeps()
 	if err != nil {
 		return "", err
 	}
