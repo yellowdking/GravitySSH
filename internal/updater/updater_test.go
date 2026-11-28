@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
 )
 
@@ -50,7 +51,9 @@ func TestCheckReleaseAtURL(t *testing.T) {
 			"published_at": "2026-11-24T00:00:00Z",
 			"assets": [
 				{"name": "GravitySSH-v1.2.0-windows-amd64-portable.zip", "browser_download_url": "https://github.com/yellowdking/GravitySSH/releases/download/v1.2.0/app.zip"},
-				{"name": "GravitySSH-v1.2.0-windows-amd64.exe", "browser_download_url": "https://github.com/yellowdking/GravitySSH/releases/download/v1.2.0/app.exe"}
+				{"name": "GravitySSH-v1.2.0-windows-amd64.exe", "browser_download_url": "https://github.com/yellowdking/GravitySSH/releases/download/v1.2.0/app.exe"},
+				{"name": "GravitySSH-v1.2.0-linux-amd64.AppImage", "browser_download_url": "https://github.com/yellowdking/GravitySSH/releases/download/v1.2.0/app.AppImage"},
+				{"name": "GravitySSH-v1.2.0-darwin-universal.dmg", "browser_download_url": "https://github.com/yellowdking/GravitySSH/releases/download/v1.2.0/app.dmg"}
 			]
 		}`))
 	}))
@@ -60,7 +63,15 @@ func TestCheckReleaseAtURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("checkReleaseAtURL failed: %v", err)
 	}
-	wantDL := "https://github.com/yellowdking/GravitySSH/releases/download/v1.2.0/app.exe"
+	wantDL := "https://github.com/yellowdking/GravitySSH/releases/tag/v1.2.0"
+	switch runtime.GOOS {
+	case "windows":
+		wantDL = "https://github.com/yellowdking/GravitySSH/releases/download/v1.2.0/app.exe"
+	case "linux":
+		wantDL = "https://github.com/yellowdking/GravitySSH/releases/download/v1.2.0/app.AppImage"
+	case "darwin":
+		wantDL = "https://github.com/yellowdking/GravitySSH/releases/download/v1.2.0/app.dmg"
+	}
 	if !res.HasUpdate || res.LatestVersion != "1.2.0" || res.DownloadURL != wantDL {
 		t.Fatalf("unexpected update result: %+v", res)
 	}
@@ -211,7 +222,7 @@ func TestSelectReleaseAssetURLByOSAndArch(t *testing.T) {
 		t.Fatalf("darwin/arm64 got %q", got)
 	}
 	if got := selectReleaseAssetURL("darwin", "amd64", assets, fallback); got != assets[3].BrowserDownloadURL {
-		t.Fatalf("darwin/amd64 got %q", got)
+		t.Fatalf("darwin/arm64 got %q", got)
 	}
 	if got := selectReleaseAssetURL("linux", "amd64", assets, fallback); got != assets[4].BrowserDownloadURL {
 		t.Fatalf("linux/amd64 got %q", got)
