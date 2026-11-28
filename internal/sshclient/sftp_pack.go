@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"bufio"
 	"compress/gzip"
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -35,18 +34,9 @@ func (m *Manager) SFTPDownloadPacked(sessionID, remotePath, localDir string) (in
 	parentDir := path.Dir(clean)
 	baseName := path.Base(clean)
 
-	dlCtx, cancel := context.WithTimeout(context.Background(), packedDownloadTimeout)
+	dlCtx, cancel := m.sessionExecContext(sessionID, packedDownloadTimeout)
 	defer cancel()
 	stopCh := m.SessionStopCh(sessionID)
-	if stopCh != nil {
-		go func() {
-			select {
-			case <-stopCh:
-				cancel()
-			case <-dlCtx.Done():
-			}
-		}()
-	}
 
 	sshSess, err := newSessionWithContext(dlCtx, client)
 	if err != nil {
@@ -313,7 +303,9 @@ func (m *Manager) SFTPCompress(sessionID, remoteDir string, names []string, form
 		return "", err
 	}
 
-	out, runErr := runSSHExec(context.Background(), client, cmd, 180*time.Second, true)
+	execCtx, cancel := m.sessionExecContext(sessionID, 180*time.Second)
+	defer cancel()
+	out, runErr := runSSHExec(execCtx, client, cmd, 180*time.Second, true)
 	m.invalidateDirCache(sessionID, dir)
 
 	if runErr != nil {
