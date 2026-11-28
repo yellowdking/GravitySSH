@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 )
 
 const (
-	// AppID is the canonical synctool-v1 application identifier shared across Windows & Android.
+	// AppID is the canonical synctool-v1 application identifier shared across desktop & mobile.
 	AppID = "com.yellowdking.gravityssh"
 	// Schema is the canonical Always-2-Part vault sync parcel schema.
 	Schema = "gravityssh.vault.v1"
@@ -43,6 +44,28 @@ func ZeroSyncBundle(b *models.SyncBundle) {
 	*b = models.SyncBundle{}
 }
 
+func syncPlatformForGOOS(goos string) string {
+	if goos == "darwin" {
+		return "macos"
+	}
+	return "windows"
+}
+
+func defaultDeviceLabelForGOOS(goos string) string {
+	if goos == "darwin" {
+		return "Mac"
+	}
+	return "Windows-PC"
+}
+
+func currentSyncPlatform() string {
+	return syncPlatformForGOOS(runtime.GOOS)
+}
+
+func defaultDeviceLabel() string {
+	return defaultDeviceLabelForGOOS(runtime.GOOS)
+}
+
 func truncateRunes(s string, maxRunes int) string {
 	s = strings.TrimSpace(s)
 	runes := []rune(s)
@@ -65,11 +88,11 @@ func BuildVaultParcel(bundle models.SyncBundle) (envelope.ParcelInput, func(), e
 		bundle.ExportedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	if strings.TrimSpace(bundle.SourcePlatform) == "" {
-		bundle.SourcePlatform = "windows"
+		bundle.SourcePlatform = currentSyncPlatform()
 	}
 	safeDevice := truncateRunes(bundle.SourceDevice, 48)
 	if safeDevice == "" {
-		safeDevice = "Windows-PC"
+		safeDevice = defaultDeviceLabel()
 	}
 	bundle.SourceDevice = safeDevice
 	if bundle.Servers == nil {

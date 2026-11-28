@@ -3,11 +3,23 @@ package vault
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/yellowdking/GravitySSH/internal/models"
 )
+
+func syncPlatformForGOOS(goos string) string {
+	if goos == "darwin" {
+		return "macos"
+	}
+	return "windows"
+}
+
+func currentSyncPlatform() string {
+	return syncPlatformForGOOS(runtime.GOOS)
+}
 
 // ExportSyncBundle exports a decrypted portable copy of servers, SSH keys,
 // shortcuts, and ops templates for multi-device zero-knowledge sync.
@@ -38,7 +50,7 @@ func (s *Store) ExportSyncBundle(sourceDevice string) (models.SyncBundle, error)
 	return models.SyncBundle{
 		SchemaVersion:  1,
 		ExportedAt:     time.Now().UTC().Format(time.RFC3339),
-		SourcePlatform: "windows",
+		SourcePlatform: currentSyncPlatform(),
 		SourceDevice:   strings.TrimSpace(sourceDevice),
 		Servers:        servers,
 		SSHKeys:        keys,
