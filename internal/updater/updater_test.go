@@ -222,7 +222,7 @@ func TestSelectReleaseAssetURLByOSAndArch(t *testing.T) {
 		t.Fatalf("darwin/arm64 got %q", got)
 	}
 	if got := selectReleaseAssetURL("darwin", "amd64", assets, fallback); got != assets[3].BrowserDownloadURL {
-		t.Fatalf("darwin/arm64 got %q", got)
+		t.Fatalf("darwin/amd64 got %q", got)
 	}
 	if got := selectReleaseAssetURL("linux", "amd64", assets, fallback); got != assets[4].BrowserDownloadURL {
 		t.Fatalf("linux/amd64 got %q", got)
