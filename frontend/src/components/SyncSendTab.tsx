@@ -1,460 +1,298 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import {
-  AlertTriangle, Check, CheckCircle2, Clock, Copy, Laptop, Loader2,
-  QrCode, RefreshCw, ShieldAlert, ShieldCheck, Smartphone, Trash2, XCircle,
+  Check, CheckCircle2, Clock, Copy, KeyRound, Loader2,
+  QrCode, RefreshCw, ShieldAlert, ShieldCheck, Trash2,
 } from 'lucide-react'
-import type { SyncSendPollResult, SyncSendSession } from '../syncTypes'
-import { api } from '../wailsApi'
-import { errMsg } from '../utils/errors'
+import type { SyncRelayStatus } from '../syncTypes'
 import { useCopyFeedback } from '../hooks/useCopyFeedback'
 import { fmtSec, useSyncCountdown } from '../hooks/useSyncCountdown'
-import { useSyncPolling } from '../hooks/useSyncPolling'
+import { useSyncFlow } from '../hooks/useSyncFlow'
+import { formatBytes, formatRoomCodeDisplay } from '../utils/syncUri'
+import { api } from '../wailsApi'
 import { QrCodeSvg } from './QrCodeSvg'
+import { SyncSasPrompt } from './SyncSasPrompt'
 
 interface Props {
-  relayUrl: string
+  relay: SyncRelayStatus | null
   onBusyChange?: (busy: boolean) => void
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
 
-type SendStage = 'waiting' | 'requested' | 'approved' | 'consumed' | 'rejected' | 'expired' | 'error'
+export const SyncSendTab: React.FC<Props> = ({ relay, onBusyChange, onToast }) => {
+  const [sendMode, setSendMode] = useState<1 | 2>(1)
+  const [includeRelay, setIncludeRelay] = useState(true)
 
-const OFFLINE_EXPIRY_GRACE_MS = 30_000
-const MAX_CONSECUTIVE_POLL_ERRORS_NO_EXPIRY = 20
+  const { copied: copiedCode, copy: copyCode } = useCopyFeedback()
+  const { copied: copiedUri, copy: copyUri } = useCopyFeedback()
 
-const isActiveStage = (stage: SendStage) =>
-  stage === 'waiting' || stage === 'requested' || stage === 'approved'
-
-const isAutoCancelStage = (stage: SendStage) =>
-  stage === 'waiting' || stage === 'requested'
-
-export const SyncSendTab: React.FC<Props> = ({ relayUrl, onBusyChange, onToast }) => {
-  const [sess, setSess] = useState<SyncSendSession | null>(null)
-  const [stage, setStage] = useState<SendStage>('waiting')
-  const [pendingReq, setPendingReq] = useState<SyncSendPollResult | null>(null)
-  const [statusMessage, setStatusMessage] = useState('')
-  const [pollError, setPollError] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [decisionBusy, setDecisionBusy] = useState(false)
-  const [revoking, setRevoking] = useState(false)
-
-  const left = useSyncCountdown(sess?.expiresAt)
-  const { copied, copy, reset: resetCopy } = useCopyFeedback()
-
-  const mountedRef = useRef(true)
-  const actionBusyRef = useRef(false)
-  const pollGenRef = useRef(0)
-  const pollErrorCountRef = useRef(0)
-  const sessRef = useRef<SyncSendSession | null>(null)
-  sessRef.current = sess
-  const stageRef = useRef<SendStage>(stage)
-  stageRef.current = stage
-  const relayRef = useRef(relayUrl)
-  relayRef.current = relayUrl
-
-  const actionBusy = busy || decisionBusy || revoking
-
-  useEffect(() => {
-    onBusyChange?.(actionBusy)
-    return () => {
-      onBusyChange?.(false)
-    }
-  }, [actionBusy, onBusyChange])
-
-  useEffect(() => {
-    mountedRef.current = true
-    return () => {
-      mountedRef.current = false
-      const s = sessRef.current
-      if (s && isAutoCancelStage(stageRef.current)) {
-        void api.cancelSyncSend(s.sessionId, s.relayUrl || relayRef.current).catch(() => {})
-      }
-    }
-  }, [])
-
-  useSyncPolling({
-    enabled: Boolean(sess && isActiveStage(stage)),
-    intervalMs: 1500,
-    resetKey: sess?.sessionId ?? '',
-    poll: async () => {
-      const current = sessRef.current
-      if (!current || !mountedRef.current || !isActiveStage(stageRef.current)) return false
-      const pollGen = pollGenRef.current
-      try {
-        const res = await api.pollSyncSend(current.sessionId)
-        if (!mountedRef.current || sessRef.current?.sessionId !== current.sessionId) return false
-        if (pollGen !== pollGenRef.current) {
-          return isActiveStage(stageRef.current)
-        }
-        if (pollErrorCountRef.current > 0) {
-          pollErrorCountRef.current = 0
-          setPollError('')
-        }
-        const curStage = stageRef.current
-        if (!isActiveStage(curStage)) return false
-        switch (res.status) {
-          case 'waiting':
-            return true
-          case 'requested':
-            if (curStage === 'approved') return true
-            setPendingReq((prev) =>
-              prev?.requestId === res.requestId && prev?.receiverCode === res.receiverCode ? prev : res
-            )
-            stageRef.current = 'requested'
-            setStage('requested')
-            return true
-          case 'approved':
-            stageRef.current = 'approved'
-            setStage('approved')
-            return true
-          case 'consumed':
-            stageRef.current = 'consumed'
-            setStage('consumed')
-            onToast(res.message || '对方已成功接收配置，中继密文已焚毁')
-            return false
-          case 'rejected':
-            if (curStage === 'approved') return true
-            stageRef.current = 'rejected'
-            setStage('rejected')
-            setStatusMessage(res.message || '已拒绝该同步请求')
-            return false
-          case 'expired':
-            stageRef.current = 'expired'
-            setStage('expired')
-            setStatusMessage(res.message || '同步码已过期，请重新生成')
-            return false
-          case 'error':
-            stageRef.current = 'error'
-            setStage('error')
-            setStatusMessage(res.message || '配对验证失败')
-            onToast(res.message || '配对验证失败', 'error')
-            return false
-          default:
-            return true
-        }
-      } catch (err) {
-        if (!mountedRef.current || sessRef.current?.sessionId !== current.sessionId) return false
-        if (pollGen !== pollGenRef.current) return isActiveStage(stageRef.current)
-        if (!isActiveStage(stageRef.current)) return false
-        const cnt = ++pollErrorCountRef.current
-        const msg = errMsg(err)
-        const expiresMs = current.expiresAt ? new Date(current.expiresAt).getTime() : Number.NaN
-        const expiredPastGrace = Number.isFinite(expiresMs)
-          ? Date.now() >= expiresMs + OFFLINE_EXPIRY_GRACE_MS
-          : cnt >= MAX_CONSECUTIVE_POLL_ERRORS_NO_EXPIRY
-        if (expiredPastGrace) {
-          pollErrorCountRef.current = 0
-          setPollError('')
-          stageRef.current = 'expired'
-          setStage('expired')
-          const expiredText = '连接中继失败且同步码已超过有效期，请检查网络后重新生成'
-          setStatusMessage(expiredText)
-          onToast(expiredText, 'error')
-          return false
-        }
-        if (cnt >= 2) {
-          setPollError(`轮询中继失败（连续 ${cnt} 次）：${msg}`)
-        }
-        return true
-      }
+  const flow = useSyncFlow({
+    onToast,
+    onCompleted: () => {
+      onToast('✓ 对方已成功接收配置，临时房间与会话密钥已焚毁')
     },
   })
 
-  const gen = async () => {
-    if (actionBusyRef.current) return
-    actionBusyRef.current = true
-    pollGenRef.current++
-    pollErrorCountRef.current = 0
-    setPollError('')
-    setBusy(true)
-    const prevSess = sessRef.current
-    const prevStage = stageRef.current
-    const targetRelay = relayUrl
-    try {
-      if (prevSess && isActiveStage(prevStage)) {
-        await api.cancelSyncSend(prevSess.sessionId, prevSess.relayUrl || targetRelay).catch(() => {})
-      }
-      if (!mountedRef.current) return
-      const next = await api.startSyncSend(targetRelay)
-      if (!mountedRef.current) {
-        void api.cancelSyncSend(next.sessionId, next.relayUrl || relayRef.current).catch(() => {})
-        return
-      }
-      pollGenRef.current++
-      pollErrorCountRef.current = 0
-      sessRef.current = next
-      stageRef.current = 'waiting'
-      setSess(next)
-      setStage('waiting')
-      setPendingReq(null)
-      setStatusMessage('')
-      setPollError('')
-      resetCopy()
-      onToast('同步码已生成，等待接收端确认后才会加密上传')
-    } catch (e) {
-      if (mountedRef.current) onToast(errMsg(e), 'error')
-    } finally {
-      actionBusyRef.current = false
-      if (mountedRef.current) setBusy(false)
+  const busy = flow.starting || flow.submittingSas || flow.cancelling
+  useEffect(() => {
+    onBusyChange?.(busy)
+    return () => {
+      onBusyChange?.(false)
     }
+  }, [busy, onBusyChange])
+
+  const isCustomRelay = relay?.mode === 'custom'
+  const pairUri = flow.status?.pairUri || flow.session?.pairUri || ''
+  const roomCode = flow.status?.roomCode || flow.session?.roomCode || ''
+  const expiresAt = flow.status?.expiresAt || flow.session?.expiresAt
+  const left = useSyncCountdown(expiresAt)
+  const st = flow.status?.state
+
+  const handleStart = async () => {
+    await flow.startFlow(() =>
+      api.startSyncOneShotSend(sendMode, isCustomRelay ? includeRelay : false)
+    )
   }
 
-  const revoke = async () => {
-    const current = sessRef.current
-    if (!current || actionBusyRef.current) return
-    const currentId = current.sessionId
-    actionBusyRef.current = true
-    pollGenRef.current++
-    setRevoking(true)
-    try {
-      await api.cancelSyncSend(currentId, current.relayUrl || relayUrl)
-      if (!mountedRef.current || sessRef.current?.sessionId !== currentId) return
-      pollGenRef.current++
-      pollErrorCountRef.current = 0
-      sessRef.current = null
-      stageRef.current = 'waiting'
-      setSess(null)
-      setPendingReq(null)
-      setStage('waiting')
-      setStatusMessage('')
-      setPollError('')
-      onToast('已撤销同步码')
-    } catch (e) {
-      if (mountedRef.current && sessRef.current?.sessionId === currentId) onToast(errMsg(e), 'error')
-    } finally {
-      actionBusyRef.current = false
-      if (mountedRef.current) setRevoking(false)
-    }
-  }
-
-  const approve = async () => {
-    const current = sessRef.current
-    if (!current || !pendingReq?.requestId || !pendingReq.receiverCode || actionBusyRef.current) return
-    const currentId = current.sessionId
-    actionBusyRef.current = true
-    pollGenRef.current++
-    setDecisionBusy(true)
-    try {
-      await api.approveSyncSend(currentId, pendingReq.requestId, pendingReq.receiverCode)
-      if (!mountedRef.current || sessRef.current?.sessionId !== currentId) return
-      pollGenRef.current++
-      pollErrorCountRef.current = 0
-      stageRef.current = 'approved'
-      setStage('approved')
-      setPollError('')
-      onToast('已同意并上传双向加密数据')
-    } catch (e) {
-      if (mountedRef.current && sessRef.current?.sessionId === currentId) {
-        const msg = errMsg(e)
-        if (msg.includes('已过期') || msg.includes('未找到')) {
-          pollGenRef.current++
-          stageRef.current = 'expired'
-          setStage('expired')
-          setPollError('')
-          setStatusMessage(msg)
-        }
-        onToast(msg, 'error')
-      }
-    } finally {
-      actionBusyRef.current = false
-      if (mountedRef.current) setDecisionBusy(false)
-    }
-  }
-
-  const reject = async () => {
-    const current = sessRef.current
-    if (!current || !pendingReq?.requestId || actionBusyRef.current) return
-    const currentId = current.sessionId
-    actionBusyRef.current = true
-    pollGenRef.current++
-    setDecisionBusy(true)
-    try {
-      await api.rejectSyncSend(currentId, pendingReq.requestId)
-      if (!mountedRef.current || sessRef.current?.sessionId !== currentId) return
-      pollGenRef.current++
-      pollErrorCountRef.current = 0
-      stageRef.current = 'rejected'
-      setStage('rejected')
-      setPendingReq(null)
-      setPollError('')
-      setStatusMessage('已拒绝该接收端请求，未上传任何保险库数据')
-      onToast('已拒绝不一致的同步请求')
-    } catch (e) {
-      if (mountedRef.current && sessRef.current?.sessionId === currentId) onToast(errMsg(e), 'error')
-    } finally {
-      actionBusyRef.current = false
-      if (mountedRef.current) setDecisionBusy(false)
-    }
-  }
-
-  const handleCopyCode = async () => {
-    if (!sess) return
-    const ok = await copy(sess.code)
-    if (!mountedRef.current) return
-    if (ok) onToast('同步码已复制')
-    else onToast('复制失败，请手动记录', 'error')
-  }
-
-  if (!sess) {
+  if (!flow.session) {
     return (
       <div className="space-y-4">
-        <div className="rounded-xl bg-[#0d111a] border border-ag-border p-4 space-y-2">
-          <div className="flex items-center gap-2 text-xs font-medium text-indigo-300">
-            <ShieldCheck className="w-4 h-4 shrink-0" /><span>双向核对 · 端到端零知识加密同步</span>
-          </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          <button
+            type="button"
+            onClick={() => setSendMode(1)}
+            className={`text-left p-3.5 rounded-xl border transition ${
+              sendMode === 1
+                ? 'bg-indigo-500/15 border-indigo-400/60'
+                : 'bg-[#0d111a] border-ag-border hover:border-ag-borderStrong'
+            }`}
+          >
+            <div className="flex items-center gap-2 text-xs font-semibold text-ag-text">
+              <QrCode className="w-4 h-4 text-indigo-300" />
+              <span>扫码速传 (QR)</span>
+            </div>
+            <p className="text-[11px] text-ag-muted mt-1 leading-relaxed">
+              内嵌 128-bit 一次性带外密钥，手机扫码即自动握手解密，阅后即焚。
+            </p>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setSendMode(2)}
+            className={`text-left p-3.5 rounded-xl border transition ${
+              sendMode === 2
+                ? 'bg-indigo-500/15 border-indigo-400/60'
+                : 'bg-[#0d111a] border-ag-border hover:border-ag-borderStrong'
+            }`}
+          >
+            <div className="flex items-center gap-2 text-xs font-semibold text-ag-text">
+              <KeyRound className="w-4 h-4 text-cyan-300" />
+              <span>8 位码 + 6 位安全码</span>
+            </div>
+            <p className="text-[11px] text-ag-muted mt-1 leading-relaxed">
+              无需摄像头，输入 8 位房间码并通过 6 位安全码双向防掉包核验。
+            </p>
+          </button>
+        </div>
+
+        {isCustomRelay && (
+          <label className="flex items-center justify-between gap-2 rounded-xl bg-[#0d111a] border border-amber-500/30 px-3.5 py-2.5 cursor-pointer">
+            <span className="text-xs text-amber-200">
+              携带自定义中继（接收端扫码可免配置直接通过私有中继拉取）
+            </span>
+            <input
+              type="checkbox"
+              checked={includeRelay}
+              onChange={(e) => setIncludeRelay(e.target.checked)}
+              className="rounded border-ag-border bg-ag-panel text-indigo-500 focus:ring-0"
+            />
+          </label>
+        )}
+
+        <div className="rounded-xl bg-[#0d111a] border border-ag-border p-3.5 flex items-start gap-2.5">
+          <ShieldCheck className="w-4 h-4 text-indigo-300 shrink-0 mt-0.5" />
           <p className="text-xs text-ag-muted leading-relaxed">
-            生成同步码后暂不上传保险库数据。只有当接收端提交请求且您当面核对双方屏幕上的确认码一致并点击同意后，才使用双端密钥联合加密上传，领取即焚。
+            一次性迁移不保存设备信任状态：全程使用临时 X25519 密钥协商与分块 AEAD 加密直传，传输结束或取消后中继即刻销毁房间。
           </p>
         </div>
-        <button onClick={() => void gen()} disabled={actionBusy} className="w-full py-3 rounded-xl bg-indigo-500 hover:bg-indigo-400 disabled:opacity-60 text-white text-sm font-medium transition shadow-glow flex items-center justify-center gap-2">
-          {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <QrCode className="w-4 h-4" />}
-          {busy ? '正在初始化通道...' : '一键生成同步码'}
+
+        <button
+          type="button"
+          disabled={flow.starting}
+          onClick={() => void handleStart()}
+          className="w-full py-3 rounded-xl bg-indigo-500 hover:bg-indigo-400 disabled:opacity-60 text-white text-sm font-medium transition shadow-glow flex items-center justify-center gap-2"
+        >
+          {flow.starting ? <Loader2 className="w-4 h-4 animate-spin" /> : sendMode === 1 ? <QrCode className="w-4 h-4" /> : <KeyRound className="w-4 h-4" />}
+          {flow.starting ? '正在创建一次性加密通道...' : sendMode === 1 ? '生成扫码速传二维码' : '生成 8 位同步房间码'}
         </button>
       </div>
     )
   }
 
-  if (stage === 'consumed') {
+  if (st === 'completed') {
     return (
       <div className="space-y-4">
         <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/35 p-5 space-y-2 text-center">
           <div className="flex items-center justify-center gap-2 text-sm font-semibold text-emerald-300">
             <CheckCircle2 className="w-5 h-5" />
-            <span>✓ 对方已成功接收配置，中继密文已焚毁</span>
+            <span>✓ 对方已成功接收配置，临时房间已焚毁</span>
           </div>
           <p className="text-xs text-ag-muted">
-            接收端已使用双方同步码与确认码解密预览，中继服务器上的密文已自动销毁。
+            本次端到端加密直传已完成且校验通过，未在远端中继遗留任何数据。
           </p>
         </div>
-        <button onClick={() => void gen()} disabled={actionBusy} className="w-full py-2.5 rounded-xl bg-ag-elevated hover:bg-ag-hover border border-ag-border text-xs font-medium text-ag-text flex items-center justify-center gap-1.5 disabled:opacity-50">
-          {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-          再次生成同步码
+        <button
+          type="button"
+          onClick={() => flow.resetFlow()}
+          className="w-full py-2.5 rounded-xl bg-ag-elevated hover:bg-ag-hover border border-ag-border text-xs font-medium text-ag-text flex items-center justify-center gap-1.5"
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+          返回并发起新的发送
         </button>
       </div>
     )
   }
 
-  const expired = stage === 'expired'
-  const stats = [['服务器', sess.serverCount], ['密钥', sess.keyCount], ['快捷', sess.shortcutCount], ['模板', sess.templateCount]]
-  const isAndroidReq = (pendingReq?.receiverPlatform || '').toLowerCase() === 'android'
+  const sess = flow.session
+  const hasCounts =
+    sess.serverCount !== undefined ||
+    sess.keyCount !== undefined ||
+    sess.shortcutCount !== undefined ||
+    sess.templateCount !== undefined
 
   return (
     <div className="space-y-4">
       <div className="rounded-xl bg-[#0d111a] border border-ag-border p-4 flex flex-col sm:flex-row items-center gap-4">
-        <QrCodeSvg value={sess.qrText} size={156} />
+        {sess.mode === 1 && pairUri && <QrCodeSvg value={pairUri} size={184} />}
         <div className="flex-1 w-full space-y-2.5 text-center sm:text-left">
-          <div className="text-[11px] text-ag-muted">发送端同步码（在接收端输入或扫码发起验证）</div>
-          <div className="flex items-center justify-center sm:justify-start gap-2">
-            <span className="font-mono text-2xl font-bold tracking-[0.18em] text-indigo-200 bg-ag-elevated px-3.5 py-2 rounded-xl border border-indigo-500/35 select-all">{sess.code}</span>
-            <button onClick={() => void handleCopyCode()} title="复制" aria-label="复制同步码" className="p-2.5 rounded-xl bg-ag-elevated hover:bg-ag-hover border border-ag-border text-ag-text">
-              {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-            </button>
+          <div className="text-[11px] text-ag-muted">
+            {sess.mode === 1
+              ? '接收端使用 GravitySSH 扫码即可自动接收（或复制配对链接）'
+              : '请在接收端输入以下 8 位房间码，随后在此输入对方显示的 6 位安全码'}
           </div>
-          <div className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg border ${expired ? 'bg-rose-500/10 border-rose-500/30 text-rose-300' : 'bg-cyan-500/10 border-cyan-500/30 text-cyan-300'}`}>
+
+          {roomCode && (
+            <div className="flex items-center justify-center sm:justify-start gap-2">
+              <span className="font-mono text-2xl font-bold tracking-[0.18em] text-indigo-200 bg-ag-elevated px-3.5 py-2 rounded-xl border border-indigo-500/35 select-all">
+                {formatRoomCodeDisplay(roomCode)}
+              </span>
+              <button
+                type="button"
+                onClick={() => void copyCode(formatRoomCodeDisplay(roomCode)).then((ok) => ok && onToast('房间码已复制'))}
+                title="复制房间码"
+                aria-label="复制房间码"
+                className="p-2.5 rounded-xl bg-ag-elevated hover:bg-ag-hover border border-ag-border text-ag-text"
+              >
+                {copiedCode ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+              </button>
+            </div>
+          )}
+
+          {sess.mode === 1 && pairUri && (
+            <div>
+              <button
+                type="button"
+                onClick={() => void copyUri(pairUri).then((ok) => ok && onToast('一次性速传链接已复制（含密钥，请勿公开转发）'))}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-ag-elevated hover:bg-ag-hover border border-ag-border text-xs text-ag-text"
+              >
+                {copiedUri ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                复制一次性配对链接
+              </button>
+            </div>
+          )}
+
+          <div className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-300">
             <Clock className="w-3.5 h-3.5" />
-            <span>{expired ? '已过期，请重新生成' : left <= 0 ? '即将过期 · 等待中继确认状态' : `倒计时 ${fmtSec(left)} · 双向确认后上传`}</span>
+            <span>{left > 0 ? `房间倒计时 ${fmtSec(left)}` : '等待中继确认状态...'}</span>
           </div>
-          <div className="grid grid-cols-4 gap-1.5 pt-1 text-center">
-            {stats.map(([k, v]) => (
-              <div key={String(k)} className="rounded-lg bg-ag-panel border border-ag-border py-1.5 px-1">
-                <div className="text-sm font-semibold text-ag-text font-mono">{v}</div>
-                <div className="text-[10px] text-ag-muted">{k}</div>
-              </div>
-            ))}
-          </div>
+
+          {hasCounts && (
+            <div className="grid grid-cols-4 gap-1.5 pt-1 text-center">
+              {[
+                ['主机', sess.serverCount ?? 0],
+                ['密钥', sess.keyCount ?? 0],
+                ['快捷', sess.shortcutCount ?? 0],
+                ['模板', sess.templateCount ?? 0],
+              ].map(([k, v]) => (
+                <div key={String(k)} className="rounded-lg bg-ag-panel border border-ag-border py-1.5 px-1">
+                  <div className="text-sm font-semibold text-ag-text font-mono">{v}</div>
+                  <div className="text-[10px] text-ag-muted">{k}</div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
-      {stage === 'waiting' && (
+      {st === 'waiting_peer' && (
         <div className="rounded-xl bg-indigo-500/10 border border-indigo-500/25 px-4 py-3 flex items-center gap-2.5 text-xs text-indigo-200">
           <Loader2 className="w-4 h-4 animate-spin shrink-0 text-indigo-300" />
-          <span>等待接收端输入同步码并提交确认...</span>
+          <span>等待接收端扫码或输入房间码连接...</span>
         </div>
       )}
 
-      {stage === 'requested' && pendingReq && (
-        <div className="rounded-xl bg-amber-500/10 border border-amber-500/40 p-4 space-y-3">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg bg-amber-500/20 border border-amber-500/35 flex items-center justify-center text-amber-300">
-                {isAndroidReq ? <Smartphone className="w-4 h-4" /> : <Laptop className="w-4 h-4" />}
-              </div>
-              <div>
-                <div className="text-xs font-semibold text-ag-text">
-                  收到接收端请求：{pendingReq.receiverDevice || '未知设备'}
-                </div>
-                <div className="text-[11px] text-ag-muted">
-                  平台：{pendingReq.receiverPlatform || 'unknown'}
-                </div>
-              </div>
-            </div>
-            <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-200 border border-amber-500/35">
-              待确认
+      {st === 'awaiting_sas_input' && (
+        <SyncSasPrompt
+          variant="input"
+          attemptsRemaining={flow.status?.sasAttemptsRemaining}
+          busy={flow.submittingSas}
+          onSubmit={(code) => flow.submitSasInput(code)}
+          onCancel={() => void flow.cancelFlow()}
+        />
+      )}
+
+      {st === 'transferring' && (
+        <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/30 px-4 py-3 flex items-center justify-between gap-2 text-xs text-emerald-200">
+          <span className="flex items-center gap-2">
+            <Loader2 className="w-4 h-4 animate-spin shrink-0 text-emerald-300" />
+            正在端到端分块加密传输配置...
+          </span>
+          {(flow.status?.bytesTotal ?? 0) > 0 && (
+            <span className="font-mono">
+              {formatBytes(flow.status?.bytesDone)} / {formatBytes(flow.status?.bytesTotal)}
             </span>
-          </div>
-
-          <div className="rounded-xl bg-[#0b0d12] border border-amber-500/35 p-3 text-center space-y-1">
-            <div className="text-[11px] text-ag-muted">对方接收确认码（请核对是否与对方屏幕完全一致）</div>
-            <div className="font-mono text-2xl font-bold tracking-[0.22em] text-amber-300 select-all">
-              {pendingReq.receiverCode}
-            </div>
-          </div>
-
-          <div className="flex items-start gap-2 text-[11px] text-amber-200 leading-relaxed">
-            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-300" />
-            <span>请务必确认对方设备屏幕显示的「本机确认码」与上方完全一致。若不一致或非本人操作，请立即拒绝！</span>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
-            <button
-              onClick={() => void reject()}
-              disabled={actionBusy || expired}
-              className="py-2.5 px-3 rounded-xl text-xs font-medium bg-rose-500/[0.12] hover:bg-rose-500/20 text-rose-300 border border-rose-500/35 flex items-center justify-center gap-1.5 disabled:opacity-50"
-            >
-              <XCircle className="w-4 h-4" />
-              不一致，拒绝
-            </button>
-            <button
-              onClick={() => void approve()}
-              disabled={actionBusy || expired}
-              className="py-2.5 px-3 rounded-xl text-xs font-medium bg-emerald-600 hover:bg-emerald-500 text-white shadow-glow flex items-center justify-center gap-1.5 disabled:opacity-50"
-            >
-              {decisionBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-              {decisionBusy ? '正在加密上传...' : '确认一致，同意发送'}
-            </button>
-          </div>
+          )}
         </div>
       )}
 
-      {stage === 'approved' && (
-        <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/30 px-4 py-3 flex items-center gap-2.5 text-xs text-emerald-200">
-          <Loader2 className="w-4 h-4 animate-spin shrink-0 text-emerald-300" />
-          <span>✓ 已同意并上传加密数据，等待接收端拉取...</span>
-        </div>
-      )}
-
-      {pollError && isActiveStage(stage) && (
-        <div className="rounded-xl bg-amber-500/10 border border-amber-500/35 px-4 py-2.5 flex items-center gap-2 text-xs text-amber-200">
-          <AlertTriangle className="w-4 h-4 shrink-0 text-amber-300" />
-          <span className="break-all">{pollError}</span>
-        </div>
-      )}
-
-      {(stage === 'rejected' || stage === 'error' || stage === 'expired') && (
+      {(st === 'error' || st === 'cancelled') && (
         <div className="rounded-xl bg-rose-500/10 border border-rose-500/35 px-4 py-3 flex items-center gap-2.5 text-xs text-rose-200">
           <ShieldAlert className="w-4 h-4 shrink-0 text-rose-300" />
-          <span>{statusMessage || (stage === 'expired' ? '同步码已过期，请重新生成' : '配对已中止')}</span>
+          <span>{flow.status?.message || flow.error || '发送已中止或房间已过期'}</span>
         </div>
       )}
 
-      <div className="flex justify-between gap-2">
-        <button onClick={() => void revoke()} disabled={actionBusy} className="px-3 py-2 rounded-lg text-xs font-medium bg-rose-500/[0.12] hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center gap-1.5 disabled:opacity-50">
-          {revoking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}撤销同步码
-        </button>
-        <button onClick={() => void gen()} disabled={actionBusy} className="px-3 py-2 rounded-lg text-xs font-medium bg-ag-elevated hover:bg-ag-hover text-ag-text border border-ag-border flex items-center gap-1.5 disabled:opacity-50">
-          {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}重新生成
-        </button>
-      </div>
+      {st !== 'awaiting_sas_input' && (
+        <div className="flex justify-between gap-2">
+          {flow.isActive ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void flow.cancelFlow()}
+              className="px-3 py-2 rounded-lg text-xs font-medium bg-rose-500/[0.12] hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center gap-1.5 disabled:opacity-50"
+            >
+              {flow.cancelling ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+              取消发送
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => flow.resetFlow()}
+              className="px-3 py-2 rounded-lg text-xs font-medium bg-ag-elevated hover:bg-ag-hover text-ag-muted hover:text-ag-text border border-ag-border"
+            >
+              切换发送方式
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void handleStart()}
+            className="px-3 py-2 rounded-lg text-xs font-medium bg-ag-elevated hover:bg-ag-hover text-ag-text border border-ag-border flex items-center gap-1.5 disabled:opacity-50"
+          >
+            {flow.starting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            重新生成
+          </button>
+        </div>
+      )}
     </div>
   )
 }
