@@ -23,7 +23,7 @@ func DefaultSettings() AppSettings {
 		AutocompleteEnabled:     true,
 		AutocompleteFromHistory: true,
 		AutoOpenSFTP:            true,
-		TerminalFontFamily:      "Cascadia Mono, Consolas, Courier New, monospace",
+		TerminalFontFamily:      "\"SF Mono\", \"Menlo\", \"Monaco\", \"Cascadia Mono\", \"Consolas\", \"Courier New\", monospace",
 		TerminalFontSize:        14,
 		DefaultKeepAliveSeconds: 30,
 		MaxHistoryEntries:       2000,
