@@ -337,7 +337,7 @@ func (m *Manager) SendToDevice(ctx context.Context, store *vault.Store, deviceID
 			Status:    "sent_spool",
 			MsgID:     res.MsgID,
 			ExpiresAt: formatUnixRFC3339(res.ExpiresAt),
-			Message:   "已端到端加密投递至对方离线信箱",
+			Message:   "已发送至对方离线收件箱",
 		}, nil
 	}
 
@@ -376,7 +376,7 @@ func (m *Manager) SendToDevice(ctx context.Context, store *vault.Store, deviceID
 		PairURI:   offer.PairURI,
 		RoomCode:  offer.DisplayCode,
 		ExpiresAt: formatUnixRFC3339(offer.ExpiresAt),
-		Message:   "实时直传通道已就绪，请在对端扫码或输入房间码接收",
+		Message:   "直传已就绪，请在对端扫码或输入房间码",
 	}, nil
 }
 
