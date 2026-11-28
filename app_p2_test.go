@@ -139,3 +139,26 @@ func TestApplySyncReceivePreservesPreviewOnErrorAndDeletesOnSuccess(t *testing.T
 		t.Fatal("expected ClearSyncPreview('') to wipe all previews")
 	}
 }
+
+func TestSSHKeyOpenDialogOptionsDarwinVsWindows(t *testing.T) {
+	fakeHome := t.TempDir()
+	sshDir := filepath.Join(fakeHome, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	macOpts := sshKeyOpenDialogOptionsForGOOS("darwin", fakeHome)
+	if macOpts.Filters != nil || !macOpts.ShowHiddenFiles || macOpts.DefaultDirectory != sshDir {
+		t.Fatalf("unexpected darwin OpenDialogOptions: %+v", macOpts)
+	}
+
+	macNoSSH := sshKeyOpenDialogOptionsForGOOS("darwin", t.TempDir())
+	if macNoSSH.Filters != nil || !macNoSSH.ShowHiddenFiles || macNoSSH.DefaultDirectory != "" {
+		t.Fatalf("unexpected darwin OpenDialogOptions without ~/.ssh: %+v", macNoSSH)
+	}
+
+	winOpts := sshKeyOpenDialogOptionsForGOOS("windows", fakeHome)
+	if len(winOpts.Filters) == 0 || winOpts.ShowHiddenFiles {
+		t.Fatalf("unexpected windows OpenDialogOptions: %+v", winOpts)
+	}
+}
