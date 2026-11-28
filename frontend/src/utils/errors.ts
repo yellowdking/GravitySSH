@@ -5,18 +5,51 @@ export function errMsg(err: unknown): string {
   return msg.replace(/^Error:\s*/i, '')
 }
 
+export function isMacPlatform(ua?: string): boolean {
+  const source =
+    ua ??
+    (typeof navigator !== 'undefined'
+      ? `${navigator.platform || ''} ${navigator.userAgent || ''}`
+      : '')
+  return /Mac|Macintosh|MacIntel|MacPPC|Mac68K/i.test(source) && !/iPhone|iPad|iPod/i.test(source)
+}
+
 export async function copyToClipboard(text: string): Promise<boolean> {
+  const rt = typeof window !== 'undefined' ? window.runtime : undefined
+  if (typeof rt?.ClipboardSetText === 'function') {
+    try {
+      const ok = await rt.ClipboardSetText(text)
+      if (ok !== false) return true
+    } catch {
+      // Fall through to navigator.clipboard
+    }
+  }
   try {
-    await navigator.clipboard.writeText(text)
-    return true
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+    return false
   } catch {
     return false
   }
 }
 
 export async function readFromClipboard(): Promise<string | null> {
+  const rt = typeof window !== 'undefined' ? window.runtime : undefined
+  if (typeof rt?.ClipboardGetText === 'function') {
+    try {
+      const text = await rt.ClipboardGetText()
+      if (typeof text === 'string') return text
+    } catch {
+      // Fall through to navigator.clipboard
+    }
+  }
   try {
-    return await navigator.clipboard.readText()
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
+      return await navigator.clipboard.readText()
+    }
+    return null
   } catch {
     return null
   }

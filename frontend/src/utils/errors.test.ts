@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type React from 'react'
-import { insertTabIndent, isAllowedExternalUrl } from './errors'
+import { copyToClipboard, insertTabIndent, isAllowedExternalUrl, isMacPlatform, readFromClipboard } from './errors'
 
 function makeKeyEvent(overrides: Partial<{
   key: string
@@ -67,7 +67,7 @@ describe('insertTabIndent', () => {
   })
 })
 
-describe('isAllowedExternalUrl', () => {
+describe('isAllowedExternalUrl & isMacPlatform', () => {
   it('allows only http and https URLs', () => {
     expect(isAllowedExternalUrl('https://github.com/yellowdking/GravitySSH')).toBe(true)
     expect(isAllowedExternalUrl('http://127.0.0.1:8080/health')).toBe(true)
@@ -75,5 +75,55 @@ describe('isAllowedExternalUrl', () => {
     expect(isAllowedExternalUrl('file:///C:/Windows/win.ini')).toBe(false)
     expect(isAllowedExternalUrl('data:text/html,hi')).toBe(false)
     expect(isAllowedExternalUrl('not-a-url')).toBe(false)
+  })
+
+  it('detects macOS user agents without matching iOS or Windows', () => {
+    expect(isMacPlatform('MacIntel Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15')).toBe(true)
+    expect(isMacPlatform('Win32 Mozilla/5.0 (Windows NT 10.0; Win64; x64)')).toBe(false)
+    expect(isMacPlatform('iPhone Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)')).toBe(false)
+  })
+})
+
+describe('Wails native clipboard priority & navigator fallback', () => {
+  it('prefers window.runtime.ClipboardSetText / ClipboardGetText over navigator.clipboard', async () => {
+    const origWin = (globalThis as { window?: unknown }).window
+    const origNav = globalThis.navigator
+    const wailsSet = vi.fn().mockResolvedValue(true)
+    const wailsGet = vi.fn().mockResolvedValue('from-wails-pbpaste')
+    const navWrite = vi.fn().mockResolvedValue(undefined)
+    const navRead = vi.fn().mockResolvedValue('from-navigator')
+
+    ;(globalThis as unknown as { window: Window }).window = {
+      runtime: {
+        EventsOn: vi.fn(() => () => {}),
+        ClipboardSetText: wailsSet,
+        ClipboardGetText: wailsGet,
+      },
+    } as unknown as Window
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: { clipboard: { writeText: navWrite, readText: navRead } },
+    })
+
+    try {
+      expect(await copyToClipboard('ssh-ed25519 AAAA')).toBe(true)
+      expect(wailsSet).toHaveBeenCalledWith('ssh-ed25519 AAAA')
+      expect(navWrite).not.toHaveBeenCalled()
+
+      expect(await readFromClipboard()).toBe('from-wails-pbpaste')
+      expect(wailsGet).toHaveBeenCalledTimes(1)
+      expect(navRead).not.toHaveBeenCalled()
+
+      // Falls back to navigator.clipboard if Wails runtime throws
+      wailsSet.mockRejectedValueOnce(new Error('unavailable'))
+      wailsGet.mockRejectedValueOnce(new Error('unavailable'))
+      expect(await copyToClipboard('fallback')).toBe(true)
+      expect(navWrite).toHaveBeenCalledWith('fallback')
+      expect(await readFromClipboard()).toBe('from-navigator')
+      expect(navRead).toHaveBeenCalledTimes(1)
+    } finally {
+      ;(globalThis as { window?: unknown }).window = origWin
+      Object.defineProperty(globalThis, 'navigator', { configurable: true, value: origNav })
+    }
   })
 })

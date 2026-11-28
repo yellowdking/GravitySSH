@@ -5,6 +5,7 @@ import type { SearchAddon } from '@xterm/addon-search'
 import type { AppSettings, CompletionItem } from '../types'
 import { api } from '../wailsApi'
 import { applyTerminalInputToLine, sanitizePasteText } from '../utils/autocomplete'
+import { copyToClipboard } from '../utils/errors'
 import { inspectPasteSafety } from '../utils/pasteGuard'
 import { createLogHighlighter } from '../utils/keywordHighlight'
 import { base64ToUint8Array, DEFAULT_TERMINAL_FONT } from '../components/terminalTheme'
@@ -201,6 +202,20 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
       }
     })
 
+    const onCopy = (e: ClipboardEvent) => {
+      const hasSel = typeof term.hasSelection === 'function' ? term.hasSelection() : Boolean(term.getSelection())
+      if (!hasSel) return
+      const sel = term.getSelection()
+      if (!sel) return
+      if (e.clipboardData) {
+        e.clipboardData.setData('text/plain', sel)
+        e.preventDefault()
+        e.stopImmediatePropagation()
+      } else {
+        e.preventDefault()
+        void copyToClipboard(sel)
+      }
+    }
     const onPaste = (e: ClipboardEvent) => {
       const t = e.clipboardData?.getData('text/plain')
       if (t) {
@@ -209,6 +224,7 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
         pasteText(t)
       }
     }
+    el.addEventListener('copy', onCopy, true)
     el.addEventListener('paste', onPaste, true)
     bindInput({
       term,
@@ -318,6 +334,7 @@ export function useTerminalInstance(opts: UseTerminalOptions) {
     ro.observe(el)
     return () => {
       clearTimeout(roT)
+      el.removeEventListener('copy', onCopy, true)
       el.removeEventListener('paste', onPaste, true)
       ime.detach()
       imeRef.current = null

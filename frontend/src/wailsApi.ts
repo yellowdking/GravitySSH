@@ -13,6 +13,8 @@ declare global {
       EventsOn: (eventName: string, callback: (...data: unknown[]) => void) => () => void
       OnFileDrop?: (callback: (x: number, y: number, paths: string[]) => void, useDropTarget: boolean) => void
       OnFileDropOff?: () => void
+      ClipboardSetText?: (text: string) => Promise<boolean | void>
+      ClipboardGetText?: () => Promise<string>
     }
   }
 }
