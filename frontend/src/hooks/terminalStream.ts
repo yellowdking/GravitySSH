@@ -98,3 +98,10 @@ export function discardTerminalBuffer(sessionId: string) {
   earlyBuffers.delete(sessionId)
   listeners.delete(sessionId)
 }
+
+export function clearAllTerminalBuffers() {
+  for (const id of earlyBuffers.keys()) discardTerminalBuffer(id)
+  for (const id of listeners.keys()) discardTerminalBuffer(id)
+  earlyBuffers.clear()
+  listeners.clear()
+}

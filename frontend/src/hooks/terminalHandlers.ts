@@ -81,6 +81,22 @@ export function attachTerminalInputHandlers(d: HandlerDeps) {
     if (ev.isComposing || ev.keyCode === 229) return true
     const k = ev.key.toLowerCase()
     if ((ev.ctrlKey || ev.metaKey) && k === 'f') { ev.preventDefault(); d.onOpenSearch(); return false }
+    if (ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.shiftKey) {
+      if (k === 'c') {
+        const hasSel = typeof d.term.hasSelection === 'function' ? d.term.hasSelection() : Boolean(d.term.getSelection())
+        if (hasSel) {
+          ev.preventDefault()
+          const s = d.term.getSelection()
+          if (s) void copyToClipboard(s)
+          return false
+        }
+      }
+      if (k === 'v') {
+        ev.preventDefault()
+        void readFromClipboard().then((t) => { if (t) d.pasteText(t) })
+        return false
+      }
+    }
     if (ev.ctrlKey && ev.shiftKey && k === 'c') {
       ev.preventDefault()
       const s = d.term.getSelection()

@@ -5,9 +5,19 @@ vi.mock('@xterm/addon-fit', () => ({ FitAddon: vi.fn() }))
 vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: vi.fn() }))
 vi.mock('@xterm/addon-search', () => ({ SearchAddon: vi.fn() }))
 vi.mock('@xterm/addon-unicode11', () => ({ Unicode11Addon: vi.fn() }))
+vi.mock('../utils/errors', async () => {
+  const actual = await vi.importActual<typeof import('../utils/errors')>('../utils/errors')
+  return {
+    ...actual,
+    copyToClipboard: vi.fn(() => Promise.resolve(true)),
+    readFromClipboard: vi.fn(() => Promise.resolve('clipboard-payload')),
+  }
+})
 
 import type { Terminal } from '@xterm/xterm'
 import type { CompletionItem } from '../types'
+import { copyToClipboard, readFromClipboard } from '../utils/errors'
+import { api } from '../wailsApi'
 import { attachTerminalInputHandlers, syncTerminalImeAttrs } from './terminalHandlers'
 
 function createMockTerminal(options?: {
@@ -17,6 +27,7 @@ function createMockTerminal(options?: {
 }) {
   let wheelHandler: ((ev: WheelEvent) => boolean) | null = null
   let keyHandler: ((ev: KeyboardEvent) => boolean) | null = null
+  let currentSelection = options?.selection ?? ''
   const scrollLines = vi.fn()
   const attrs = new Map<string, string>()
 
@@ -35,7 +46,8 @@ function createMockTerminal(options?: {
     modes: { mouseTrackingMode: options?.mouseTrackingMode ?? 'none' },
     textarea,
     scrollLines,
-    getSelection: vi.fn(() => options?.selection ?? ''),
+    hasSelection: vi.fn(() => currentSelection.length > 0),
+    getSelection: vi.fn(() => currentSelection),
     attachCustomWheelEventHandler: vi.fn((fn: (ev: WheelEvent) => boolean) => {
       wheelHandler = fn
     }),
@@ -48,6 +60,9 @@ function createMockTerminal(options?: {
     term,
     attrs,
     scrollLines,
+    setSelection: (s: string) => {
+      currentSelection = s
+    },
     dispatchWheel: (deltaY: number) => {
       const preventDefault = vi.fn()
       const res = wheelHandler!({ deltaY, preventDefault } as unknown as WheelEvent)
@@ -61,6 +76,7 @@ function createMockTerminal(options?: {
         keyCode: 0,
         ctrlKey: false,
         metaKey: false,
+        altKey: false,
         shiftKey: false,
         preventDefault,
         ...overrides,
@@ -71,7 +87,7 @@ function createMockTerminal(options?: {
   }
 }
 
-describe('terminalHandlers', () => {
+describe('terminalHandlers & wailsApi file-drop multiplexing', () => {
   it('passes through IME composition key events even when autocomplete suggestions are open', () => {
     const mock = createMockTerminal({ bufferType: 'normal' })
     const onMoveSelection = vi.fn()
@@ -144,6 +160,83 @@ describe('terminalHandlers', () => {
     expect(mock.dispatchKey({ key: 'Tab' }).res).toBe(true)
     expect(onMoveSelection).toHaveBeenCalledTimes(2)
     expect(onApplySelected).toHaveBeenCalledTimes(1)
+  })
+
+  it('supports macOS Cmd+C (only when term.hasSelection()) and Cmd+V paste', async () => {
+    vi.mocked(copyToClipboard).mockClear()
+    vi.mocked(readFromClipboard).mockClear()
+
+    const mock = createMockTerminal({ selection: '' })
+    const pasteText = vi.fn()
+    attachTerminalInputHandlers({
+      term: mock.term,
+      enqueueWrite: vi.fn(),
+      pasteText,
+      suggestionsRef: { current: [] },
+      onOpenSearch: vi.fn(),
+      onMoveSelection: vi.fn(),
+      onApplySelected: vi.fn(),
+      onClearSuggestions: vi.fn(),
+    })
+
+    // Cmd+C without selection passes through without copying
+    const emptyCopy = mock.dispatchKey({ key: 'c', metaKey: true })
+    expect(emptyCopy.res).toBe(true)
+    expect(copyToClipboard).not.toHaveBeenCalled()
+
+    // Cmd+C with selection copies and consumes keydown
+    mock.setSelection('selected-ssh-output')
+    const selCopy = mock.dispatchKey({ key: 'c', metaKey: true })
+    expect(selCopy.res).toBe(false)
+    expect(selCopy.preventDefault).toHaveBeenCalledTimes(1)
+    expect(copyToClipboard).toHaveBeenCalledWith('selected-ssh-output')
+
+    // Cmd+V pastes from clipboard when ctrlKey/altKey are false
+    const pasteRes = mock.dispatchKey({ key: 'v', metaKey: true })
+    expect(pasteRes.res).toBe(false)
+    expect(pasteRes.preventDefault).toHaveBeenCalledTimes(1)
+    await Promise.resolve()
+    expect(readFromClipboard).toHaveBeenCalledTimes(1)
+    expect(pasteText).toHaveBeenCalledWith('clipboard-payload')
+
+    // Cmd+Alt+V is not treated as plain Cmd+V
+    expect(mock.dispatchKey({ key: 'v', metaKey: true, altKey: true }).res).toBe(true)
+  })
+
+  it('multiplexes global Wails OnFileDrop across multiple subscribers without premature OnFileDropOff', () => {
+    let registeredCb: ((x: number, y: number, paths: string[]) => void) | null = null
+    const onFileDrop = vi.fn((cb: (x: number, y: number, paths: string[]) => void) => {
+      registeredCb = cb
+    })
+    const onFileDropOff = vi.fn()
+    ;(globalThis as unknown as { window: Window }).window = {
+      runtime: {
+        EventsOn: vi.fn(() => () => {}),
+        OnFileDrop: onFileDrop,
+        OnFileDropOff: onFileDropOff,
+      },
+    } as unknown as Window
+
+    const subA = vi.fn()
+    const subB = vi.fn()
+    const unsubA = api.onFileDrop(subA)
+    const unsubB = api.onFileDrop(subB)
+
+    expect(onFileDrop).toHaveBeenCalledTimes(1)
+    registeredCb!(0, 0, ['/tmp/a.txt'])
+    expect(subA).toHaveBeenCalledWith(['/tmp/a.txt'])
+    expect(subB).toHaveBeenCalledWith(['/tmp/a.txt'])
+
+    // Unsubscribing A must NOT invoke OnFileDropOff while B is still subscribed
+    unsubA()
+    expect(onFileDropOff).not.toHaveBeenCalled()
+    registeredCb!(0, 0, ['/tmp/b.txt'])
+    expect(subA).toHaveBeenCalledTimes(1)
+    expect(subB).toHaveBeenCalledWith(['/tmp/b.txt'])
+
+    // Unsubscribing the last subscriber calls OnFileDropOff cleanly
+    unsubB()
+    expect(onFileDropOff).toHaveBeenCalledTimes(1)
   })
 
   it('handles wheel scrolling in normal, alternate-no-mouse, and mouse-tracking modes', () => {

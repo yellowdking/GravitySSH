@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { attachTerminalListener, discardTerminalBuffer, pushTerminalData } from './terminalStream'
+import { attachTerminalListener, clearAllTerminalBuffers, discardTerminalBuffer, pushTerminalData } from './terminalStream'
 
 describe('terminalStream early buffering', () => {
   it('buffers early chunks before mount and drains them in order on attach', () => {
@@ -48,5 +48,19 @@ describe('terminalStream early buffering', () => {
     expect(received).toEqual([])
     detach()
     discardTerminalBuffer(sid)
+  })
+
+  it('purges all early and live session buffers on clearAllTerminalBuffers (vault lock)', () => {
+    pushTerminalData('sess-lock-1', 'secret-scrollback-1')
+    pushTerminalData('sess-lock-2', 'secret-scrollback-2')
+    clearAllTerminalBuffers()
+    pushTerminalData('sess-lock-1', 'late-after-lock')
+
+    const r1: string[] = []
+    const d1 = attachTerminalListener('sess-lock-1', (d) => r1.push(d))
+    expect(r1).toEqual([])
+    d1()
+    discardTerminalBuffer('sess-lock-1')
+    discardTerminalBuffer('sess-lock-2')
   })
 })
