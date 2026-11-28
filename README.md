@@ -32,11 +32,11 @@
   - 配套安卓客户端：[GravitySSH-Android](https://github.com/yellowdking/GravitySSH-Android) · 独立零知识中继协议与服务端：[synctool](https://github.com/yellowdking/synctool)。
   - 非云端托管：基于 **`synctool-v1` 端到端加密协议**（`X25519` 密钥协商 + `Ed25519` 设备身份签名 + `AES-256-GCM STREAM` 分块认证加密），同时支持**已配对设备 0-RTT 一键离线信箱同步（阅后签名物理销毁）**与**新机扫码（128-bit OOB）/ 8 位房间码 + 6 位 SAS 安全核验一次性直传**。
   - 默认内置中继节点（`43.155.231.14:54843`）强制 **TLS 1.3 + SPKI SHA-256 指纹固定**，中继全程盲态无法解密任何配置，接收端可先预览主机/密钥/快捷/模板数量再自由选择安全合并或全量覆盖。
-  - 自建私有中继支持 `ghcr.io/yellowdking/synctool:latest` Docker 一键部署：
+  - 自建私有中继支持 `bbplin/synctool:latest` Docker 一键部署：
     ```bash
     docker volume create synctool_data
-    docker run --rm -v synctool_data:/data ghcr.io/yellowdking/synctool:latest init --public-host YOUR_VPS_IP --listen :54843 --data-dir /data
-    docker run -d --name synctool-relay --restart unless-stopped -p 54843:54843 -e SYNCTOOL_PROFILE=standard -e SYNCTOOL_SPOOL=disk -v synctool_data:/data ghcr.io/yellowdking/synctool:latest serve --data-dir /data
+    docker run --rm -v synctool_data:/data bbplin/synctool:latest init --public-host YOUR_VPS_IP --listen :54843 --data-dir /data
+    docker run -d --name synctool-relay --restart unless-stopped -p 54843:54843 -e SYNCTOOL_PROFILE=standard -e SYNCTOOL_SPOOL=disk -v synctool_data:/data bbplin/synctool:latest serve --data-dir /data
     ```
     部署后将输出的 `synctool://relay?v=1&u=...&pin=...#k=...` 填入客户端自定义中继栏（访问密钥仅保存在本地加密保险库 `vault.gsv` 内）并点击连接测试即可切换。
 
