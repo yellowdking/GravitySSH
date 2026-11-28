@@ -28,17 +28,14 @@
   - 所有 SSH 私钥、口令、服务器密码、代理密码、快捷命令与历史记录均统一保存在程序同目录 `gsshconfig\vault.gsv`（支持自定义**主密码双重加密与一键锁定**，版本升级平滑迁移）。
   - 采用 **Windows DPAPI (`CryptProtectData`) + `HKLM MachineGuid` + 应用独立高熵 HKDF-SHA256 + AES-256-GCM 认证加密**。
   - 即使他人拷贝 `vault.gsv` 到其他电脑或其他 Windows 账户，也**无法解密取走任何数据**。
-- **零知识多端同步（`synctool-v1`，Windows ↔ Android）**：
-  - 配套安卓客户端：[GravitySSH-Android](https://github.com/yellowdking/GravitySSH-Android) · 独立零知识中继协议与服务端：[synctool](https://github.com/yellowdking/synctool)。
-  - 非云端托管：基于 **`synctool-v1` 端到端加密协议**（`X25519` 密钥协商 + `Ed25519` 设备身份签名 + `AES-256-GCM STREAM` 分块认证加密），同时支持**已配对设备 0-RTT 一键离线信箱同步（阅后签名物理销毁）**与**新机扫码（128-bit OOB）/ 8 位房间码 + 6 位 SAS 安全核验一次性直传**。
-  - 默认内置中继节点（`43.155.231.14:54843`）强制 **TLS 1.3 + SPKI SHA-256 指纹固定**，中继全程盲态无法解密任何配置，接收端可先预览主机/密钥/快捷/模板数量再自由选择安全合并或全量覆盖。
-  - 自建私有中继支持 `bbplin/synctool:latest` Docker 一键部署：
+- **多端同步（Windows ↔ Android）**：
+  - 配套安卓客户端：[GravitySSH-Android](https://github.com/yellowdking/GravitySSH-Android) · 中继服务端：[synctool](https://github.com/yellowdking/synctool)。
+  - 支持已配对设备一键推送、离线收件箱及扫码 / 房间码直传，接收端可先预览配置再选择安全合并或覆盖本地。
+  - 内置官方默认中继开箱即用，亦支持 Docker 自建私有中继（`bbplin/synctool:latest`）：
     ```bash
-    docker volume create synctool_data
-    docker run --rm -v synctool_data:/data bbplin/synctool:latest init --public-host YOUR_VPS_IP --listen :54843 --data-dir /data
-    docker run -d --name synctool-relay --restart unless-stopped -p 54843:54843 -e SYNCTOOL_PROFILE=standard -e SYNCTOOL_SPOOL=disk -v synctool_data:/data bbplin/synctool:latest serve --data-dir /data
+    docker run --rm -v synctool_data:/data bbplin/synctool:latest init --public-host <公网IP>
+    docker run -d --name synctool-relay --restart unless-stopped -p 54843:54843 -v synctool_data:/data bbplin/synctool:latest
     ```
-    部署后将输出的 `synctool://relay?v=1&u=...&pin=...#k=...` 填入客户端自定义中继栏（访问密钥仅保存在本地加密保险库 `vault.gsv` 内）并点击连接测试即可切换。
 
 ## 下载与使用
 
