@@ -2,6 +2,7 @@ import React from 'react'
 import { Archive, Download, Edit2, File, FileArchive, FileCode2, FileEdit, Folder, FolderDown, Loader2, ShieldCheck, Trash2 } from 'lucide-react'
 import type { SFTPFileEntry } from '../types'
 import { formatBytes } from '../utils/autocomplete'
+import { isMacPlatform } from '../utils/errors'
 
 interface Props {
   entries: SFTPFileEntry[]
@@ -58,7 +59,7 @@ export const SftpFileList: React.FC<Props> = React.memo(({
             else if (editable) onEditFile(entry)
             else onDownload(entry)
           }}
-          title={archive ? '双击智能解压' : editable ? '双击在线编辑（Ctrl+S 回传）' : entry.isDir ? '单击进入目录（悬停可打包下载/压缩）' : '双击下载到本地'}
+          title={archive ? '双击解压' : editable ? `双击编辑 · ${isMacPlatform() ? '⌘S' : 'Ctrl+S'} 保存` : entry.isDir ? '单击进入目录' : '双击下载'}
           className="group px-2.5 py-1.5 hover:bg-ag-elevated/85 flex items-center justify-between gap-2 text-xs transition cursor-pointer"
         >
           <div className="flex items-center gap-2 min-w-0 flex-1" onClick={() => { if (!isBusy && entry.isDir) onOpenDir(entry.path) }}>

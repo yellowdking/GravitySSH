@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { FileCode2, Loader2, Save, X } from 'lucide-react'
-import { insertTabIndent } from '../utils/errors'
+import { insertTabIndent, isMacPlatform } from '../utils/errors'
 import { useActionDialogs } from '../hooks/useActionDialogs'
 import { ModalShell } from './ModalShell'
 
@@ -65,7 +65,7 @@ export const SftpEditorModal: React.FC<Props> = ({ open, editorToken, remotePath
             )}
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            <span className="text-[11px] font-mono text-ag-subtle">{lineCount} 行 · Ctrl+S 保存</span>
+            <span className="text-[11px] font-mono text-ag-subtle">{lineCount} 行 · {isMacPlatform() ? '⌘S' : 'Ctrl+S'} 保存</span>
             <button
               type="button"
               disabled={saving || !dirty}
