@@ -44,193 +44,81 @@ func sampleTestBundle() models.SyncBundle {
 	}
 }
 
-func TestSyncPreviewCacheApproveIsolationAndZeroing(t *testing.T) {
+func TestSyncPreviewCacheCloneIsolationEvictionAndZeroing(t *testing.T) {
 	cache := newSyncPreviewCache()
 	defer cache.close()
 
 	orig := sampleTestBundle()
-	cache.putSend(&pendingSyncSendSession{
-		sessionID:   "sess-1",
-		channelID:   "chan-1",
-		senderToken: "tok-1",
-		sendCode:    "ABCD1234",
-		relayURL:    "https://relay.example.com",
-		bundle:      orig,
-		hasBundle:   true,
-		expiresAt:   time.Now().Add(5 * time.Minute),
-	})
-
-	// Zeroing the caller's original bundle must not affect cached copy.
+	id1 := cache.put(orig)
+	if id1 == "" {
+		t.Fatal("expected non-empty preview ID")
+	}
+	// Zeroing caller's original bundle must not mutate cached copy.
 	zeroSyncBundle(&orig)
 
-	// getSend must not expose bundle slices.
-	meta, ok := cache.getSend("sess-1")
+	cloned, ok := cache.peekClone(id1)
 	if !ok {
-		t.Fatal("expected getSend to find sess-1")
+		t.Fatal("expected peekClone to find id1")
 	}
-	if len(meta.bundle.Servers) != 0 || len(meta.bundle.SSHKeys) != 0 {
-		t.Fatalf("expected getSend to omit bundle slices, got servers=%d keys=%d", len(meta.bundle.Servers), len(meta.bundle.SSHKeys))
-	}
-
-	// beginSendApprove atomically locks the session and returns a private deep copy.
-	approveMeta, bundleCopy, err := cache.beginSendApprove("sess-1")
-	if err != nil {
-		t.Fatalf("beginSendApprove failed: %v", err)
-	}
-	defer zeroSyncBundle(&bundleCopy)
-	if approveMeta.channelID != "chan-1" {
-		t.Fatalf("unexpected approveMeta: %+v", approveMeta)
+	defer zeroSyncBundle(&cloned)
+	if len(cloned.Servers) != 1 || cloned.Servers[0].Password != "s3cr3t-password" ||
+		len(cloned.SSHKeys) != 1 || cloned.SSHKeys[0].Passphrase != "key-pass" {
+		t.Fatalf("unexpected peekClone bundle: %+v", cloned)
 	}
 
-	// Duplicate concurrent beginSendApprove must be rejected while approving.
-	if _, _, dupErr := cache.beginSendApprove("sess-1"); dupErr == nil {
-		t.Fatal("expected duplicate beginSendApprove to fail while already approving")
-	}
-
-	// Concurrently cancelling/clearing/closing the cache while marshaling bundleCopy
-	// must NOT race with or zero bundleCopy.
+	// Concurrent clear/close while marshaling cloned copy must be 100% race-free.
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 100; i++ {
-			raw, err := json.Marshal(bundleCopy)
+			raw, err := json.Marshal(cloned)
 			if err != nil {
 				t.Errorf("marshal failed: %v", err)
 				return
 			}
-			var decoded models.SyncBundle
-			if err := json.Unmarshal(raw, &decoded); err != nil {
-				t.Errorf("unmarshal failed: %v", err)
-				return
-			}
-			if len(decoded.Servers) != 1 || decoded.Servers[0].Password != "s3cr3t-password" ||
-				len(decoded.SSHKeys) != 1 || decoded.SSHKeys[0].Passphrase != "key-pass" {
-				t.Errorf("bundleCopy was corrupted/zeroed concurrently: %+v", decoded)
+			var dec models.SyncBundle
+			if err := json.Unmarshal(raw, &dec); err != nil || len(dec.Servers) != 1 {
+				t.Errorf("unmarshal mismatch: %v", err)
 				return
 			}
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		cache.popSend("sess-1")
-		cache.clear("")
+		cache.clear(id1)
 	}()
 	wg.Wait()
 
-	if cache.isSendApproving("sess-1") {
-		t.Fatal("expected isSendApproving to return false after popSend/clear")
+	if _, ok := cache.peekClone(id1); ok {
+		t.Fatal("expected id1 cleared")
+	}
+
+	// Verify maxSyncPreviewEntries cap evicts oldest preview cleanly.
+	var ids []string
+	for i := 0; i < maxSyncPreviewEntries+3; i++ {
+		ids = append(ids, cache.put(sampleTestBundle()))
+	}
+	if _, ok := cache.peekClone(ids[0]); ok {
+		t.Fatal("expected oldest preview evicted past maxSyncPreviewEntries")
+	}
+	if _, ok := cache.peekClone(ids[len(ids)-1]); !ok {
+		t.Fatal("expected newest preview retained")
 	}
 }
 
-func TestSyncPreviewCacheAbortAndRetryApprove(t *testing.T) {
+func TestSyncPreviewCacheTTLExpiration(t *testing.T) {
 	cache := newSyncPreviewCache()
 	defer cache.close()
 
-	cache.putSend(&pendingSyncSendSession{
-		sessionID:   "sess-retry",
-		channelID:   "chan-r",
-		senderToken: "tok-r",
-		sendCode:    "WXYZ5678",
-		relayURL:    "https://relay.example.com",
-		bundle:      sampleTestBundle(),
-		hasBundle:   true,
-		expiresAt:   time.Now().Add(5 * time.Minute),
-	})
+	id := cache.put(sampleTestBundle())
+	cache.mu.Lock()
+	e := cache.entries[id]
+	e.expiresAt = time.Now().Add(-time.Second)
+	cache.entries[id] = e
+	cache.mu.Unlock()
 
-	_, copy1, err := cache.beginSendApprove("sess-retry")
-	if err != nil {
-		t.Fatalf("first beginSendApprove failed: %v", err)
-	}
-	zeroSyncBundle(&copy1)
-	cache.abortSendApprove("sess-retry")
-
-	// Retry after abort must succeed and still have intact bundle data.
-	_, copy2, err := cache.beginSendApprove("sess-retry")
-	if err != nil {
-		t.Fatalf("retry beginSendApprove failed: %v", err)
-	}
-	defer zeroSyncBundle(&copy2)
-	if len(copy2.Servers) != 1 || copy2.Servers[0].Password != "s3cr3t-password" {
-		t.Fatalf("retry bundle corrupted: %+v", copy2)
-	}
-
-	if !cache.markSendApproved("sess-retry", "req-1") {
-		t.Fatal("expected markSendApproved to succeed")
-	}
-	if _, _, err := cache.beginSendApprove("sess-retry"); err == nil {
-		t.Fatal("expected beginSendApprove to fail after markSendApproved")
-	}
-}
-
-func TestSyncPreviewCacheClockSkewGrace(t *testing.T) {
-	cache := newSyncPreviewCache()
-	defer cache.close()
-
-	now := time.Now()
-	// Client clock leading relay by 119s (within allowed +-120s relay skew, under 135s grace):
-	// relay expiresAt appears 119s in the past locally, but sessions MUST NOT be pruned yet.
-	skewedExp := now.Add(-119 * time.Second)
-	cache.putSend(&pendingSyncSendSession{
-		sessionID:   "sess-skew-ok",
-		channelID:   "chan-skew",
-		senderToken: "tok-skew",
-		sendCode:    "ABCD2345",
-		relayURL:    "https://relay.example.com",
-		bundle:      sampleTestBundle(),
-		hasBundle:   true,
-		expiresAt:   skewedExp,
-	})
-	cache.putReceive(&pendingSyncReceiveSession{
-		waitID:    "wait-skew-ok",
-		channelID: "chan-skew",
-		sendCode:  "ABCD2345",
-		recvCode:  "WXYZ6789",
-		requestID: "req-skew",
-		relayURL:  "https://relay.example.com",
-		expiresAt: skewedExp,
-	})
-
-	if _, ok := cache.getSend("sess-skew-ok"); !ok {
-		t.Fatal("expected pending send within 135s clock-skew grace to remain cached")
-	}
-	if _, ok := cache.getReceive("wait-skew-ok"); !ok {
-		t.Fatal("expected pending receive within 135s clock-skew grace to remain cached")
-	}
-
-	// Past the 135s clock-skew grace window, both sessions MUST be pruned.
-	expiredPastGrace := now.Add(-(syncClockSkewGrace + 2*time.Second))
-	cache.putSend(&pendingSyncSendSession{
-		sessionID:   "sess-expired",
-		channelID:   "chan-exp",
-		senderToken: "tok-exp",
-		sendCode:    "EFGH2345",
-		relayURL:    "https://relay.example.com",
-		bundle:      sampleTestBundle(),
-		hasBundle:   true,
-		expiresAt:   expiredPastGrace,
-	})
-	cache.putReceive(&pendingSyncReceiveSession{
-		waitID:    "wait-expired",
-		channelID: "chan-exp",
-		sendCode:  "EFGH2345",
-		recvCode:  "JKLM6789",
-		requestID: "req-exp",
-		relayURL:  "https://relay.example.com",
-		expiresAt: expiredPastGrace,
-	})
-
-	if _, ok := cache.getSend("sess-expired"); ok {
-		t.Fatal("expected pending send past 135s skew grace to be pruned")
-	}
-	if _, ok := cache.getReceive("wait-expired"); ok {
-		t.Fatal("expected pending receive past 135s skew grace to be pruned")
-	}
-	// Earlier skewed sessions still within 135s grace remain intact.
-	if _, ok := cache.getSend("sess-skew-ok"); !ok {
-		t.Fatal("expected valid skewed send session to survive pruning of expired sessions")
-	}
-	if _, ok := cache.getReceive("wait-skew-ok"); !ok {
-		t.Fatal("expected valid skewed receive session to survive pruning of expired sessions")
+	if _, ok := cache.peekClone(id); ok {
+		t.Fatal("expected expired preview to be pruned on peekClone")
 	}
 }

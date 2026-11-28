@@ -1,553 +1,225 @@
 package main
 
 import (
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
-	"os"
-	"strconv"
 	"strings"
-	"time"
 
-	"github.com/google/uuid"
 	"github.com/yellowdking/GravitySSH/internal/models"
-	"github.com/yellowdking/GravitySSH/internal/syncclient"
 )
 
-const syncRelayCallTimeout = 15 * time.Second
-
-var decryptPairRequestFn = syncclient.DecryptPairRequest
-
-func (a *App) syncContext() context.Context {
-	return a.bgContext()
-}
-
-func (a *App) syncRelayContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(a.syncContext(), syncRelayCallTimeout)
-}
-
-func resolveHostName() string {
-	host, _ := os.Hostname()
-	if strings.TrimSpace(host) == "" {
-		return "Windows-PC"
-	}
-	return host
-}
-
-func (a *App) resolveRelayURL(relayURL string) string {
-	if trimmed := strings.TrimSpace(relayURL); trimmed != "" {
-		return trimmed
-	}
-	a.mu.RLock()
-	store := a.store
-	a.mu.RUnlock()
-	if store != nil {
-		if saved := strings.TrimSpace(store.GetSettings().SyncRelayURL); saved != "" {
-			return saved
-		}
-	}
-	return syncclient.DefaultRelayURL
-}
-
-func (a *App) syncClient(relayURL string) (*syncclient.Client, string, error) {
-	cfg, err := syncclient.NormalizeRelayConfig(a.resolveRelayURL(relayURL))
-	if err != nil {
-		return nil, "", err
-	}
-	gateKey := cfg.EffectiveGateKey()
-	gateSum := sha256.Sum256([]byte(gateKey))
-	pinsJoined := strings.Join(cfg.SPKIPins, ",")
-	cacheKey := cfg.URL + "|" + strconv.Itoa(int(cfg.TLSMode)) + "|" + pinsJoined + "|" + hex.EncodeToString(gateSum[:8])
-	now := time.Now()
-
-	a.syncClientMu.Lock()
-	if a.syncClients == nil {
-		a.syncClients = make(map[string]*cachedSyncClient)
-	}
-	if entry, ok := a.syncClients[cacheKey]; ok && entry != nil && entry.client != nil {
-		entry.lastUsed = now
-		cli := entry.client
-		a.syncClientMu.Unlock()
-		return cli, cfg.URL, nil
-	}
-	a.syncClientMu.Unlock()
-
-	cli, err := syncclient.NewClientWithPins(cfg.URL, gateKey, cfg.SPKIPins, cfg.TLSMode)
-	if err != nil {
-		return nil, "", err
-	}
-
-	var evicted []*syncclient.Client
-	a.syncClientMu.Lock()
-	if a.syncClients == nil {
-		a.syncClients = make(map[string]*cachedSyncClient)
-	}
-	if existing, ok := a.syncClients[cacheKey]; ok && existing != nil && existing.client != nil {
-		existing.lastUsed = now
-		ret := existing.client
-		a.syncClientMu.Unlock()
-		cli.CloseIdleConnections()
-		return ret, cfg.URL, nil
-	}
-	for len(a.syncClients) >= maxCachedSyncClients {
-		var (
-			oldestKey  string
-			oldestTime time.Time
-		)
-		for k, v := range a.syncClients {
-			if oldestKey == "" || v == nil || v.lastUsed.Before(oldestTime) {
-				oldestKey = k
-				if v != nil {
-					oldestTime = v.lastUsed
-				}
-			}
-		}
-		if oldestKey == "" {
-			break
-		}
-		if old := a.syncClients[oldestKey]; old != nil && old.client != nil {
-			evicted = append(evicted, old.client)
-		}
-		delete(a.syncClients, oldestKey)
-	}
-	a.syncClients[cacheKey] = &cachedSyncClient{client: cli, lastUsed: now}
-	a.syncClientMu.Unlock()
-
-	for _, old := range evicted {
-		old.CloseIdleConnections()
-	}
-	return cli, cfg.URL, nil
-}
-
 func (a *App) cancelAllSyncOnLock() {
-	if a.syncCache == nil {
-		return
+	if a.syncMgr != nil {
+		a.syncMgr.CloseAllOnLock()
 	}
-	sends := a.syncCache.drainAllOnLock()
-	for _, sess := range sends {
-		if sess == nil || sess.channelID == "" || sess.senderToken == "" {
-			continue
-		}
-		s := sess
-		go func() {
-			client, _, err := a.syncClient(s.effectiveRelay())
-			if err != nil {
-				return
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = client.PairCancel(ctx, s.channelID, s.senderToken)
-		}()
+	if a.syncCache != nil {
+		a.syncCache.clear("")
 	}
 }
 
 func (a *App) buildSyncPreview(bundle models.SyncBundle) models.SyncReceivePreview {
+	if a.syncCache == nil {
+		zeroSyncBundle(&bundle)
+		return models.SyncReceivePreview{}
+	}
+	sc := len(bundle.Servers)
+	kc := len(bundle.SSHKeys)
+	shc := len(bundle.Shortcuts)
+	tc := len(bundle.Templates)
+	ver := bundle.SchemaVersion
+	exp := bundle.ExportedAt
+	plat := bundle.SourcePlatform
+	dev := bundle.SourceDevice
+	id := a.syncCache.put(bundle)
+	if id == "" {
+		return models.SyncReceivePreview{}
+	}
 	return models.SyncReceivePreview{
-		PreviewID:      a.syncCache.put(bundle),
-		SchemaVersion:  bundle.SchemaVersion,
-		ExportedAt:     bundle.ExportedAt,
-		SourcePlatform: bundle.SourcePlatform,
-		SourceDevice:   bundle.SourceDevice,
-		ServerCount:    len(bundle.Servers),
-		KeyCount:       len(bundle.SSHKeys),
-		ShortcutCount:  len(bundle.Shortcuts),
-		TemplateCount:  len(bundle.Templates),
+		PreviewID:      id,
+		SchemaVersion:  ver,
+		ExportedAt:     exp,
+		SourcePlatform: plat,
+		SourceDevice:   dev,
+		ServerCount:    sc,
+		KeyCount:       kc,
+		ShortcutCount:  shc,
+		TemplateCount:  tc,
 	}
 }
 
-func (a *App) GetDefaultSyncRelayURL() string { return syncclient.DefaultRelayURL }
-
-// ClearSyncPreview discards a pending decrypted sync preview from memory
-// (or all pending previews and pairing sessions when previewID is empty).
-func (a *App) ClearSyncPreview(previewID string) {
-	if a.syncCache != nil {
-		a.syncCache.clear(previewID)
-	}
-}
-
-// TestSyncRelay checks TLS 1.3 + App Gate connectivity to the given or saved relay URL.
-func (a *App) TestSyncRelay(relayURL string) (int64, error) {
-	if err := a.ensureReady(); err != nil {
-		return 0, err
-	}
-	client, _, err := a.syncClient(relayURL)
-	if err != nil {
-		return 0, err
-	}
-	ctx, cancel := context.WithTimeout(a.syncContext(), 10*time.Second)
-	defer cancel()
-	return client.Ping(ctx)
-}
-
-func (a *App) StartSyncSend(relayURL string) (models.SyncSendSession, error) {
+// GetSyncOverview returns local device sync identity, active relay status (secret-redacted), and paired devices.
+func (a *App) GetSyncOverview() (models.SyncOverview, error) {
 	store, _, _, err := a.unlockedDeps()
 	if err != nil {
-		return models.SyncSendSession{}, err
+		return models.SyncOverview{}, err
 	}
-	if a.syncCache == nil {
-		return models.SyncSendSession{}, errors.New("同步缓存未初始化")
-	}
-	bundle, err := store.ExportSyncBundle(resolveHostName())
-	if err != nil {
-		return models.SyncSendSession{}, err
-	}
-	defer zeroSyncBundle(&bundle)
-	serverCount := len(bundle.Servers)
-	keyCount := len(bundle.SSHKeys)
-	shortcutCount := len(bundle.Shortcuts)
-	templateCount := len(bundle.Templates)
-	code, err := syncclient.GenerateCode()
-	if err != nil {
-		return models.SyncSendSession{}, err
-	}
-	canonicalSend, err := syncclient.CanonicalizeCode(code)
-	if err != nil {
-		return models.SyncSendSession{}, err
-	}
-	qrText, err := syncclient.FormatQRText(code)
-	if err != nil {
-		return models.SyncSendSession{}, err
-	}
-	senderToken, err := syncclient.GenerateHexToken32()
-	if err != nil {
-		return models.SyncSendSession{}, err
-	}
-	channelID := syncclient.DeriveChannelID(canonicalSend)
-	resolvedRelay := a.resolveRelayURL(relayURL)
-	client, cleanURL, err := a.syncClient(resolvedRelay)
-	if err != nil {
-		return models.SyncSendSession{}, err
-	}
-	ctx, cancel := a.syncRelayContext()
-	defer cancel()
-	expiresAt, err := client.PairInit(ctx, channelID, senderToken, syncclient.DefaultTTLSeconds)
-	if err != nil {
-		return models.SyncSendSession{}, err
-	}
-	sessionID := uuid.NewString()
-	a.syncCache.putSend(&pendingSyncSendSession{
-		sessionID:   sessionID,
-		channelID:   channelID,
-		senderToken: senderToken,
-		sendCode:    canonicalSend,
-		relayURL:    cleanURL,
-		relayTarget: resolvedRelay,
-		bundle:      bundle,
-		hasBundle:   true,
-		expiresAt:   expiresAt,
-	})
-	return models.SyncSendSession{
-		SessionID:     sessionID,
-		Code:          code,
-		QRText:        qrText,
-		ExpiresAt:     expiresAt.UTC().Format(time.RFC3339),
-		RelayURL:      cleanURL,
-		ServerCount:   serverCount,
-		KeyCount:      keyCount,
-		ShortcutCount: shortcutCount,
-		TemplateCount: templateCount,
-	}, nil
+	return a.syncMgr.GetOverview(store)
 }
 
-func (a *App) PollSyncSend(sessionID string) (models.SyncSendPollResult, error) {
-	if err := a.ensureUnlocked(); err != nil {
-		return models.SyncSendPollResult{}, err
-	}
-	if a.syncCache == nil {
-		return models.SyncSendPollResult{}, errors.New("同步缓存未初始化")
-	}
-	sess, ok := a.syncCache.getSend(sessionID)
-	if !ok {
-		return models.SyncSendPollResult{Status: "expired", Message: "同步会话已过期或已撤销"}, nil
-	}
-	client, _, err := a.syncClient(sess.effectiveRelay())
+// SetCustomSyncRelay validates and saves a custom synctool://relay URI inside encrypted VaultData.Sync
+// (or resets back to the built-in default relay when rawURI is empty).
+func (a *App) SetCustomSyncRelay(rawURI string) (models.SyncRelayStatus, error) {
+	store, _, _, err := a.unlockedDeps()
 	if err != nil {
-		return models.SyncSendPollResult{}, err
+		return models.SyncRelayStatus{}, err
 	}
-	ctx, cancel := a.syncRelayContext()
-	defer cancel()
-	res, err := client.PairPoll(ctx, sess.channelID, sess.senderToken)
-	if err != nil {
-		return models.SyncSendPollResult{}, err
-	}
-	if res.NotFound || res.State == "gone" {
-		popped, poppedOK := a.syncCache.popSend(sessionID)
-		wasApproved := sess.approved || (poppedOK && popped.approved)
-		approvedReqID := sess.approvedReqID
-		if poppedOK && popped.approvedReqID != "" {
-			approvedReqID = popped.approvedReqID
+	return a.syncMgr.SetCustomRelay(store, rawURI)
+}
+
+// TestSyncRelay checks TLS 1.3 + SPKI pin + HMAC connectivity and capabilities for rawURI (or active relay when empty).
+func (a *App) TestSyncRelay(rawURI string) (models.SyncPingInfo, error) {
+	if strings.TrimSpace(rawURI) != "" {
+		if err := a.ensureReady(); err != nil {
+			return models.SyncPingInfo{}, err
 		}
-		if wasApproved {
-			return models.SyncSendPollResult{
-				Status:    "consumed",
-				RequestID: approvedReqID,
-				Message:   "对方已领取并销毁中继数据",
-			}, nil
-		}
-		return models.SyncSendPollResult{
-			Status:  "expired",
-			Message: "同步码已过期或已被中继清理",
-		}, nil
+		return a.syncMgr.TestRelay(a.bgContext(), nil, rawURI)
 	}
-	switch res.State {
-	case "waiting":
-		return models.SyncSendPollResult{Status: "waiting"}, nil
-	case "requested":
-		var (
-			info   syncclient.PairRequestPayload
-			decErr error
-		)
-		if cached, ok := a.syncCache.getCachedPairRequest(sessionID, res.RequestID, res.Salt, res.Nonce, res.Ciphertext); ok {
-			info = cached
-		} else {
-			info, decErr = decryptPairRequestFn(sess.sendCode, res.EncryptedPayload)
-			if decErr != nil {
-				_ = client.PairReject(ctx, sess.channelID, sess.senderToken, res.RequestID)
-				a.syncCache.popSend(sessionID)
-				return models.SyncSendPollResult{
-					Status:    "error",
-					RequestID: res.RequestID,
-					Message:   "接收端验证请求解密失败，已自动拒绝此次配对",
-				}, nil
-			}
-			a.syncCache.setCachedPairRequest(sessionID, res.RequestID, res.Salt, res.Nonce, res.Ciphertext, info)
-		}
-		canonicalRecv, _ := syncclient.CanonicalizeCode(info.ReceiverCode)
-		return models.SyncSendPollResult{
-			Status:           "requested",
-			RequestID:        res.RequestID,
-			ReceiverCode:     syncclient.FormatDisplayCode(canonicalRecv),
-			ReceiverDevice:   info.ReceiverDevice,
-			ReceiverPlatform: info.ReceiverPlatform,
-			RequestedAt:      info.RequestedAt,
-		}, nil
-	case "approved":
-		return models.SyncSendPollResult{
-			Status:    "approved",
-			RequestID: sess.approvedReqID,
-		}, nil
-	case "rejected":
-		a.syncCache.popSend(sessionID)
-		return models.SyncSendPollResult{
-			Status:    "rejected",
-			RequestID: res.RequestID,
-			Message:   "已拒绝该接收端请求",
-		}, nil
-	default:
-		return models.SyncSendPollResult{Status: res.State, RequestID: res.RequestID}, nil
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
+		return models.SyncPingInfo{}, err
+	}
+	return a.syncMgr.TestRelay(a.bgContext(), store, "")
+}
+
+// SetSyncDeviceLabel updates the human-readable device label advertised during pairing and sync.
+func (a *App) SetSyncDeviceLabel(label string) error {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
+		return err
+	}
+	return a.syncMgr.SetDeviceLabel(store, label)
+}
+
+// ListSyncInbox lists Phase-1 decrypted Manifest summaries from the Mode B mailbox without downloading blobs.
+func (a *App) ListSyncInbox() ([]models.SyncInboxItem, error) {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
+		return nil, err
+	}
+	return a.syncMgr.ListInbox(a.bgContext(), store)
+}
+
+// StartWatchSyncInbox starts background real-time SSE/Long-Poll inbox watching ("sync:inbox_updated").
+func (a *App) StartWatchSyncInbox() error {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
+		return err
+	}
+	return a.syncMgr.StartWatchInbox(a.bgContext(), store)
+}
+
+// StopWatchSyncInbox stops any running background inbox watcher.
+func (a *App) StopWatchSyncInbox() {
+	if a.syncMgr != nil {
+		a.syncMgr.StopWatchInbox()
 	}
 }
 
-func (a *App) ApproveSyncSend(sessionID, requestID, receiverCode string) error {
+// SendSyncToDevice sends an encrypted 0-RTT vault parcel to a paired device ("auto" | "spool" | "pipe").
+func (a *App) SendSyncToDevice(deviceID string, deliveryMode string) (models.SyncDirectSendResult, error) {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
+		return models.SyncDirectSendResult{}, err
+	}
+	return a.syncMgr.SendToDevice(a.bgContext(), store, deviceID, deliveryMode)
+}
+
+// ApplyInboxSync fetches part_id=1 for itemID, imports it into the vault, and sends a signed ACK burn.
+func (a *App) ApplyInboxSync(itemID string, importMode string) (models.SyncImportSummary, error) {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
+		return models.SyncImportSummary{}, err
+	}
+	return a.syncMgr.ApplyInboxItem(a.bgContext(), store, itemID, importMode)
+}
+
+// DismissInboxItem physically burns an unwanted spool item on the relay via signed ACK.
+func (a *App) DismissInboxItem(itemID string) error {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
+		return err
+	}
+	return a.syncMgr.DismissInboxItem(a.bgContext(), store, itemID)
+}
+
+// RevokeSyncDevice revokes a paired device locally and deletes its deposit token on the relay.
+func (a *App) RevokeSyncDevice(deviceID string) error {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
+		return err
+	}
+	return a.syncMgr.RevokeDevice(a.bgContext(), store, deviceID)
+}
+
+// StartSyncDeviceBind initiates bidirectional device pairing (mode=1 QR or mode=2 8-char+SAS).
+func (a *App) StartSyncDeviceBind(mode int, includeRelay bool) (models.SyncFlowSession, error) {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
+		return models.SyncFlowSession{}, err
+	}
+	return a.syncMgr.StartDeviceBind(a.bgContext(), store, mode, includeRelay)
+}
+
+// AcceptSyncDeviceBind joins a pairing offer as Responder (synctool://pair URI or 8-char room code).
+func (a *App) AcceptSyncDeviceBind(codeOrURI string) (models.SyncFlowSession, error) {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
+		return models.SyncFlowSession{}, err
+	}
+	return a.syncMgr.AcceptDeviceBind(a.bgContext(), store, codeOrURI)
+}
+
+// StartSyncOneShotSend initiates a zero-disk streaming one-shot transfer (mode=1 QR or mode=2 8-char+SAS).
+func (a *App) StartSyncOneShotSend(mode int, includeRelay bool) (models.SyncFlowSession, error) {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
+		return models.SyncFlowSession{}, err
+	}
+	return a.syncMgr.StartOneShotSend(a.bgContext(), store, mode, includeRelay)
+}
+
+// StartSyncReceive joins a Mode A room (oneshot m=1/2 or paired direct m=0) and stages a receive preview.
+func (a *App) StartSyncReceive(codeOrURI string) (models.SyncFlowSession, error) {
+	store, _, _, err := a.unlockedDeps()
+	if err != nil {
+		return models.SyncFlowSession{}, err
+	}
+	return a.syncMgr.StartReceive(a.bgContext(), store, codeOrURI)
+}
+
+// GetSyncFlowStatus polls the current status of an interactive sync flow session.
+func (a *App) GetSyncFlowStatus(sessionID string) (models.SyncFlowStatus, error) {
+	if err := a.ensureUnlocked(); err != nil {
+		return models.SyncFlowStatus{}, err
+	}
+	return a.syncMgr.GetFlowStatus(sessionID)
+}
+
+// SubmitSyncSASInput submits the 6-digit SAS code entered by the Initiator on m=2 flows.
+func (a *App) SubmitSyncSASInput(sessionID string, sasCode string) error {
 	if err := a.ensureUnlocked(); err != nil {
 		return err
 	}
-	if a.syncCache == nil {
-		return errors.New("同步缓存未初始化")
-	}
-	sess, bundleCopy, err := a.syncCache.beginSendApprove(sessionID)
-	if err != nil {
-		return err
-	}
-	defer zeroSyncBundle(&bundleCopy)
-	approved := false
-	defer func() {
-		if !approved {
-			a.syncCache.abortSendApprove(sessionID)
-		}
-	}()
-
-	payload, err := syncclient.EncryptBundleDual(sess.sendCode, receiverCode, requestID, bundleCopy)
-	if err != nil {
-		return err
-	}
-	if !a.syncCache.isSendApproving(sessionID) {
-		return errors.New("同步会话已取消或已过期")
-	}
-	client, _, err := a.syncClient(sess.effectiveRelay())
-	if err != nil {
-		return err
-	}
-	ctx, cancel := a.syncRelayContext()
-	defer cancel()
-	if err := client.PairApprove(ctx, sess.channelID, sess.senderToken, requestID, payload); err != nil {
-		return err
-	}
-	approved = true
-	a.syncCache.markSendApproved(sessionID, requestID)
-	return nil
+	return a.syncMgr.SubmitSASInput(sessionID, sasCode)
 }
 
-func (a *App) RejectSyncSend(sessionID, requestID string) error {
+// ConfirmSyncSAS submits the Responder's mandatory visual SAS confirmation decision on m=2 flows.
+func (a *App) ConfirmSyncSAS(sessionID string, approved bool) error {
 	if err := a.ensureUnlocked(); err != nil {
 		return err
 	}
-	if a.syncCache == nil {
-		return nil
-	}
-	sess, ok := a.syncCache.popSend(sessionID)
-	if !ok {
-		return nil
-	}
-	client, _, err := a.syncClient(sess.effectiveRelay())
-	if err != nil {
-		return err
-	}
-	ctx, cancel := a.syncRelayContext()
-	defer cancel()
-	err = client.PairReject(ctx, sess.channelID, sess.senderToken, requestID)
-	if errors.Is(err, syncclient.ErrPairNotFound) {
-		return nil
-	}
-	return err
+	return a.syncMgr.ConfirmSAS(sessionID, approved)
 }
 
-func (a *App) CancelSyncSend(sessionIDOrCode, relayURL string) error {
-	if err := a.ensureUnlocked(); err != nil {
-		return err
-	}
-	if a.syncCache == nil {
+// CancelSyncFlow cancels an active interactive sync flow and closes its relay room.
+func (a *App) CancelSyncFlow(sessionID string) error {
+	if a.syncMgr == nil {
 		return nil
 	}
-	sess, ok := a.syncCache.popSend(sessionIDOrCode)
-	if !ok {
-		return nil
-	}
-	targetURL := sess.effectiveRelay()
-	if strings.TrimSpace(targetURL) == "" {
-		targetURL = relayURL
-	}
-	client, _, err := a.syncClient(targetURL)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := a.syncRelayContext()
-	defer cancel()
-	err = client.PairCancel(ctx, sess.channelID, sess.senderToken)
-	if errors.Is(err, syncclient.ErrPairNotFound) {
-		return nil
-	}
-	return err
+	return a.syncMgr.CancelFlow(sessionID)
 }
 
-func (a *App) GenerateReceiverCode() (string, error) {
-	if err := a.ensureUnlocked(); err != nil {
-		return "", err
-	}
-	return syncclient.GenerateCode()
-}
-
-func (a *App) StartSyncReceive(sendCode, recvCode, relayURL string) (models.SyncReceiveWaitSession, error) {
-	if err := a.ensureUnlocked(); err != nil {
-		return models.SyncReceiveWaitSession{}, err
-	}
-	if a.syncCache == nil {
-		return models.SyncReceiveWaitSession{}, errors.New("同步缓存未初始化")
-	}
-	canonicalSend, err := syncclient.CanonicalizeCode(sendCode)
-	if err != nil {
-		return models.SyncReceiveWaitSession{}, err
-	}
-	canonicalRecv, err := syncclient.CanonicalizeCode(recvCode)
-	if err != nil {
-		return models.SyncReceiveWaitSession{}, err
-	}
-	requestID, err := syncclient.GenerateHexToken32()
-	if err != nil {
-		return models.SyncReceiveWaitSession{}, err
-	}
-	displayRecv := syncclient.FormatDisplayCode(canonicalRecv)
-	reqPayload, err := syncclient.EncryptPairRequest(canonicalSend, syncclient.PairRequestPayload{
-		ReceiverCode:     displayRecv,
-		ReceiverDevice:   resolveHostName(),
-		ReceiverPlatform: "windows",
-		RequestedAt:      time.Now().UTC().Format(time.RFC3339),
-	})
-	if err != nil {
-		return models.SyncReceiveWaitSession{}, err
-	}
-	resolvedRelay := a.resolveRelayURL(relayURL)
-	client, cleanURL, err := a.syncClient(resolvedRelay)
-	if err != nil {
-		return models.SyncReceiveWaitSession{}, err
-	}
-	channelID := syncclient.DeriveChannelID(canonicalSend)
-	ctx, cancel := a.syncRelayContext()
-	defer cancel()
-	expiresAt, err := client.PairRequest(ctx, channelID, requestID, reqPayload)
-	if err != nil {
-		return models.SyncReceiveWaitSession{}, err
-	}
-	waitID := uuid.NewString()
-	a.syncCache.putReceive(&pendingSyncReceiveSession{
-		waitID:      waitID,
-		channelID:   channelID,
-		sendCode:    canonicalSend,
-		recvCode:    canonicalRecv,
-		requestID:   requestID,
-		relayURL:    cleanURL,
-		relayTarget: resolvedRelay,
-		expiresAt:   expiresAt,
-	})
-	return models.SyncReceiveWaitSession{
-		WaitID:       waitID,
-		ReceiverCode: displayRecv,
-		ExpiresAt:    expiresAt.UTC().Format(time.RFC3339),
-	}, nil
-}
-
-func (a *App) PollSyncReceive(waitID string) (models.SyncReceivePollResult, error) {
-	if err := a.ensureUnlocked(); err != nil {
-		return models.SyncReceivePollResult{}, err
-	}
-	if a.syncCache == nil {
-		return models.SyncReceivePollResult{}, errors.New("同步缓存未初始化")
-	}
-	sess, ok := a.syncCache.getReceive(waitID)
-	if !ok {
-		return models.SyncReceivePollResult{Status: "expired", Message: "配对等待已过期或已取消"}, nil
-	}
-	client, _, err := a.syncClient(sess.effectiveRelay())
-	if err != nil {
-		return models.SyncReceivePollResult{}, err
-	}
-	ctx, cancel := a.syncRelayContext()
-	defer cancel()
-	res, err := client.PairStatus(ctx, sess.channelID, sess.requestID)
-	if errors.Is(err, syncclient.ErrPairNotFound) {
-		a.syncCache.removeReceive(waitID)
-		return models.SyncReceivePollResult{Status: "expired", Message: "同步码已过期或发送端已撤销"}, nil
-	}
-	if err != nil {
-		return models.SyncReceivePollResult{}, err
-	}
-	switch res.State {
-	case "pending":
-		return models.SyncReceivePollResult{Status: "pending"}, nil
-	case "rejected":
-		a.syncCache.removeReceive(waitID)
-		return models.SyncReceivePollResult{Status: "rejected", Message: "发送端已拒绝此次同步请求"}, nil
-	case "approved":
-		a.syncCache.removeReceive(waitID)
-		bundle, err := syncclient.DecryptBundleDual(sess.sendCode, sess.recvCode, sess.requestID, res.EncryptedPayload)
-		if err != nil {
-			return models.SyncReceivePollResult{}, err
-		}
-		preview := a.buildSyncPreview(bundle)
-		return models.SyncReceivePollResult{Status: "ready", Preview: &preview}, nil
-	default:
-		return models.SyncReceivePollResult{Status: res.State}, nil
-	}
-}
-
-func (a *App) CancelSyncReceive(waitID string) {
-	if a.syncCache != nil {
-		a.syncCache.removeReceive(waitID)
-	}
-}
-
-func (a *App) ApplySyncReceive(previewID, mode string) (models.SyncImportSummary, error) {
+// ApplySyncReceive imports a RAM-staged SyncReceivePreview ("merge" | "overwrite") and clears it on success.
+func (a *App) ApplySyncReceive(previewID string, mode string) (models.SyncImportSummary, error) {
 	store, _, _, err := a.unlockedDeps()
 	if err != nil {
 		return models.SyncImportSummary{}, err
@@ -557,7 +229,7 @@ func (a *App) ApplySyncReceive(previewID, mode string) (models.SyncImportSummary
 	}
 	bundle, ok := a.syncCache.peekClone(previewID)
 	if !ok {
-		return models.SyncImportSummary{}, errors.New("预览已过期或已导入，请重新获取同步码")
+		return models.SyncImportSummary{}, errors.New("预览已过期或已导入，请重新接收")
 	}
 	defer zeroSyncBundle(&bundle)
 
@@ -567,4 +239,11 @@ func (a *App) ApplySyncReceive(previewID, mode string) (models.SyncImportSummary
 	}
 	a.syncCache.clear(previewID)
 	return summary, nil
+}
+
+// ClearSyncPreview discards a pending decrypted sync preview from memory (or all when previewID is empty).
+func (a *App) ClearSyncPreview(previewID string) {
+	if a.syncCache != nil {
+		a.syncCache.clear(previewID)
+	}
 }
