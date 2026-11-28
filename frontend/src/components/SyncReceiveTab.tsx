@@ -1,405 +1,231 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertTriangle, CheckCircle2, Clock, Loader2, RefreshCw, ShieldAlert, ShieldCheck, XCircle } from 'lucide-react'
-import type { SyncImportSummary, SyncReceivePreview, SyncReceiveWaitSession } from '../syncTypes'
-import { api } from '../wailsApi'
+import React, { useEffect, useState } from 'react'
+import { Eye, EyeOff, Loader2, ShieldAlert, ShieldCheck, XCircle } from 'lucide-react'
+import type { SyncImportSummary } from '../syncTypes'
+import { useSyncFlow } from '../hooks/useSyncFlow'
 import { errMsg } from '../utils/errors'
-import { fmtSec, useSyncCountdown } from '../hooks/useSyncCountdown'
-import { useSyncPolling } from '../hooks/useSyncPolling'
-import { SyncPreviewCard } from './SyncPreviewCard'
+import {
+  formatBytes,
+  formatSyncCodeOrUriInput,
+  isReadySyncCodeOrUri,
+  isSynctoolUri,
+} from '../utils/syncUri'
+import { api } from '../wailsApi'
+import { SyncPreviewCard, SyncSummaryCard } from './SyncPreviewCard'
+import { SyncSasPrompt } from './SyncSasPrompt'
 
 interface Props {
-  relayUrl: string
   onBusyChange?: (busy: boolean) => void
   onSynced: () => void
   onToast: (msg: string, type?: 'info' | 'error') => void
 }
 
-const OFFLINE_EXPIRY_GRACE_MS = 30_000
-const MAX_CONSECUTIVE_POLL_ERRORS_NO_EXPIRY = 20
-
-function formatSyncInput(raw: string): string {
-  const trimmed = raw.trim()
-  if (/^gssh-sync:\/\//i.test(trimmed)) {
-    const m = trimmed.match(/[?&]code=([^&\s]+)/i)
-    if (m) {
-      try { return formatSyncInput(decodeURIComponent(m[1])) } catch { return trimmed }
-    }
-  }
-  const clean = trimmed.toUpperCase().replace(/[^23456789ABCDEFGHJKMNPQRSTVWXYZ]/g, '').slice(0, 8)
-  return clean.length > 4 ? `${clean.slice(0, 4)}-${clean.slice(4)}` : clean
-}
-
-function isRetryablePollError(msg: string): boolean {
-  return (
-    msg.includes('连接同步中继失败') ||
-    msg.includes('读取同步响应失败') ||
-    msg.includes('请求过于频繁') ||
-    /HTTP\s*5\d\d/.test(msg) ||
-    /timeout|timed out|ECONNRESET|network/i.test(msg)
-  )
-}
-
-export const SyncReceiveTab: React.FC<Props> = ({ relayUrl, onBusyChange, onSynced, onToast }) => {
-  const [recvCode, setRecvCode] = useState('')
-  const [inputCode, setInputCode] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-  const [waitSess, setWaitSess] = useState<SyncReceiveWaitSession | null>(null)
-  const [errorBanner, setErrorBanner] = useState('')
-  const [pollError, setPollError] = useState('')
+export const SyncReceiveTab: React.FC<Props> = ({ onBusyChange, onSynced, onToast }) => {
+  const [inputCodeOrUri, setInputCodeOrUri] = useState('')
+  const [showRawUri, setShowRawUri] = useState(false)
+  const [importMode, setImportMode] = useState<'merge' | 'overwrite'>('merge')
   const [applying, setApplying] = useState(false)
-  const [preview, setPreview] = useState<SyncReceivePreview | null>(null)
-  const [mode, setMode] = useState<'merge' | 'overwrite'>('merge')
   const [summary, setSummary] = useState<SyncImportSummary | null>(null)
 
-  const waitLeft = useSyncCountdown(waitSess?.expiresAt)
+  const flow = useSyncFlow({ onToast })
 
-  const mountedRef = useRef(true)
-  const submittingRef = useRef(false)
-  const applyingRef = useRef(false)
-  const pollErrorCountRef = useRef(0)
-  const waitSessRef = useRef<SyncReceiveWaitSession | null>(null)
-  waitSessRef.current = waitSess
-  const previewRef = useRef<SyncReceivePreview | null>(null)
-  previewRef.current = preview
-
-  const tabBusy = submitting || applying
+  const busy = flow.starting || flow.confirmingSas || applying
   useEffect(() => {
-    onBusyChange?.(tabBusy)
+    onBusyChange?.(busy)
     return () => {
       onBusyChange?.(false)
     }
-  }, [tabBusy, onBusyChange])
+  }, [busy, onBusyChange])
 
-  useEffect(() => {
-    mountedRef.current = true
-    return () => {
-      mountedRef.current = false
-      if (waitSessRef.current) {
-        void api.cancelSyncReceive(waitSessRef.current.waitId).catch(() => {})
-      }
-      if (previewRef.current) {
-        void api.clearSyncPreview(previewRef.current.previewId).catch(() => {})
-      }
+  const st = flow.status?.state
+  const preview = flow.status?.preview ?? null
+  const uriWithSecret = isSynctoolUri(inputCodeOrUri) && inputCodeOrUri.includes('#')
+
+  const handleStartReceive = async () => {
+    if (!isReadySyncCodeOrUri(inputCodeOrUri)) {
+      onToast('请粘贴完整的 synctool://pair 链接或输入 8 位房间码', 'error')
+      return
     }
-  }, [])
-
-  const refreshRecvCode = useCallback(async () => {
-    try {
-      const code = await api.generateReceiverCode()
-      if (mountedRef.current) setRecvCode(code)
-    } catch (err) {
-      if (mountedRef.current) onToast(errMsg(err), 'error')
-    }
-  }, [onToast])
-
-  useEffect(() => {
-    let cancelled = false
-    void api.generateReceiverCode().then((code) => {
-      if (!cancelled && mountedRef.current) setRecvCode(code)
-    }).catch((err) => {
-      if (!cancelled && mountedRef.current) onToast(errMsg(err), 'error')
-    })
-    return () => { cancelled = true }
-  }, [onToast])
-
-  useSyncPolling({
-    enabled: Boolean(waitSess),
-    intervalMs: 1500,
-    resetKey: waitSess?.waitId ?? '',
-    poll: async () => {
-      const current = waitSessRef.current
-      if (!current || !mountedRef.current) return false
-      try {
-        const res = await api.pollSyncReceive(current.waitId)
-        if (!mountedRef.current) {
-          if (res.status === 'ready' && res.preview) {
-            void api.clearSyncPreview(res.preview.previewId).catch(() => {})
-          }
-          return false
-        }
-        if (waitSessRef.current?.waitId !== current.waitId) {
-          if (res.status === 'ready' && res.preview) {
-            void api.clearSyncPreview(res.preview.previewId).catch(() => {})
-          }
-          return false
-        }
-        if (pollErrorCountRef.current > 0) {
-          pollErrorCountRef.current = 0
-          setPollError('')
-        }
-        switch (res.status) {
-          case 'pending':
-            return true
-          case 'rejected': {
-            const msg = res.message || '发送端已拒绝此次同步请求'
-            setWaitSess(null)
-            setPollError('')
-            setErrorBanner(msg)
-            onToast(msg, 'error')
-            void refreshRecvCode()
-            return false
-          }
-          case 'expired': {
-            const msg = res.message || '同步码已过期或发送端已取消'
-            setWaitSess(null)
-            setPollError('')
-            setErrorBanner(msg)
-            onToast(msg, 'error')
-            void refreshRecvCode()
-            return false
-          }
-          case 'ready':
-            if (res.preview) {
-              setWaitSess(null)
-              setPollError('')
-              setErrorBanner('')
-              setPreview(res.preview)
-              setMode('merge')
-              return false
-            }
-            return true
-          default:
-            return true
-        }
-      } catch (err) {
-        if (!mountedRef.current || waitSessRef.current?.waitId !== current.waitId) return false
-        const msg = errMsg(err)
-        if (!isRetryablePollError(msg)) {
-          pollErrorCountRef.current = 0
-          setWaitSess(null)
-          setPollError('')
-          setErrorBanner(msg)
-          onToast(msg, 'error')
-          void refreshRecvCode()
-          return false
-        }
-        const cnt = ++pollErrorCountRef.current
-        const expiresMs = current.expiresAt ? new Date(current.expiresAt).getTime() : Number.NaN
-        const expiredPastGrace = Number.isFinite(expiresMs)
-          ? Date.now() >= expiresMs + OFFLINE_EXPIRY_GRACE_MS
-          : cnt >= MAX_CONSECUTIVE_POLL_ERRORS_NO_EXPIRY
-        if (expiredPastGrace) {
-          pollErrorCountRef.current = 0
-          const timeoutMsg = '连接中继失败且等待已超过有效期，请检查网络后重试'
-          setWaitSess(null)
-          setPollError('')
-          setErrorBanner(timeoutMsg)
-          onToast(timeoutMsg, 'error')
-          void refreshRecvCode()
-          return false
-        }
-        if (cnt >= 2) {
-          setPollError(`轮询中继失败（连续 ${cnt} 次）：${msg}`)
-        }
-        return true
-      }
-    },
-  })
-
-  const handleStartVerify = async () => {
-    if (submittingRef.current) return
-    if (!inputCode.trim()) { onToast('请输入发送端 8 位同步码或粘贴链接', 'error'); return }
-    if (!recvCode.trim()) { onToast('正在生成本机确认码，请稍候', 'error'); return }
-    submittingRef.current = true
-    pollErrorCountRef.current = 0
-    setSubmitting(true)
-    setErrorBanner('')
-    setPollError('')
     setSummary(null)
-    try {
-      const ws = await api.startSyncReceive(inputCode, recvCode, relayUrl)
-      if (!mountedRef.current) {
-        void api.cancelSyncReceive(ws.waitId).catch(() => {})
-        return
-      }
-      setWaitSess(ws)
-    } catch (err) {
-      if (mountedRef.current) {
-        const msg = errMsg(err)
-        setErrorBanner(msg)
-        onToast(msg, 'error')
-      }
-    } finally {
-      submittingRef.current = false
-      if (mountedRef.current) setSubmitting(false)
+    setImportMode('merge')
+    const started = await flow.startFlow(() => api.startSyncReceive(inputCodeOrUri.trim()))
+    if (started) {
+      setInputCodeOrUri('')
+      setShowRawUri(false)
     }
-  }
-
-  const handleCancelWait = () => {
-    if (!waitSess) return
-    const wid = waitSess.waitId
-    pollErrorCountRef.current = 0
-    setPollError('')
-    setWaitSess(null)
-    void api.cancelSyncReceive(wid).catch(() => {})
-    void refreshRecvCode()
   }
 
   const handleDiscardPreview = () => {
-    if (applyingRef.current) return
-    if (preview) {
-      void api.clearSyncPreview(preview.previewId).catch(() => {})
-    }
-    setPreview(null)
-    void refreshRecvCode()
+    if (applying) return
+    flow.resetFlow(true)
   }
 
-  const handleApply = async () => {
-    if (!preview || applyingRef.current) return
-    applyingRef.current = true
+  const handleApplyPreview = async () => {
+    if (!preview || applying) return
     setApplying(true)
     try {
-      const res = await api.applySyncReceive(preview.previewId, mode)
+      const res = await api.applySyncReceive(preview.previewId, importMode)
       onSynced()
-      if (!mountedRef.current) return
       setSummary(res)
-      setPreview(null)
-      setInputCode('')
-      setErrorBanner('')
-      onToast(mode === 'merge' ? '已安全合并同步配置到本地保险库' : '已使用同步配置覆盖本地数据')
+      flow.resetFlow(false)
+      onToast(importMode === 'merge' ? '已安全合并同步配置到本地保险库' : '已使用同步配置覆盖本地数据')
     } catch (err) {
-      if (mountedRef.current) onToast(errMsg(err), 'error')
+      onToast(errMsg(err), 'error')
     } finally {
-      applyingRef.current = false
-      if (mountedRef.current) setApplying(false)
+      setApplying(false)
     }
   }
 
   if (summary) {
     return (
-      <div className="space-y-4">
-        <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/30 p-4 space-y-2">
-          <div className="flex items-center gap-2 text-sm font-semibold text-emerald-300">
-            <CheckCircle2 className="w-4 h-4" />
-            <span>同步完成（{summary.mode === 'merge' ? '安全合并' : '覆盖本地'}）</span>
-          </div>
-          <div className="grid grid-cols-2 gap-2 text-xs text-ag-text pt-1">
-            <div>服务器：+{summary.serversAdded} 新增 / {summary.serversUpdated} 更新</div>
-            <div>SSH 密钥：+{summary.keysAdded} 新增 / {summary.keysUpdated} 更新</div>
-            <div>快捷命令：+{summary.shortcutsAdded} 新增 / {summary.shortcutsUpdated} 更新</div>
-            <div>运维模板：+{summary.templatesAdded} 新增 / {summary.templatesUpdated} 更新</div>
-          </div>
-        </div>
-        <button
-          onClick={() => {
-            setSummary(null)
-            void refreshRecvCode()
-          }}
-          className="w-full py-2.5 rounded-xl bg-ag-elevated hover:bg-ag-hover border border-ag-border text-xs text-ag-text transition"
-        >
-          继续接收其他同步码
-        </button>
-      </div>
-    )
-  }
-
-  if (preview) {
-    return (
-      <SyncPreviewCard
-        preview={preview}
-        mode={mode}
-        applying={applying}
-        onModeChange={setMode}
-        onDiscard={handleDiscardPreview}
-        onApply={() => void handleApply()}
+      <SyncSummaryCard
+        summary={summary}
+        continueLabel="继续接收其他配置"
+        onContinue={() => setSummary(null)}
       />
     )
   }
 
-  if (waitSess) {
+  if (st === 'ready_preview' && preview) {
+    return (
+      <SyncPreviewCard
+        preview={preview}
+        mode={importMode}
+        applying={applying}
+        onModeChange={setImportMode}
+        onDiscard={handleDiscardPreview}
+        onApply={() => void handleApplyPreview()}
+      />
+    )
+  }
+
+  if (flow.session) {
     return (
       <div className="space-y-4">
-        <div className="rounded-xl bg-[#0d111a] border border-indigo-500/35 p-5 space-y-3 text-center">
-          <div className="flex items-center justify-center gap-2 text-xs font-medium text-indigo-300">
-            <Loader2 className="w-4 h-4 animate-spin" />
-            <span>已提交给发送端，等待发送端核对本机确认码并点击同意</span>
-          </div>
-          <div className="rounded-xl bg-[#0b0d12] border border-indigo-500/40 py-3 px-4 inline-block">
-            <div className="text-[11px] text-ag-muted mb-1">本机确认码</div>
-            <div className="font-mono text-2xl font-bold tracking-[0.22em] text-indigo-200 select-all">
-              {waitSess.receiverCode}
+        {st === 'waiting_peer' && (
+          <div className="rounded-xl bg-[#0d111a] border border-indigo-500/35 p-5 space-y-2.5 text-center">
+            <div className="flex items-center justify-center gap-2 text-xs font-medium text-indigo-300">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span>已进入同步房间，正在与发送端进行 X25519 加密握手...</span>
             </div>
-          </div>
-          <p className="text-xs text-ag-muted leading-relaxed">
-            请在发送端设备上核对屏幕显示的接收确认码为 <span className="font-mono text-indigo-200">{waitSess.receiverCode}</span> 后点击「确认一致，同意发送」。
-          </p>
-          <div className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-300">
-            <Clock className="w-3.5 h-3.5" />
-            <span>{waitLeft <= 0 ? '即将过期 · 等待中继确认状态' : `等待超时 ${fmtSec(waitLeft)}`}</span>
-          </div>
-        </div>
-        {pollError && (
-          <div className="rounded-xl bg-amber-500/10 border border-amber-500/35 px-3.5 py-2.5 flex items-center gap-2 text-xs text-amber-200">
-            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-300" />
-            <span className="break-all">{pollError}</span>
+            <p className="text-[11px] text-ag-muted">
+              若使用 8 位房间码模式，握手完成后将弹出 6 位安全码供双方当面核对。
+            </p>
           </div>
         )}
-        <button
-          onClick={handleCancelWait}
-          className="w-full py-2.5 rounded-xl bg-rose-500/[0.12] hover:bg-rose-500/20 border border-rose-500/30 text-xs font-medium text-rose-300 flex items-center justify-center gap-1.5 transition"
-        >
-          <XCircle className="w-4 h-4" />
-          取消等待
-        </button>
+
+        {st === 'awaiting_sas_confirm' && (
+          <SyncSasPrompt
+            variant="confirm"
+            sasCode={flow.status?.sas}
+            approveLabel="一致，允许接收"
+            busy={flow.confirmingSas}
+            onConfirm={(approved) => void flow.confirmSas(approved)}
+          />
+        )}
+
+        {st === 'transferring' && (
+          <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/30 p-4 flex items-center justify-between gap-2 text-xs text-emerald-200">
+            <span className="flex items-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin shrink-0 text-emerald-300" />
+              安全核验已通过，正在拉取并解密校验配置包...
+            </span>
+            {(flow.status?.bytesTotal ?? 0) > 0 && (
+              <span className="font-mono">
+                {formatBytes(flow.status?.bytesDone)} / {formatBytes(flow.status?.bytesTotal)}
+              </span>
+            )}
+          </div>
+        )}
+
+        {(st === 'error' || st === 'cancelled') && (
+          <div className="rounded-xl bg-rose-500/10 border border-rose-500/35 p-4 space-y-3">
+            <div className="flex items-center gap-2 text-xs text-rose-200">
+              <ShieldAlert className="w-4 h-4 shrink-0 text-rose-300" />
+              <span>{flow.status?.message || flow.error || '接收已取消或校验未通过'}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => flow.resetFlow(false)}
+              className="w-full py-2 rounded-lg bg-ag-elevated hover:bg-ag-hover border border-ag-border text-xs text-ag-text"
+            >
+              返回重新输入
+            </button>
+          </div>
+        )}
+
+        {flow.isActive && st !== 'awaiting_sas_confirm' && (
+          <button
+            type="button"
+            disabled={flow.cancelling}
+            onClick={() => void flow.cancelFlow()}
+            className="w-full py-2.5 rounded-xl bg-rose-500/[0.12] hover:bg-rose-500/20 border border-rose-500/30 text-xs font-medium text-rose-300 flex items-center justify-center gap-1.5 transition disabled:opacity-50"
+          >
+            <XCircle className="w-4 h-4" />
+            取消接收
+          </button>
+        )}
       </div>
     )
   }
 
   return (
     <div className="space-y-4">
-      <div className="rounded-xl bg-[#0d111a] border border-ag-border p-3.5 flex items-center justify-between gap-3">
-        <div className="space-y-0.5">
-          <div className="text-[11px] text-ag-muted">本机确认码（发送端核对用）</div>
-          <div className="font-mono text-lg font-bold tracking-[0.2em] text-indigo-200 select-all">
-            {recvCode || '---- ----'}
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={() => void refreshRecvCode()}
-          disabled={submitting}
-          className="px-2.5 py-1.5 rounded-lg bg-ag-elevated hover:bg-ag-hover border border-ag-border text-xs text-ag-text flex items-center gap-1.5 disabled:opacity-50"
-        >
-          <RefreshCw className="w-3.5 h-3.5" />
-          刷新本机码
-        </button>
-      </div>
-
-      {errorBanner && (
+      {flow.error && (
         <div className="rounded-xl bg-rose-500/10 border border-rose-500/35 px-3.5 py-2.5 flex items-center gap-2 text-xs text-rose-200">
           <ShieldAlert className="w-4 h-4 shrink-0 text-rose-300" />
-          <span>{errorBanner}</span>
+          <span>{flow.error}</span>
         </div>
       )}
 
       <div className="space-y-2">
         <label className="text-xs font-medium text-ag-text block">
-          输入发送端 8 位同步码（支持直接粘贴 <span className="font-mono text-indigo-300">gssh-sync://</span> 链接）
+          粘贴配对链接（<span className="font-mono text-indigo-300">synctool://pair?...</span>）或输入 8 位房间码
         </label>
-        <input
-          type="text"
-          disabled={submitting}
-          value={inputCode}
-          onChange={(e) => setInputCode(formatSyncInput(e.target.value))}
-          onKeyDown={(e) => {
-            if (e.nativeEvent.isComposing || e.keyCode === 229) return
-            if (e.key === 'Enter' && !submittingRef.current) void handleStartVerify()
-          }}
-          placeholder="XXXX-XXXX"
-          autoFocus
-          className="w-full rounded-xl bg-[#0b0d12] border border-ag-border px-4 py-3 text-center font-mono text-xl tracking-[0.22em] text-ag-text placeholder:text-ag-subtle focus:outline-none focus:border-indigo-500/70 transition disabled:opacity-60"
-        />
-        <p className="text-[11px] text-ag-muted">
-          点击后将使用发送端同步码加密提交本机确认码，待发送端核对一致并同意后，再用双方密钥联合解密预览。
+        <div className="relative">
+          <input
+            type={uriWithSecret && !showRawUri ? 'password' : 'text'}
+            autoComplete="off"
+            spellCheck={false}
+            disabled={flow.starting}
+            value={inputCodeOrUri}
+            onChange={(e) => {
+              if (flow.error) flow.setError('')
+              setInputCodeOrUri(formatSyncCodeOrUriInput(e.target.value))
+            }}
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return
+              if (e.key === 'Enter' && isReadySyncCodeOrUri(inputCodeOrUri)) void handleStartReceive()
+            }}
+            placeholder="XXXX-XXXX 或 synctool://pair?..."
+            autoFocus
+            className={`w-full rounded-xl bg-[#0b0d12] border border-ag-border px-4 py-3 font-mono text-ag-text placeholder:text-ag-subtle focus:outline-none focus:border-indigo-500/70 transition disabled:opacity-60 ${
+              isSynctoolUri(inputCodeOrUri) ? 'text-xs pr-10' : 'text-center text-xl tracking-[0.22em]'
+            }`}
+          />
+          {uriWithSecret && (
+            <button
+              type="button"
+              onClick={() => setShowRawUri((v) => !v)}
+              aria-label={showRawUri ? '隐藏链接密钥' : '显示链接内容'}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-ag-muted hover:text-ag-text"
+            >
+              {showRawUri ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+            </button>
+          )}
+        </div>
+        <p className="text-[11px] text-ag-muted leading-relaxed">
+          支持接收一次性速传链接（若链接携带自定义中继将自动识别连接）、8 位房间码（需双向核对 6 位安全码），或已配对设备的实时直传码。
         </p>
       </div>
+
       <button
-        onClick={() => void handleStartVerify()}
-        disabled={submitting || !recvCode || inputCode.replace(/-/g, '').length < 8}
+        type="button"
+        onClick={() => void handleStartReceive()}
+        disabled={flow.starting || !isReadySyncCodeOrUri(inputCodeOrUri)}
         className="w-full py-3 rounded-xl bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 text-white text-sm font-medium transition shadow-glow flex items-center justify-center gap-2"
       >
-        {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
-        {submitting ? '正在提交验证请求...' : '发起验证并接收'}
+        {flow.starting ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
+        {flow.starting ? '正在连接加密房间...' : '连接房间并解密预览'}
       </button>
     </div>
   )

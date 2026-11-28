@@ -1,6 +1,7 @@
 import React from 'react'
-import { AlertTriangle, GitMerge, Laptop, Loader2, RefreshCcw, Smartphone } from 'lucide-react'
-import type { SyncReceivePreview } from '../syncTypes'
+import { AlertTriangle, CheckCircle2, GitMerge, Laptop, Loader2, RefreshCcw, Smartphone } from 'lucide-react'
+import type { SyncImportSummary, SyncReceivePreview } from '../syncTypes'
+import { formatPlatformLabel, formatSyncTimestamp } from '../utils/syncUri'
 
 interface Props {
   preview: SyncReceivePreview
@@ -11,32 +12,16 @@ interface Props {
   onApply: () => void
 }
 
-function formatPlatformLabel(raw: string): string {
-  const p = (raw || '').trim().toLowerCase()
-  if (p === 'android') return 'Android'
-  if (p === 'windows') return 'Windows'
-  if (p === 'darwin' || p === 'macos') return 'macOS'
-  if (p === 'ios') return 'iOS'
-  if (p === 'linux') return 'Linux'
-  return raw?.trim() || '未知平台'
-}
-
-function formatExportedAt(raw: string): string {
-  if (!raw) return '未知时间'
-  const date = new Date(raw)
-  return Number.isNaN(date.getTime()) ? '未知时间' : date.toLocaleString()
-}
-
 export const SyncPreviewCard: React.FC<Props> = ({ preview, mode, applying, onModeChange, onDiscard, onApply }) => {
   const platformKey = (preview.sourcePlatform || '').trim().toLowerCase()
   const isMobile = platformKey === 'android' || platformKey === 'ios'
   const platformLabel = formatPlatformLabel(preview.sourcePlatform)
-  const exportedAtText = formatExportedAt(preview.exportedAt)
+  const exportedAtText = formatSyncTimestamp(preview.exportedAt)
   const stats = [
-    ['服务器', preview.serverCount],
-    ['SSH 密钥', preview.keyCount],
-    ['快捷命令', preview.shortcutCount],
-    ['运维模板', preview.templateCount],
+    ['主机', preview.serverCount],
+    ['密钥', preview.keyCount],
+    ['快捷', preview.shortcutCount],
+    ['模板', preview.templateCount],
   ]
 
   return (
@@ -57,7 +42,7 @@ export const SyncPreviewCard: React.FC<Props> = ({ preview, mode, applying, onMo
             </div>
           </div>
           <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-            已解密校验
+            已端到端解密校验
           </span>
         </div>
 
@@ -83,7 +68,7 @@ export const SyncPreviewCard: React.FC<Props> = ({ preview, mode, applying, onMo
             <span>安全合并（推荐）</span>
           </div>
           <p className="text-[11px] text-ag-muted mt-1 leading-relaxed">
-            按 ID / 地址 / 指纹去重更新，绝不删除本机独有配置。
+            按 ID / 地址 / 指纹智能去重更新，保留本机独有服务器与密钥。
           </p>
         </button>
 
@@ -98,7 +83,7 @@ export const SyncPreviewCard: React.FC<Props> = ({ preview, mode, applying, onMo
             <span>覆盖本地</span>
           </div>
           <p className="text-[11px] text-ag-muted mt-1 leading-relaxed">
-            替换为同步包内容，保留本地应用设置与保险库密码。
+            替换为同步包内容，自动保留本地应用设置、保险库密码与已配对设备。
           </p>
         </button>
       </div>
@@ -118,3 +103,31 @@ export const SyncPreviewCard: React.FC<Props> = ({ preview, mode, applying, onMo
     </div>
   )
 }
+
+export const SyncSummaryCard: React.FC<{
+  summary: SyncImportSummary
+  continueLabel: string
+  onContinue: () => void
+}> = ({ summary, continueLabel, onContinue }) => (
+  <div className="space-y-3">
+    <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/30 p-4 space-y-2">
+      <div className="flex items-center gap-2 text-sm font-semibold text-emerald-300">
+        <CheckCircle2 className="w-4 h-4" />
+        <span>同步导入完成（{summary.mode === 'merge' ? '安全合并' : '覆盖本地'}）</span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-xs text-ag-text pt-1">
+        <div>主机：+{summary.serversAdded} 新增 / {summary.serversUpdated} 更新</div>
+        <div>密钥：+{summary.keysAdded} 新增 / {summary.keysUpdated} 更新</div>
+        <div>快捷：+{summary.shortcutsAdded} 新增 / {summary.shortcutsUpdated} 更新</div>
+        <div>模板：+{summary.templatesAdded} 新增 / {summary.templatesUpdated} 更新</div>
+      </div>
+    </div>
+    <button
+      type="button"
+      onClick={onContinue}
+      className="w-full py-2.5 rounded-xl bg-ag-elevated hover:bg-ag-hover border border-ag-border text-xs text-ag-text transition"
+    >
+      {continueLabel}
+    </button>
+  </div>
+)
