@@ -3,7 +3,7 @@ import { RefreshCw, Settings, X } from 'lucide-react'
 import type { SyncRelayStatus } from '../syncTypes'
 import type { AppSettings, UpdateCheckResult, VaultLockState, VaultSecurityInfo } from '../types'
 import { errMsg } from '../utils/errors'
-import { redactSyncUri } from '../utils/syncUri'
+import { formatRelaySummary } from '../utils/syncUri'
 import { api } from '../wailsApi'
 import { ModalShell } from './ModalShell'
 import { SettingsToggles } from './SettingsToggles'
@@ -105,10 +105,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   }
 
-  const relaySummary =
-    relayStatus?.mode === 'custom'
-      ? `自定义中继 (${relayStatus.endpoint || redactSyncUri(relayStatus.redactedUri)})`
-      : '官方默认中继 (TLS 1.3 + SPKI Pin)'
+  const relaySummary = formatRelaySummary(relayStatus)
 
   return (
     <ModalShell open={open} onClose={handleClose}>
@@ -118,10 +115,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <div className="w-8 h-8 rounded-lg bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-300">
               <Settings className="w-4 h-4" />
             </div>
-            <div>
-              <h2 className="text-sm font-semibold text-ag-text">设置 · GravitySSH v{appVersion}</h2>
-              <p className="text-[11px] text-ag-muted">自定义命令补齐、监控、SFTP、多端同步与更新</p>
-            </div>
+            <h2 className="text-sm font-semibold text-ag-text">设置 · GravitySSH v{appVersion}</h2>
           </div>
           <button
             type="button"
@@ -137,9 +131,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
           <div className="rounded-xl bg-[#0d111a] border border-cyan-500/25 p-3.5 flex items-center justify-between gap-3">
             <div>
-              <div className="text-xs font-semibold text-ag-text">多端同步 (synctool-v1)</div>
+              <div className="text-xs font-semibold text-ag-text">多端同步</div>
               <p className="text-[11px] text-ag-muted mt-0.5">
-                已配对设备一键加密推送 / 离线收件箱 / 扫码速传 · 当前中继：{relaySummary}
+                当前中继：{relaySummary}
               </p>
             </div>
             <button
