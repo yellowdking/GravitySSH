@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { AlertCircle, FolderLock, KeyRound, Loader2, Lock, Unlock } from 'lucide-react'
+import { AlertCircle, AlertTriangle, FolderLock, KeyRound, Loader2, Lock, Unlock } from 'lucide-react'
 import type { VaultLockState, VaultSecurityInfo } from '../types'
 import { api } from '../wailsApi'
 import { errMsg } from '../utils/errors'
@@ -7,6 +7,7 @@ import { errMsg } from '../utils/errors'
 interface Props {
   securityInfo: VaultSecurityInfo | null
   lockState: VaultLockState | null
+  activeSessionCount?: number
   onLockStateChanged: () => void
   onLocked?: () => void
   onBusyChange?: (busy: boolean) => void
@@ -16,6 +17,7 @@ interface Props {
 export const VaultPasswordSection: React.FC<Props> = ({
   securityInfo,
   lockState,
+  activeSessionCount = 0,
   onLockStateChanged,
   onLocked,
   onBusyChange,
@@ -25,6 +27,7 @@ export const VaultPasswordSection: React.FC<Props> = ({
   const vaultPath = lockState?.vaultPath || securityInfo?.vaultPath || ''
 
   const [action, setAction] = useState<'none' | 'set' | 'change' | 'remove'>('none')
+  const [confirmLock, setConfirmLock] = useState(false)
   const [currentPwd, setCurrentPwd] = useState('')
   const [newPwd, setNewPwd] = useState('')
   const [confirmPwd, setConfirmPwd] = useState('')
@@ -43,9 +46,14 @@ export const VaultPasswordSection: React.FC<Props> = ({
     }
   }, [onBusyChange])
 
+  useEffect(() => {
+    if (activeSessionCount <= 0) setConfirmLock(false)
+  }, [activeSessionCount])
+
   const reset = (force = false) => {
     if (!force && busyRef.current) return
     setAction('none')
+    setConfirmLock(false)
     setCurrentPwd('')
     setNewPwd('')
     setConfirmPwd('')
@@ -87,7 +95,7 @@ export const VaultPasswordSection: React.FC<Props> = ({
     }
   }
 
-  const handleLockNow = async () => {
+  const executeLock = async () => {
     if (busyRef.current || !hasPassword) return
     setError('')
     busyRef.current = true
@@ -96,7 +104,7 @@ export const VaultPasswordSection: React.FC<Props> = ({
     onBusyChange?.(true)
     try {
       await api.lockVault()
-      if (mountedRef.current) onToast('保险库已锁定')
+      if (mountedRef.current) onToast('保险库已锁定，所有活动连接已断开')
       if (onLocked) onLocked()
       else onLockStateChanged()
     } catch (err) {
@@ -111,8 +119,18 @@ export const VaultPasswordSection: React.FC<Props> = ({
       if (mountedRef.current) {
         setBusy(false)
         setLocking(false)
+        setConfirmLock(false)
       }
     }
+  }
+
+  const handleLockClick = () => {
+    if (busyRef.current || !hasPassword) return
+    if (activeSessionCount > 0 && !confirmLock) {
+      setConfirmLock(true)
+      return
+    }
+    void executeLock()
   }
 
   return (
@@ -143,31 +161,62 @@ export const VaultPasswordSection: React.FC<Props> = ({
 
         {action === 'none' ? (
           <div className="space-y-2.5">
-            <div className="flex flex-wrap items-center gap-2">
-              {!hasPassword ? (
-                <button type="button" disabled={busy} onClick={() => setAction('set')} className="ag-btn-secondary text-xs py-1.5 px-3">
-                  <KeyRound className="w-3.5 h-3.5 text-indigo-400" />设置自定义加密密码
-                </button>
-              ) : (
-                <>
+            {confirmLock && activeSessionCount > 0 ? (
+              <div className="rounded-xl bg-amber-500/10 border border-amber-500/35 p-3 space-y-2.5">
+                <div className="flex items-start gap-2 text-xs text-amber-200 leading-relaxed">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
+                  <span>
+                    当前存在 <strong className="font-mono text-amber-100">{activeSessionCount}</strong> 个活动 SSH
+                    会话。立即锁定保险库将强制关闭所有终端连接、SFTP 通道及未完成的同步任务，是否继续？
+                  </span>
+                </div>
+                <div className="flex items-center justify-end gap-2">
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => void handleLockNow()}
-                    className="ag-btn-secondary text-xs py-1.5 px-3 border-amber-500/35 text-amber-200 hover:bg-amber-500/15"
+                    onClick={() => setConfirmLock(false)}
+                    className="ag-btn-ghost text-xs py-1 px-2.5"
                   >
-                    {locking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Lock className="w-3.5 h-3.5 text-amber-400" />}
-                    {locking ? '正在锁定...' : '立即锁定'}
+                    取消
                   </button>
-                  <button type="button" disabled={busy} onClick={() => setAction('change')} className="ag-btn-secondary text-xs py-1.5 px-3">
-                    <KeyRound className="w-3.5 h-3.5 text-indigo-400" />修改密码
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void executeLock()}
+                    className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium flex items-center gap-1.5 transition disabled:opacity-50"
+                  >
+                    {locking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Lock className="w-3.5 h-3.5" />}
+                    {locking ? '正在断开并锁定...' : '确认断开并锁定'}
                   </button>
-                  <button type="button" disabled={busy} onClick={() => setAction('remove')} className="ag-btn-ghost text-xs text-rose-300 hover:text-rose-200">
-                    <Unlock className="w-3.5 h-3.5" />移除密码
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                {!hasPassword ? (
+                  <button type="button" disabled={busy} onClick={() => setAction('set')} className="ag-btn-secondary text-xs py-1.5 px-3">
+                    <KeyRound className="w-3.5 h-3.5 text-indigo-400" />设置自定义加密密码
                   </button>
-                </>
-              )}
-            </div>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={handleLockClick}
+                      className="ag-btn-secondary text-xs py-1.5 px-3 border-amber-500/35 text-amber-200 hover:bg-amber-500/15"
+                    >
+                      {locking ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Lock className="w-3.5 h-3.5 text-amber-400" />}
+                      {locking ? '正在锁定...' : '立即锁定'}
+                    </button>
+                    <button type="button" disabled={busy} onClick={() => setAction('change')} className="ag-btn-secondary text-xs py-1.5 px-3">
+                      <KeyRound className="w-3.5 h-3.5 text-indigo-400" />修改密码
+                    </button>
+                    <button type="button" disabled={busy} onClick={() => setAction('remove')} className="ag-btn-ghost text-xs text-rose-300 hover:text-rose-200">
+                      <Unlock className="w-3.5 h-3.5" />移除密码
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
             {error && (
               <div className="flex items-center gap-1.5 text-xs text-rose-300">
                 <AlertCircle className="w-3.5 h-3.5 shrink-0" />
