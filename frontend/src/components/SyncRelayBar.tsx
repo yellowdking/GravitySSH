@@ -18,7 +18,7 @@ interface Props {
 }
 
 const DOCKER_DEPLOY_CMD =
-  'docker run -d --name synctool-relay --restart unless-stopped -p 54843:54843 -v synctool_data:/data -e SYNCTOOL_PUBLIC_HOST=<VPS_IP> -e SYNCTOOL_PROFILE=standard -e SYNCTOOL_SPOOL=disk ghcr.io/yellowdking/synctool:latest'
+  'docker run -d --name synctool-relay --restart unless-stopped -p 54843:54843 -v synctool_data:/data -e SYNCTOOL_PUBLIC_HOST=<VPS_IP> -e SYNCTOOL_PROFILE=standard -e SYNCTOOL_SPOOL=disk bbplin/synctool:latest'
 
 export const SyncRelayBar: React.FC<Props> = ({
   relay,
