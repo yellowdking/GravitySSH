@@ -1,4 +1,5 @@
 import React, { useMemo } from 'react'
+import { AlertTriangle } from 'lucide-react'
 import { generateQrMatrix } from '../utils/qrCode'
 
 interface QrCodeSvgProps {
@@ -7,9 +8,12 @@ interface QrCodeSvgProps {
   className?: string
 }
 
-export const QrCodeSvg: React.FC<QrCodeSvgProps> = ({ value, size = 176, className = '' }) => {
-  const quiet = 3
-  const { dim, pathData } = useMemo(() => {
+export const QrCodeSvg: React.FC<QrCodeSvgProps> = ({ value, size = 184, className = '' }) => {
+  const quiet = 4
+  const { dim, pathData, error } = useMemo(() => {
+    if (!value) {
+      return { dim: 0, pathData: '', error: '配对二维码内容为空' }
+    }
     try {
       const matrix = generateQrMatrix(value)
       const parts: string[] = []
@@ -26,13 +30,28 @@ export const QrCodeSvg: React.FC<QrCodeSvgProps> = ({ value, size = 176, classNa
           parts.push(`M${start + quiet} ${r + quiet}h${c - start}v1h-${c - start}z`)
         }
       }
-      return { dim: matrix.length + quiet * 2, pathData: parts.join('') }
+      return { dim: matrix.length + quiet * 2, pathData: parts.join(''), error: '' }
     } catch {
-      return { dim: 0, pathData: '' }
+      return {
+        dim: 0,
+        pathData: '',
+        error: '二维码生成失败（链接超出容量限制），请改用复制链接或 8 位房间码',
+      }
     }
   }, [value])
 
-  if (!dim) return null
+  if (!dim || error) {
+    return (
+      <div
+        role="alert"
+        style={{ width: size, minHeight: Math.min(size, 148) }}
+        className={`inline-flex flex-col items-center justify-center gap-2 p-3 rounded-xl bg-rose-950/40 border border-rose-500/40 text-center ${className}`}
+      >
+        <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0" />
+        <span className="text-[11px] text-rose-200 leading-relaxed">{error}</span>
+      </div>
+    )
+  }
 
   return (
     <div className={`inline-flex p-2.5 rounded-xl bg-white shadow-lg border border-indigo-400/30 ${className}`}>
@@ -42,7 +61,7 @@ export const QrCodeSvg: React.FC<QrCodeSvgProps> = ({ value, size = 176, classNa
         viewBox={`0 0 ${dim} ${dim}`}
         shapeRendering="crispEdges"
         role="img"
-        aria-label={`QR code for ${value}`}
+        aria-label="Sync pairing QR code"
       >
         <rect width={dim} height={dim} fill="#ffffff" />
         {pathData && <path d={pathData} fill="#0b0d12" />}
