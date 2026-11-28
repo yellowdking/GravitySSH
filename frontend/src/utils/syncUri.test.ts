@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { syncApi } from '../wailsSyncApi'
 import {
   certExpiryAlert,
+  formatPingSummary,
+  formatRelaySummary,
   formatRoomCodeDisplay,
   formatSasDisplay,
   formatSyncCodeOrUriInput,
@@ -15,6 +17,32 @@ describe('syncUri helpers', () => {
     const raw = 'synctool://relay?v=1&u=https%3A%2F%2F1.2.3.4%3A54843#k=SECRET_ACCESS_KEY_32_CHARS_MINIMUM'
     expect(redactSyncUri(raw)).toBe('synctool://relay?v=1&u=https%3A%2F%2F1.2.3.4%3A54843#[REDACTED]')
     expect(redactSyncUri(raw)).not.toContain('SECRET_ACCESS_KEY')
+  })
+
+  it('formats minimal relay and connectivity summaries without raw default IP or protocol fluff', () => {
+    expect(formatRelaySummary(null)).toBe('官方默认中继')
+    expect(
+      formatRelaySummary({
+        mode: 'default',
+        endpoint: 'https://43.155.231.14:54843',
+        redactedUri: 'synctool://relay?v=1#[REDACTED]',
+      })
+    ).toBe('官方默认中继')
+    expect(
+      formatRelaySummary({
+        mode: 'custom',
+        endpoint: 'https://relay.example.com:54843',
+        redactedUri: 'synctool://relay?v=1&u=https%3A%2F%2Frelay.example.com%3A54843#[REDACTED]',
+      })
+    ).toBe('https://relay.example.com:54843')
+    expect(
+      formatRelaySummary({
+        mode: 'custom',
+        endpoint: '',
+        redactedUri: 'synctool://relay?v=1&u=https%3A%2F%2F1.2.3.4%3A54843#k=TOP_SECRET',
+      })
+    ).toBe('synctool://relay?v=1&u=https%3A%2F%2F1.2.3.4%3A54843#[REDACTED]')
+    expect(formatPingSummary(1748)).toBe('已连通 1748ms')
   })
 
   it('preserves synctool://pair URIs verbatim while normalizing 8-char Crockford Base32 room codes', () => {

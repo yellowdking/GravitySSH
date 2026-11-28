@@ -6,6 +6,19 @@ export function redactSyncUri(raw: string): string {
   return idx >= 0 ? `${trimmed.slice(0, idx)}#[REDACTED]` : trimmed
 }
 
+export function formatRelaySummary(
+  relay?: { mode?: string; endpoint?: string; redactedUri?: string } | null
+): string {
+  if (relay?.mode === 'custom') {
+    return relay.endpoint?.trim() || redactSyncUri(relay.redactedUri || '') || '自定义中继'
+  }
+  return '官方默认中继'
+}
+
+export function formatPingSummary(rttMs: number): string {
+  return `已连通 ${rttMs}ms`
+}
+
 export function isSynctoolUri(raw: string): boolean {
   return /^synctool:\/\//i.test(raw.trim())
 }
