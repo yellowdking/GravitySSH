@@ -1,4 +1,4 @@
-name: CI & Windows Release
+name: CI & Release
 
 on:
   push:
@@ -76,7 +76,7 @@ jobs:
         working-directory: frontend
         run: npm run build
 
-      - name: Go Vet & Unit Tests (Windows DPAPI, Vault, SSH Proxy/Jump, Autocomplete)
+      - name: Go Vet & Unit Tests (Windows)
         shell: pwsh
         run: |
           go vet ./...
@@ -97,7 +97,7 @@ jobs:
             go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.1
           }
 
-      - name: Generate Windows Application Icons
+      - name: Generate Application Icons
         shell: pwsh
         run: python scripts/gen_icons.py
 
@@ -107,7 +107,7 @@ jobs:
           $v = "${{ steps.ver.outputs.version }}"
           wails build -clean -s -skipbindings -trimpath -ldflags "-s -w -X main.AppVersion=$v"
 
-      - name: Package Portable Artifacts & SHA256 Checksums
+      - name: Package Windows Portable Artifacts
         shell: pwsh
         run: |
           $v = "${{ steps.ver.outputs.version }}"
@@ -116,20 +116,108 @@ jobs:
           $zipName = "GravitySSH-v$v-windows-amd64-portable.zip"
           Copy-Item "build\bin\GravitySSH.exe" "dist-release\$exeName"
           Compress-Archive -Path "dist-release\$exeName", "README.md" -DestinationPath "dist-release\$zipName" -Force
-
-          $hashes = @()
-          foreach ($f in @($exeName, $zipName)) {
-            $h = (Get-FileHash "dist-release\$f" -Algorithm SHA256).Hash.ToLower()
-            $hashes += "$h  $f"
-          }
-          $hashes -join "`n" | Set-Content -Encoding utf8 "dist-release\SHA256SUMS.txt"
           Get-ChildItem dist-release
 
-      - name: Upload Build Artifacts
+      - name: Upload Windows Build Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: GravitySSH-windows-amd64-v${{ steps.ver.outputs.version }}
           path: dist-release/*
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        id: go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Read Version
+        id: ver
+        shell: bash
+        run: |
+          VER="$(tr -d '[:space:]' < VERSION)"
+          if [ -z "$VER" ]; then
+            echo "::error::VERSION file is empty."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF#refs/tags/v}" != "$VER" ]]; then
+            echo "::error::Tag ${GITHUB_REF} does not match VERSION ${VER}."
+            exit 1
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Install Frontend Dependencies
+        working-directory: frontend
+        run: npm install --no-audit --no-fund
+
+      - name: Run Frontend Unit Tests
+        working-directory: frontend
+        run: npm test
+
+      - name: Build Frontend (TypeScript + Vite)
+        working-directory: frontend
+        run: npm run build
+
+      - name: Go Vet (macOS)
+        run: go vet ./...
+
+      - name: Cache Wails CLI
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin
+          key: ${{ runner.os }}-wails-v2.17.1-${{ steps.go.outputs.go-version }}
+
+      - name: Install Wails v2 CLI
+        shell: bash
+        run: |
+          GOBIN_DIR="$(go env GOPATH)/bin"
+          echo "$GOBIN_DIR" >> "$GITHUB_PATH"
+          if [ ! -x "$GOBIN_DIR/wails" ]; then
+            go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.1
+          fi
+
+      - name: Generate Retina Application Icon
+        run: python3 scripts/gen_icons.py
+
+      - name: Build Universal macOS App & DMG
+        shell: bash
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          wails build -platform darwin/universal -clean -s -skipbindings -trimpath -ldflags "-s -w -X main.AppVersion=$VER"
+          lipo -archs build/bin/GravitySSH.app/Contents/MacOS/GravitySSH
+          xattr -cr build/bin/GravitySSH.app
+          codesign --force --deep --sign - build/bin/GravitySSH.app
+          codesign --verify --deep --strict build/bin/GravitySSH.app
+
+          rm -rf dmg-root dist-macos
+          mkdir -p dmg-root dist-macos
+          cp -R build/bin/GravitySSH.app dmg-root/
+          ln -s /Applications dmg-root/Applications
+          if ! hdiutil create -volname "GravitySSH" -srcfolder dmg-root -ov -format UDZO "dist-macos/GravitySSH-v${VER}-darwin-universal.dmg"; then
+            sleep 2
+            hdiutil create -volname "GravitySSH" -srcfolder dmg-root -ov -format UDZO "dist-macos/GravitySSH-v${VER}-darwin-universal.dmg"
+          fi
+          ls -lh dist-macos
+
+      - name: Upload macOS Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GravitySSH-darwin-universal-v${{ steps.ver.outputs.version }}
+          path: dist-macos/*
 
   test-race:
     runs-on: ubuntu-latest
@@ -147,7 +235,7 @@ jobs:
         run: go test -race -count=1 ./internal/...
 
   release:
-    needs: [test-and-build, test-race]
+    needs: [test-and-build, build-macos, test-race]
     if: >-
       (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) ||
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
@@ -179,12 +267,34 @@ jobs:
           fi
           echo "publish=true" >> "$GITHUB_OUTPUT"
 
-      - name: Download Build Artifacts
+      - name: Download Windows Build Artifacts
         if: steps.check.outputs.publish == 'true'
         uses: actions/download-artifact@v4
         with:
           name: GravitySSH-windows-amd64-v${{ needs.test-and-build.outputs.version }}
           path: dist-release
+
+      - name: Download macOS Build Artifacts
+        if: steps.check.outputs.publish == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: GravitySSH-darwin-universal-v${{ needs.test-and-build.outputs.version }}
+          path: dist-release
+
+      - name: Generate Unified SHA256 Checksums
+        if: steps.check.outputs.publish == 'true'
+        shell: bash
+        working-directory: dist-release
+        env:
+          VER: ${{ needs.test-and-build.outputs.version }}
+        run: |
+          rm -f SHA256SUMS.txt
+          sha256sum \
+            "GravitySSH-v${VER}-windows-amd64.exe" \
+            "GravitySSH-v${VER}-windows-amd64-portable.zip" \
+            "GravitySSH-v${VER}-darwin-universal.dmg" \
+            > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Create GitHub Release
         if: steps.check.outputs.publish == 'true'
@@ -197,19 +307,12 @@ jobs:
           prerelease: false
           generate_release_notes: true
           body: |
-            ## GravitySSH ${{ needs.test-and-build.outputs.tag }} (Windows x64)
+            ## GravitySSH ${{ needs.test-and-build.outputs.tag }}
 
-            Antigravity 风格的 Windows 现代化 SSH 客户端：
-            - **左侧服务器管理 + 独立 SSH 密钥库**（支持文件加载、粘贴导入、生成 Ed25519/RSA-4096 及一键公钥部署）
-            - **SOCKS5 / HTTP 代理 + 多级跳板机（Bastion）** 支持弱网与内网机器连接，内置 TOFU 主机指纹校验
-            - **连接自动就绪 SFTP 文件管理**（支持文件浏览、上传、拖入上传、下载、在线文本编辑、远程打包/解压与 `chmod` 权限修改）
-            - **终端体验与运维安全**：实时主机监控栏（CPU/内存/磁盘）、6 组常用运维预设、粘贴安全卫士（危险命令与不可见控制字符拦截）、终端关键字高亮、自动英文输入法切换与智能命令补齐
-            - **多端同步（Windows ↔ Android）**：支持已配对设备一键推送、离线收件箱与扫码/房间码直传（内置官方默认中继，支持自建 `bbplin/synctool:latest` 中继）
-            - **Windows DPAPI (MachineGuid + User + App Entropy) + AES-256-GCM + 可选主密码双重锁定** 防拷贝本地加密保险库，内置版本更新检查
-
-            ### 下载说明
-            - 直接下载 **`GravitySSH-${{ needs.test-and-build.outputs.tag }}-windows-amd64.exe`** 双击即可运行（单文件绿色版，无需安装；依赖系统 Microsoft Edge WebView2 运行时，Windows 11 默认自带；无论版本号为何，AppData 运行目录统一为 `%APPDATA%\GravitySSH`，配置文件统一保存在程序同目录 `gsshconfig\vault.gsv`）。
+            - **Windows (x64)**：`GravitySSH-${{ needs.test-and-build.outputs.tag }}-windows-amd64.exe` · `GravitySSH-${{ needs.test-and-build.outputs.tag }}-windows-amd64-portable.zip`
+            - **macOS (Apple Silicon & Intel Universal)**：`GravitySSH-${{ needs.test-and-build.outputs.tag }}-darwin-universal.dmg`（拖入 `Applications` 即可使用；首次启动若遇系统拦截可执行 `xattr -cr /Applications/GravitySSH.app`）
           files: |
             dist-release/GravitySSH-v${{ needs.test-and-build.outputs.version }}-windows-amd64.exe
             dist-release/GravitySSH-v${{ needs.test-and-build.outputs.version }}-windows-amd64-portable.zip
+            dist-release/GravitySSH-v${{ needs.test-and-build.outputs.version }}-darwin-universal.dmg
             dist-release/SHA256SUMS.txt

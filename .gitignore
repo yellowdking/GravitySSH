@@ -5,9 +5,13 @@ frontend/node_modules/
 frontend/package.json.md5
 *.exe
 *.zip
+*.dmg
 *.gsv
 *.tmp
 *.syso
+dmg-root/
+dist-release/
+dist-macos/
 
 # Downloaded web fonts (fetched deterministically by scripts/fetch_fonts.py)
 frontend/public/fonts/*.woff2

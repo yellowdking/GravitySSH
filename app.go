@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 
@@ -349,6 +350,36 @@ func (a *App) importSSHKeyFromPath(store *vault.Store, selected, name, passphras
 	return &meta, nil
 }
 
+func sshKeyOpenDialogOptionsForGOOS(goos, homeDir string) runtime.OpenDialogOptions {
+	if goos == "darwin" {
+		var defaultDir string
+		if homeDir != "" {
+			sshDir := filepath.Join(homeDir, ".ssh")
+			if info, sErr := os.Stat(sshDir); sErr == nil && info.IsDir() {
+				defaultDir = sshDir
+			}
+		}
+		return runtime.OpenDialogOptions{
+			Title:            "选择 SSH 私钥文件",
+			DefaultDirectory: defaultDir,
+			Filters:          nil,
+			ShowHiddenFiles:  true,
+		}
+	}
+	return runtime.OpenDialogOptions{
+		Title: "选择 SSH 私钥文件",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "SSH 密钥文件 (*.pem, *.key, id_*)", Pattern: "*.pem;*.key;*.ppk;*"},
+			{DisplayName: "所有文件 (*.*)", Pattern: "*.*"},
+		},
+	}
+}
+
+func sshKeyOpenDialogOptions() runtime.OpenDialogOptions {
+	home, _ := os.UserHomeDir()
+	return sshKeyOpenDialogOptionsForGOOS(goruntime.GOOS, home)
+}
+
 func (a *App) ImportSSHKeyFromFile(name, passphrase, comment string) (*models.SSHKeyMeta, error) {
 	store, _, ctx, err := a.unlockedDeps()
 	if err != nil {
@@ -357,13 +388,7 @@ func (a *App) ImportSSHKeyFromFile(name, passphrase, comment string) (*models.SS
 	if ctx == nil {
 		return nil, errors.New("应用上下文尚未就绪")
 	}
-	selected, err := runtime.OpenFileDialog(ctx, runtime.OpenDialogOptions{
-		Title: "选择 SSH 私钥文件",
-		Filters: []runtime.FileFilter{
-			{DisplayName: "SSH 密钥文件 (*.pem, *.key, id_*)", Pattern: "*.pem;*.key;*.ppk;*"},
-			{DisplayName: "所有文件 (*.*)", Pattern: "*.*"},
-		},
-	})
+	selected, err := runtime.OpenFileDialog(ctx, sshKeyOpenDialogOptions())
 	if err != nil {
 		return nil, err
 	}
@@ -381,13 +406,7 @@ func (a *App) PickAndReadSSHKeyFile() (map[string]string, error) {
 	if ctx == nil {
 		return nil, errors.New("应用上下文尚未就绪")
 	}
-	selected, err := runtime.OpenFileDialog(ctx, runtime.OpenDialogOptions{
-		Title: "选择 SSH 私钥文件",
-		Filters: []runtime.FileFilter{
-			{DisplayName: "SSH 密钥文件 (*.pem, *.key, id_*)", Pattern: "*.pem;*.key;*.ppk;*"},
-			{DisplayName: "所有文件 (*.*)", Pattern: "*.*"},
-		},
-	})
+	selected, err := runtime.OpenFileDialog(ctx, sshKeyOpenDialogOptions())
 	if err != nil {
 		return nil, err
 	}
