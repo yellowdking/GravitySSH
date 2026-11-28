@@ -45,6 +45,7 @@ type VaultData struct {
 	Templates []BuiltinTemplate `json:"templates"`
 	History   []CommandRecord   `json:"history"`
 	Settings  AppSettings       `json:"settings"`
+	Sync      VaultSyncState    `json:"sync"`
 }
 
 type VaultSecurityInfo struct {
