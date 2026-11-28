@@ -66,7 +66,9 @@ func (m *Manager) sshMatchesSFTPRoot(sessionID string, sc *sftp.Client) bool {
 		return setResult(false)
 	}
 
-	out, runErr := runSSHExec(context.Background(), client, "sh -c 'pwd -P'", 8*time.Second, false)
+	probeCtx, cancelProbe := m.sessionExecContext(sessionID, 8*time.Second)
+	defer cancelProbe()
+	out, runErr := runSSHExec(probeCtx, client, "sh -c 'pwd -P'", 8*time.Second, false)
 	if runErr != nil {
 		if !errors.Is(runErr, context.DeadlineExceeded) && !errors.Is(runErr, context.Canceled) {
 			return setResult(false)
@@ -91,7 +93,9 @@ func (m *Manager) deleteViaSSH(sessionID, clean string) error {
 		"sh -c 'p=$1; if [ ! -e \"$p\" ] && [ ! -L \"$p\" ]; then exit 44; fi; if [ -d \"$p\" ] && [ ! -L \"$p\" ]; then chmod -R u+rwX -- \"$p\" 2>/dev/null || true; fi; rm -rf -- \"$p\" && [ ! -e \"$p\" ] && [ ! -L \"$p\" ]' _ %s",
 		shellQuote(clean),
 	)
-	out, runErr := runSSHExec(context.Background(), client, cmd, 90*time.Second, true)
+	execCtx, cancelExec := m.sessionExecContext(sessionID, 90*time.Second)
+	defer cancelExec()
+	out, runErr := runSSHExec(execCtx, client, cmd, 90*time.Second, true)
 	if runErr != nil {
 		var exitErr *ssh.ExitError
 		if errors.As(runErr, &exitErr) && exitErr.ExitStatus() == 44 {
