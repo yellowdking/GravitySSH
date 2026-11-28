@@ -190,7 +190,7 @@ func FormatSyncError(err error) error {
 	case envelope.ErrCodeURIInvalid:
 		return fmt.Errorf("同步链接或中继地址格式无效: %s", safeMsg)
 	case envelope.ErrCodeTLSPinMismatch:
-		return errors.New("中继服务器 TLS 证书指纹 (SPKI Pin) 不匹配，已拦截潜在中间人攻击")
+		return errors.New("中继服务器 TLS 证书指纹不匹配")
 	case envelope.ErrCodeTLSCertInvalid:
 		return fmt.Errorf("中继服务器 TLS 证书无效或已过期: %s", safeMsg)
 	case envelope.ErrCodeAuthFailed:
