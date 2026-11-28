@@ -17,6 +17,9 @@ declare global {
   }
 }
 
+const fileDropSubscribers = new Set<(paths: string[]) => void>()
+let boundFileDropRuntime: Window['runtime'] | null = null
+
 export const api = {
   ...sftpApi,
   ...syncApi,
@@ -75,10 +78,25 @@ export const api = {
     return window.runtime.EventsOn(eventName, (data: unknown) => handler(data as T))
   },
   onFileDrop: (handler: (paths: string[]) => void): (() => void) => {
-    if (!window.runtime?.OnFileDrop) return () => {}
-    window.runtime.OnFileDrop((_x, _y, paths) => {
-      if (Array.isArray(paths) && paths.length > 0) handler(paths)
-    }, false)
-    return () => { window.runtime?.OnFileDropOff?.() }
+    const rt = window.runtime
+    if (!rt?.OnFileDrop) return () => {}
+    if (boundFileDropRuntime !== rt) {
+      fileDropSubscribers.clear()
+      boundFileDropRuntime = rt
+      rt.OnFileDrop((_x, _y, paths) => {
+        if (!Array.isArray(paths) || paths.length === 0) return
+        for (const sub of Array.from(fileDropSubscribers)) {
+          sub(paths)
+        }
+      }, false)
+    }
+    fileDropSubscribers.add(handler)
+    return () => {
+      fileDropSubscribers.delete(handler)
+      if (fileDropSubscribers.size === 0 && boundFileDropRuntime === rt) {
+        boundFileDropRuntime = null
+        rt.OnFileDropOff?.()
+      }
+    }
   },
 }

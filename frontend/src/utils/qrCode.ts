@@ -1,12 +1,21 @@
-// Zero-dependency ISO/IEC 18004 QR matrix builder (Versions 1-6, ECC Level M).
-import { encodeQrCodewords, QR_VERSIONS_M } from './qrEcc'
+// Zero-dependency ISO/IEC 18004 QR matrix builder (Versions 1-13, ECC Level M, <= 331 bytes).
+import { encodeQrCodewords, QR_VERSIONS_M, qrMaxByteCapacity } from './qrEcc'
 
-function formatBitsM(mask: number): number {
+export function formatBitsM(mask: number): number {
   let rem = mask << 10
   for (let i = 4; i >= 0; i--) {
     if ((rem >> (i + 10)) & 1) rem ^= 0x537 << i
   }
   return ((mask << 10) | rem) ^ 0x5412
+}
+
+// ISO/IEC 18004 Annex D: 18-bit BCH(18, 6) Version Information for Versions 7-40 (generator 0x1F25).
+export function versionInfoBits(ver: number): number {
+  let rem = ver << 12
+  for (let i = 5; i >= 0; i--) {
+    if ((rem >> (i + 12)) & 1) rem ^= 0x1f25 << i
+  }
+  return (ver << 12) | rem
 }
 
 const MASKS: ((r: number, c: number) => boolean)[] = [
@@ -33,30 +42,59 @@ function placeFormat(m: number[][], size: number, mask: number) {
   for (let i = 0; i <= 7; i++) m[8][size - 8 + i] = bit(7 - i)
 }
 
+function hasFinderLikeAt(line: number[], idx: number): boolean {
+  if (
+    line[idx] !== 1 ||
+    line[idx + 1] !== 0 ||
+    line[idx + 2] !== 1 ||
+    line[idx + 3] !== 1 ||
+    line[idx + 4] !== 1 ||
+    line[idx + 5] !== 0 ||
+    line[idx + 6] !== 1
+  ) {
+    return false
+  }
+  const leftClear = idx >= 4 && line[idx - 1] === 0 && line[idx - 2] === 0 && line[idx - 3] === 0 && line[idx - 4] === 0
+  const rightClear =
+    idx + 10 < line.length &&
+    line[idx + 7] === 0 &&
+    line[idx + 8] === 0 &&
+    line[idx + 9] === 0 &&
+    line[idx + 10] === 0
+  return leftClear || rightClear
+}
+
 function penaltyScore(m: number[][], size: number): number {
   let score = 0
   let dark = 0
   for (let r = 0; r < size; r++) {
+    const row = m[r]
     let run = 1
     for (let c = 0; c < size; c++) {
-      if (m[r][c]) dark++
-      if (c > 0 && m[r][c] === m[r][c - 1]) {
+      if (row[c]) dark++
+      if (c > 0 && row[c] === row[c - 1]) {
         if (++run === 5) score += 3
         else if (run > 5) score += 1
       } else run = 1
       if (r < size - 1 && c < size - 1) {
-        const v = m[r][c]
-        if (v === m[r][c + 1] && v === m[r + 1][c] && v === m[r + 1][c + 1]) score += 3
+        const v = row[c]
+        if (v === row[c + 1] && v === m[r + 1][c] && v === m[r + 1][c + 1]) score += 3
       }
+      if (c + 6 < size && hasFinderLikeAt(row, c)) score += 40
     }
   }
+  const colBuf = new Array<number>(size)
   for (let c = 0; c < size; c++) {
+    for (let r = 0; r < size; r++) colBuf[r] = m[r][c]
     let run = 1
-    for (let r = 1; r < size; r++) {
-      if (m[r][c] === m[r - 1][c]) {
-        if (++run === 5) score += 3
-        else if (run > 5) score += 1
-      } else run = 1
+    for (let r = 0; r < size; r++) {
+      if (r > 0) {
+        if (colBuf[r] === colBuf[r - 1]) {
+          if (++run === 5) score += 3
+          else if (run > 5) score += 1
+        } else run = 1
+      }
+      if (r + 6 < size && hasFinderLikeAt(colBuf, r)) score += 40
     }
   }
   const pct = Math.abs((dark * 100) / (size * size) - 50)
@@ -65,9 +103,11 @@ function penaltyScore(m: number[][], size: number): number {
 
 export function generateQrMatrix(text: string): boolean[][] {
   const bytes = new TextEncoder().encode(text)
-  const spec = QR_VERSIONS_M.find((v) => bytes.length <= v.dataCap - 2)
-  if (!spec) throw new Error('QR payload exceeds Version 6 capacity')
-  const { size } = spec
+  const spec = QR_VERSIONS_M.find((v) => bytes.length <= qrMaxByteCapacity(v))
+  if (!spec) {
+    throw new Error(`QR payload (${bytes.length} bytes) exceeds Version 13 Level M capacity (331 bytes)`)
+  }
+  const { size, ver } = spec
   const base: number[][] = Array.from({ length: size }, () => Array(size).fill(-1))
   const reserved: boolean[][] = Array.from({ length: size }, () => Array(size).fill(false))
   const setFunc = (r: number, c: number, v: number) => {
@@ -88,13 +128,11 @@ export function generateQrMatrix(text: string): boolean[][] {
   drawFinder(0, 0)
   drawFinder(0, size - 7)
   drawFinder(size - 7, 0)
-  for (let i = 8; i < size - 8; i++) {
-    setFunc(6, i, i % 2 === 0 ? 1 : 0)
-    setFunc(i, 6, i % 2 === 0 ? 1 : 0)
-  }
+
+  // Alignment patterns (must skip the 3 corners overlapping finder patterns, but overwrite timing row/col 6 on V7+)
   for (const ar of spec.align) {
     for (const ac of spec.align) {
-      if (reserved[ar][ac]) continue
+      if ((ar <= 8 && ac <= 8) || (ar <= 8 && ac >= size - 9) || (ar >= size - 9 && ac <= 8)) continue
       for (let dr = -2; dr <= 2; dr++) {
         for (let dc = -2; dc <= 2; dc++) {
           setFunc(ar + dr, ac + dc, Math.max(Math.abs(dr), Math.abs(dc)) !== 1 ? 1 : 0)
@@ -102,6 +140,13 @@ export function generateQrMatrix(text: string): boolean[][] {
       }
     }
   }
+
+  for (let i = 8; i < size - 8; i++) {
+    if (!reserved[6][i]) setFunc(6, i, i % 2 === 0 ? 1 : 0)
+    if (!reserved[i][6]) setFunc(i, 6, i % 2 === 0 ? 1 : 0)
+  }
+
+  // Reserve format info + fixed dark module
   for (let i = 0; i <= 8; i++) {
     if (!reserved[8][i]) reserved[8][i] = true
     if (!reserved[i][8]) reserved[i][8] = true
@@ -110,6 +155,20 @@ export function generateQrMatrix(text: string): boolean[][] {
     reserved[8][size - 1 - i] = true
     reserved[size - 1 - i][8] = true
   }
+  setFunc(size - 8, 8, 1)
+
+  // Place 18-bit BCH Version Information (3x6 bottom-left + 6x3 top-right) for Versions 7-13
+  if (ver >= 7) {
+    const vBits = versionInfoBits(ver)
+    for (let i = 0; i < 18; i++) {
+      const bit = (vBits >> i) & 1
+      const rem = i % 3
+      const div = Math.floor(i / 3)
+      setFunc(size - 11 + rem, div, bit)
+      setFunc(div, size - 11 + rem, bit)
+    }
+  }
+
   const codewords = encodeQrCodewords(bytes, spec)
   let bitIdx = 0
   let up = true
@@ -127,6 +186,7 @@ export function generateQrMatrix(text: string): boolean[][] {
     }
     up = !up
   }
+
   let bestScore = Infinity
   let bestGrid = base
   for (let mk = 0; mk < 8; mk++) {
