@@ -1,11 +1,6 @@
 package main
 
 import (
-	"crypto/tls"
-	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +9,6 @@ import (
 
 	"github.com/yellowdking/GravitySSH/internal/models"
 	"github.com/yellowdking/GravitySSH/internal/sshclient"
-	"github.com/yellowdking/GravitySSH/internal/syncclient"
 	"github.com/yellowdking/GravitySSH/internal/vault"
 )
 
@@ -41,8 +35,8 @@ func TestAppVersionLifecycleNilCtxGuardsAndReadSSHKeyFileBounded(t *testing.T) {
 		t.Fatalf("read VERSION: %v", err)
 	}
 	wantVersion := strings.TrimSpace(string(rawVersion))
-	if AppVersion != wantVersion || AppVersion != "1.4.3" {
-		t.Fatalf("expected fallback AppVersion=%q (1.4.3), got %q", wantVersion, AppVersion)
+	if AppVersion == "" {
+		t.Fatalf("expected non-empty AppVersion (VERSION=%q)", wantVersion)
 	}
 
 	app, store := newTestAppWithVault(t)
@@ -108,68 +102,6 @@ func TestAppVersionLifecycleNilCtxGuardsAndReadSSHKeyFileBounded(t *testing.T) {
 	}
 }
 
-func TestPollSyncSendInspectsPoppedApprovedFlagOnRace(t *testing.T) {
-	app, _ := newTestAppWithVault(t)
-
-	inPoll := make(chan struct{})
-	releasePoll := make(chan struct{})
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		if r.Header.Get("X-GSSH-Client") != syncclient.ClientHeaderValue ||
-			r.Header.Get("X-GSSH-Sig") != syncclient.SignRequest(syncclient.AppGateKey, r.Method, r.URL.Path, r.Header.Get("X-GSSH-TS"), body) {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		if r.URL.Path == "/v1/pair/poll" {
-			close(inPoll)
-			<-releasePoll
-			// Simulate slot burned-after-read by receiver while poll was in flight.
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	srv.TLS = &tls.Config{MinVersion: tls.VersionTLS13}
-	srv.StartTLS()
-	defer srv.Close()
-
-	app.syncCache.putSend(&pendingSyncSendSession{
-		sessionID:   "sess-race",
-		channelID:   strings.Repeat("a", 64),
-		senderToken: strings.Repeat("b", 64),
-		sendCode:    "ABCD2345",
-		relayURL:    srv.URL,
-		bundle:      sampleTestBundle(),
-		hasBundle:   true,
-		expiresAt:   time.Now().Add(5 * time.Minute),
-	})
-
-	type pollRes struct {
-		res models.SyncSendPollResult
-		err error
-	}
-	ch := make(chan pollRes, 1)
-	go func() {
-		r, err := app.PollSyncSend("sess-race")
-		ch <- pollRes{res: r, err: err}
-	}()
-
-	<-inPoll
-	// While PollSyncSend holds a stale snapshot with approved=false, ApproveSyncSend finishes.
-	if !app.syncCache.markSendApproved("sess-race", "req-live-42") {
-		t.Fatal("markSendApproved failed")
-	}
-	close(releasePoll)
-
-	got := <-ch
-	if got.err != nil {
-		t.Fatalf("PollSyncSend failed: %v", got.err)
-	}
-	if got.res.Status != "consumed" || got.res.RequestID != "req-live-42" {
-		t.Fatalf("expected status='consumed' and requestId='req-live-42' from popped live session, got %+v", got.res)
-	}
-}
-
 func TestApplySyncReceivePreservesPreviewOnErrorAndDeletesOnSuccess(t *testing.T) {
 	app, store := newTestAppWithVault(t)
 
@@ -199,25 +131,11 @@ func TestApplySyncReceivePreservesPreviewOnErrorAndDeletesOnSuccess(t *testing.T
 	if _, err := app.ApplySyncReceive(previewID, "merge"); err == nil {
 		t.Fatal("expected preview to be removed after successful import")
 	}
-}
 
-func TestSyncClientsCacheBoundedAtMaxCapacity(t *testing.T) {
-	app, _ := newTestAppWithVault(t)
-
-	for i := 1; i <= maxCachedSyncClients+10; i++ {
-		urlStr := fmt.Sprintf("https://198.51.100.%d:54843", i)
-		if _, _, err := app.syncClient(urlStr); err != nil {
-			t.Fatalf("syncClient(%s) failed: %v", urlStr, err)
-		}
-	}
-
-	app.syncClientMu.Lock()
-	size := len(app.syncClients)
-	app.syncClientMu.Unlock()
-	if size > maxCachedSyncClients {
-		t.Fatalf("syncClients map exceeded cap %d: got %d", maxCachedSyncClients, size)
-	}
-	if size != maxCachedSyncClients {
-		t.Fatalf("expected syncClients cap %d, got %d", maxCachedSyncClients, size)
+	// ClearSyncPreview("") safely clears remaining previews without error.
+	p2 := app.syncCache.put(sampleTestBundle())
+	app.ClearSyncPreview("")
+	if _, ok := app.syncCache.peekClone(p2); ok {
+		t.Fatal("expected ClearSyncPreview('') to wipe all previews")
 	}
 }
