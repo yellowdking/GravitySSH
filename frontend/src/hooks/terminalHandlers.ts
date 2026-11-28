@@ -96,6 +96,16 @@ export function attachTerminalInputHandlers(d: HandlerDeps) {
         void readFromClipboard().then((t) => { if (t) d.pasteText(t) })
         return false
       }
+      if (k === 'k') {
+        ev.preventDefault()
+        if (typeof d.term.clear === 'function') d.term.clear()
+        return false
+      }
+      if (k === 'a') {
+        ev.preventDefault()
+        if (typeof d.term.selectAll === 'function') d.term.selectAll()
+        return false
+      }
     }
     if (ev.ctrlKey && ev.shiftKey && k === 'c') {
       ev.preventDefault()

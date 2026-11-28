@@ -29,6 +29,8 @@ function createMockTerminal(options?: {
   let keyHandler: ((ev: KeyboardEvent) => boolean) | null = null
   let currentSelection = options?.selection ?? ''
   const scrollLines = vi.fn()
+  const clear = vi.fn()
+  const selectAll = vi.fn()
   const attrs = new Map<string, string>()
 
   const textarea = {
@@ -46,6 +48,8 @@ function createMockTerminal(options?: {
     modes: { mouseTrackingMode: options?.mouseTrackingMode ?? 'none' },
     textarea,
     scrollLines,
+    clear,
+    selectAll,
     hasSelection: vi.fn(() => currentSelection.length > 0),
     getSelection: vi.fn(() => currentSelection),
     attachCustomWheelEventHandler: vi.fn((fn: (ev: WheelEvent) => boolean) => {
@@ -60,6 +64,8 @@ function createMockTerminal(options?: {
     term,
     attrs,
     scrollLines,
+    clear,
+    selectAll,
     setSelection: (s: string) => {
       currentSelection = s
     },
@@ -201,6 +207,17 @@ describe('terminalHandlers & wailsApi file-drop multiplexing', () => {
 
     // Cmd+Alt+V is not treated as plain Cmd+V
     expect(mock.dispatchKey({ key: 'v', metaKey: true, altKey: true }).res).toBe(true)
+
+    // Cmd+K clears terminal and Cmd+A selects all
+    const clearRes = mock.dispatchKey({ key: 'k', metaKey: true })
+    expect(clearRes.res).toBe(false)
+    expect(clearRes.preventDefault).toHaveBeenCalledTimes(1)
+    expect(mock.clear).toHaveBeenCalledTimes(1)
+
+    const selAllRes = mock.dispatchKey({ key: 'a', metaKey: true })
+    expect(selAllRes.res).toBe(false)
+    expect(selAllRes.preventDefault).toHaveBeenCalledTimes(1)
+    expect(mock.selectAll).toHaveBeenCalledTimes(1)
   })
 
   it('multiplexes global Wails OnFileDrop across multiple subscribers without premature OnFileDropOff', () => {
