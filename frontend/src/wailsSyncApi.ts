@@ -1,28 +1,44 @@
 import type {
+  SyncDirectSendResult,
+  SyncFlowSession,
+  SyncFlowStatus,
   SyncImportSummary,
-  SyncReceivePollResult,
-  SyncReceiveWaitSession,
-  SyncSendPollResult,
-  SyncSendSession,
+  SyncInboxItem,
+  SyncOverview,
+  SyncPingInfo,
+  SyncRelayStatus,
 } from './syncTypes'
 import { callGo } from './wailsSftpApi'
 
 export const syncApi = {
-  getDefaultSyncRelayUrl: () => callGo<string>('GetDefaultSyncRelayURL'),
-  testSyncRelay: (relayUrl: string) => callGo<number>('TestSyncRelay', relayUrl),
-  startSyncSend: (relayUrl: string) => callGo<SyncSendSession>('StartSyncSend', relayUrl),
-  pollSyncSend: (sessionId: string) => callGo<SyncSendPollResult>('PollSyncSend', sessionId),
-  approveSyncSend: (sessionId: string, requestId: string, receiverCode: string) =>
-    callGo<void>('ApproveSyncSend', sessionId, requestId, receiverCode),
-  rejectSyncSend: (sessionId: string, requestId: string) =>
-    callGo<void>('RejectSyncSend', sessionId, requestId),
-  cancelSyncSend: (sessionIdOrCode: string, relayUrl: string) =>
-    callGo<void>('CancelSyncSend', sessionIdOrCode, relayUrl),
-  generateReceiverCode: () => callGo<string>('GenerateReceiverCode'),
-  startSyncReceive: (sendCode: string, recvCode: string, relayUrl: string) =>
-    callGo<SyncReceiveWaitSession>('StartSyncReceive', sendCode, recvCode, relayUrl),
-  pollSyncReceive: (waitId: string) => callGo<SyncReceivePollResult>('PollSyncReceive', waitId),
-  cancelSyncReceive: (waitId: string) => callGo<void>('CancelSyncReceive', waitId),
+  getSyncOverview: () => callGo<SyncOverview>('GetSyncOverview'),
+  setCustomSyncRelay: (rawUri: string) => callGo<SyncRelayStatus>('SetCustomSyncRelay', rawUri),
+  testSyncRelay: (rawUri: string) => callGo<SyncPingInfo>('TestSyncRelay', rawUri),
+  setSyncDeviceLabel: (label: string) => callGo<void>('SetSyncDeviceLabel', label),
+  listSyncInbox: () => callGo<SyncInboxItem[]>('ListSyncInbox'),
+  startWatchSyncInbox: () => callGo<void>('StartWatchSyncInbox'),
+  stopWatchSyncInbox: () => callGo<void>('StopWatchSyncInbox'),
+  sendSyncToDevice: (deviceId: string, deliveryMode: string) =>
+    callGo<SyncDirectSendResult>('SendSyncToDevice', deviceId, deliveryMode),
+  applyInboxSync: (itemId: string, importMode: 'merge' | 'overwrite') =>
+    callGo<SyncImportSummary>('ApplyInboxSync', itemId, importMode),
+  dismissInboxItem: (itemId: string) => callGo<void>('DismissInboxItem', itemId),
+  revokeSyncDevice: (deviceId: string) => callGo<void>('RevokeSyncDevice', deviceId),
+  startSyncDeviceBind: (mode: 1 | 2, includeRelay: boolean) =>
+    callGo<SyncFlowSession>('StartSyncDeviceBind', mode, includeRelay),
+  acceptSyncDeviceBind: (codeOrUri: string) =>
+    callGo<SyncFlowSession>('AcceptSyncDeviceBind', codeOrUri),
+  startSyncOneShotSend: (mode: 1 | 2, includeRelay: boolean) =>
+    callGo<SyncFlowSession>('StartSyncOneShotSend', mode, includeRelay),
+  startSyncReceive: (codeOrUri: string) =>
+    callGo<SyncFlowSession>('StartSyncReceive', codeOrUri),
+  getSyncFlowStatus: (sessionId: string) =>
+    callGo<SyncFlowStatus>('GetSyncFlowStatus', sessionId),
+  submitSyncSasInput: (sessionId: string, sasCode: string) =>
+    callGo<void>('SubmitSyncSASInput', sessionId, sasCode),
+  confirmSyncSas: (sessionId: string, approved: boolean) =>
+    callGo<void>('ConfirmSyncSAS', sessionId, approved),
+  cancelSyncFlow: (sessionId: string) => callGo<void>('CancelSyncFlow', sessionId),
   applySyncReceive: (previewId: string, mode: 'merge' | 'overwrite') =>
     callGo<SyncImportSummary>('ApplySyncReceive', previewId, mode),
   clearSyncPreview: (previewId: string) => callGo<void>('ClearSyncPreview', previewId),

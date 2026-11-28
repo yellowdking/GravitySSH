@@ -3,9 +3,13 @@
 import {models} from '../models';
 import {sshclient} from '../models';
 
+export function AcceptSyncDeviceBind(arg1:string):Promise<any>;
+
+export function ApplyInboxSync(arg1:string,arg2:string):Promise<models.SyncImportSummary>;
+
 export function ApplySyncReceive(arg1:string,arg2:string):Promise<models.SyncImportSummary>;
 
-export function CancelSyncSend(arg1:string,arg2:string):Promise<void>;
+export function CancelSyncFlow(arg1:string):Promise<void>;
 
 export function CheckForUpdates():Promise<models.UpdateCheckResult>;
 
@@ -14,6 +18,10 @@ export function ClearAllSSHCache():Promise<sshclient.SSHCacheClearResult>;
 export function ClearHistory(arg1:string):Promise<void>;
 
 export function ClearSSHHostCache(arg1:string,arg2:number):Promise<sshclient.SSHCacheClearResult>;
+
+export function ClearSyncPreview(arg1:string):Promise<void>;
+
+export function ConfirmSyncSAS(arg1:string,arg2:boolean):Promise<void>;
 
 export function ConnectServer(arg1:string,arg2:number,arg3:number):Promise<models.SessionInfo>;
 
@@ -31,19 +39,23 @@ export function DeploySSHKeyToServers(arg1:string,arg2:Array<string>,arg3:boolea
 
 export function DisconnectSession(arg1:string):Promise<void>;
 
+export function DismissInboxItem(arg1:string):Promise<void>;
+
 export function GenerateSSHKey(arg1:string,arg2:string,arg3:string,arg4:string):Promise<models.SSHKeyMeta>;
 
 export function GetAppVersion():Promise<string>;
 
 export function GetCurrentInputLine(arg1:string):Promise<string>;
 
-export function GetDefaultSyncRelayURL():Promise<string>;
-
 export function GetSSHCacheInfo():Promise<sshclient.SSHCacheInfo>;
 
 export function GetSessionMetrics(arg1:string):Promise<models.HostMetrics>;
 
 export function GetSettings():Promise<models.AppSettings>;
+
+export function GetSyncFlowStatus(arg1:string):Promise<any>;
+
+export function GetSyncOverview():Promise<any>;
 
 export function GetVaultLockState():Promise<models.VaultLockState>;
 
@@ -65,13 +77,19 @@ export function ListSessions():Promise<Array<models.SessionInfo>>;
 
 export function ListShortcuts():Promise<Array<models.CommandShortcut>>;
 
+export function ListSyncInbox():Promise<Array<any>>;
+
 export function LoadPresetTemplates():Promise<models.PresetLoadResult>;
+
+export function LockVault():Promise<void>;
 
 export function OpenExternalURL(arg1:string):Promise<void>;
 
 export function PickAndReadSSHKeyFile():Promise<Record<string, string>>;
 
 export function ResizeTerminal(arg1:string,arg2:number,arg3:number):Promise<void>;
+
+export function RevokeSyncDevice(arg1:string):Promise<void>;
 
 export function RunShortcut(arg1:string,arg2:string,arg3:boolean):Promise<void>;
 
@@ -109,11 +127,27 @@ export function SaveSettings(arg1:models.AppSettings):Promise<models.AppSettings
 
 export function SaveShortcut(arg1:models.CommandShortcut):Promise<models.CommandShortcut>;
 
+export function SendSyncToDevice(arg1:string,arg2:string):Promise<any>;
+
+export function SetCustomSyncRelay(arg1:string):Promise<any>;
+
 export function SetSessionCWD(arg1:string,arg2:string):Promise<void>;
+
+export function SetSyncDeviceLabel(arg1:string):Promise<void>;
 
 export function SetVaultPassword(arg1:string,arg2:string):Promise<void>;
 
-export function StartSyncSend(arg1:string):Promise<models.SyncSendSession>;
+export function StartSyncDeviceBind(arg1:number,arg2:boolean):Promise<any>;
+
+export function StartSyncOneShotSend(arg1:number,arg2:boolean):Promise<any>;
+
+export function StartSyncReceive(arg1:string):Promise<any>;
+
+export function StartWatchSyncInbox():Promise<void>;
+
+export function StopWatchSyncInbox():Promise<void>;
+
+export function SubmitSyncSASInput(arg1:string,arg2:string):Promise<void>;
 
 export function SuggestCommands(arg1:string,arg2:string):Promise<Array<models.CompletionItem>>;
 
@@ -123,7 +157,7 @@ export function SwitchTerminalIME():Promise<void>;
 
 export function TestServerConnection(arg1:models.ServerSaveRequest):Promise<string>;
 
-export function TestSyncRelay(arg1:string):Promise<number>;
+export function TestSyncRelay(arg1:string):Promise<any>;
 
 export function UnlockVault(arg1:string):Promise<void>;
 
