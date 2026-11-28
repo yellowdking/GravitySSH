@@ -37,8 +37,11 @@ func TestVaultSyncExportAndMerge(t *testing.T) {
 	}
 
 	exported, err := store.ExportSyncBundle("WIN-WORKSTATION")
-	if err != nil || exported.SchemaVersion != 1 || exported.SourcePlatform != "windows" || len(exported.Servers) != 2 || len(exported.SSHKeys) != 1 {
+	if err != nil || exported.SchemaVersion != 1 || exported.SourcePlatform != currentSyncPlatform() || len(exported.Servers) != 2 || len(exported.SSHKeys) != 1 {
 		t.Fatalf("unexpected exported bundle: %+v err=%v", exported, err)
+	}
+	if syncPlatformForGOOS("darwin") != "macos" || syncPlatformForGOOS("windows") != "windows" {
+		t.Fatalf("unexpected syncPlatformForGOOS mapping")
 	}
 
 	incoming := models.SyncBundle{

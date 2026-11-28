@@ -13,8 +13,8 @@
   "info": {
     "companyName": "GravitySSH",
     "productName": "GravitySSH",
-    "productVersion": "1.5.2",
+    "productVersion": "1.6.0",
     "copyright": "Copyright © 2026 yellowdking",
-    "comments": "Antigravity-style Windows SSH Client with Encrypted Vault, Proxy/Jump Host, Auto SFTP, Command Shortcuts & Smart Autocomplete"
+    "comments": "Cross-Platform SSH & SFTP Client"
   }
 }

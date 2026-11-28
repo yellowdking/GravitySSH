@@ -5,17 +5,20 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/wailsapp/wails/v2"
+	"github.com/wailsapp/wails/v2/pkg/menu"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/mac"
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
 
 	"github.com/yellowdking/GravitySSH/internal/dpi"
 )
 
 // AppVersion can be overridden at build time via -ldflags "-X main.AppVersion=..."
-var AppVersion = "1.5.2"
+var AppVersion = "1.6.0"
 
 //go:embed all:frontend/dist
 var assets embed.FS
@@ -36,12 +39,22 @@ func main() {
 	dpi.EnablePerMonitorV2()
 	app := NewApp()
 
+	var appMenu *menu.Menu
+	if runtime.GOOS == "darwin" {
+		appMenu = menu.NewMenuFromItems(
+			menu.AppMenu(),
+			menu.EditMenu(),
+			menu.WindowMenu(),
+		)
+	}
+
 	err := wails.Run(&options.App{
 		Title:            "GravitySSH",
 		Width:            1380,
 		Height:           860,
 		MinWidth:         860,
 		MinHeight:        540,
+		Menu:             appMenu,
 		BackgroundColour: &options.RGBA{R: 11, G: 13, B: 18, A: 255},
 		DragAndDrop: &options.DragAndDrop{
 			EnableFileDrop:     true,
@@ -54,6 +67,15 @@ func main() {
 		OnShutdown: app.shutdown,
 		Bind: []any{
 			app,
+		},
+		Mac: &mac.Options{
+			TitleBar:                     mac.TitleBarDefault(),
+			Appearance:                   mac.NSAppearanceNameDarkAqua,
+			DisableEscapeExitsFullscreen: true,
+			About: &mac.AboutInfo{
+				Title:   "GravitySSH",
+				Message: "v" + AppVersion,
+			},
 		},
 		Windows: &windows.Options{
 			WebviewIsTransparent: false,
