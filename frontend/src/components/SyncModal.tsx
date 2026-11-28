@@ -134,10 +134,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({ open, onClose, onSynced, o
             <div className="w-8 h-8 rounded-lg bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-300">
               <RefreshCw className="w-4 h-4" />
             </div>
-            <div>
-              <h2 className="text-sm font-semibold text-ag-text">多端同步 · synctool-v1</h2>
-              <p className="text-[11px] text-ag-muted">已配对设备一键零往返加密推送 · 离线收件箱 · 一次性扫码速传</p>
-            </div>
+            <h2 className="text-sm font-semibold text-ag-text">多端同步</h2>
           </div>
           <button
             type="button"
@@ -192,7 +189,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({ open, onClose, onSynced, o
               }`}
             >
               <ArrowUpFromLine className="w-3.5 h-3.5 shrink-0" />
-              <span>一次性发送</span>
+              <span>发送</span>
             </button>
 
             <button
@@ -205,7 +202,7 @@ export const SyncModal: React.FC<SyncModalProps> = ({ open, onClose, onSynced, o
               }`}
             >
               <ArrowDownToLine className="w-3.5 h-3.5 shrink-0" />
-              <span>一次性接收</span>
+              <span>接收</span>
             </button>
           </div>
         </div>

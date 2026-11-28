@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import {
-  Check, Clock, Copy, Eye, EyeOff, KeyRound, Link2, Loader2, QrCode, ShieldAlert, ShieldCheck, X,
+  Check, Clock, Copy, Eye, EyeOff, KeyRound, Link2, Loader2, QrCode, ShieldAlert, X,
 } from 'lucide-react'
 import type { SyncPairedDevice, SyncRelayStatus } from '../syncTypes'
 import { useCopyFeedback } from '../hooks/useCopyFeedback'
@@ -37,7 +37,7 @@ export const SyncBindPanel: React.FC<Props> = ({ relay, onClose, onDeviceBound, 
     onToast,
     onCompleted: (st) => {
       const label = st.pairedDevice?.label || '新设备'
-      onToast(`✓ 已完成设备双向加密绑定：${label}`)
+      onToast(`已绑定设备：${label}`)
       onDeviceBound(st.pairedDevice)
     },
   })
@@ -57,7 +57,7 @@ export const SyncBindPanel: React.FC<Props> = ({ relay, onClose, onDeviceBound, 
 
   const handleAcceptBind = async () => {
     if (!isReadySyncCodeOrUri(joinInput)) {
-      onToast('请输入完整的 synctool://pair 链接或 8 位房间码', 'error')
+      onToast('请输入配对链接或 8 位房间码', 'error')
       return
     }
     const started = await flow.startFlow(() => api.acceptSyncDeviceBind(joinInput.trim()))
@@ -76,7 +76,7 @@ export const SyncBindPanel: React.FC<Props> = ({ relay, onClose, onDeviceBound, 
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 text-xs font-semibold text-indigo-200">
           <Link2 className="w-4 h-4 text-indigo-300" />
-          <span>绑定新设备（配对一次，后续支持零往返一键推送与离线收件箱）</span>
+          <span>绑定新设备</span>
         </div>
         <button
           type="button"
@@ -100,7 +100,7 @@ export const SyncBindPanel: React.FC<Props> = ({ relay, onClose, onDeviceBound, 
                   : 'text-ag-muted hover:text-ag-text'
               }`}
             >
-              生成配对码（发起方）
+              生成配对码
             </button>
             <button
               type="button"
@@ -111,7 +111,7 @@ export const SyncBindPanel: React.FC<Props> = ({ relay, onClose, onDeviceBound, 
                   : 'text-ag-muted hover:text-ag-text'
               }`}
             >
-              输入配对链接 / 房间码
+              输入配对码
             </button>
           </div>
 
@@ -129,9 +129,8 @@ export const SyncBindPanel: React.FC<Props> = ({ relay, onClose, onDeviceBound, 
                 >
                   <div className="flex items-center gap-1.5 text-xs font-semibold">
                     <QrCode className="w-3.5 h-3.5 text-indigo-300" />
-                    二维码配对（推荐）
+                    二维码配对
                   </div>
-                  <p className="text-[10px] text-ag-muted mt-1">128-bit 带外密钥，手机扫码一步完成</p>
                 </button>
                 <button
                   type="button"
@@ -144,17 +143,14 @@ export const SyncBindPanel: React.FC<Props> = ({ relay, onClose, onDeviceBound, 
                 >
                   <div className="flex items-center gap-1.5 text-xs font-semibold">
                     <KeyRound className="w-3.5 h-3.5 text-cyan-300" />
-                    8 位码 + SAS
+                    房间码配对
                   </div>
-                  <p className="text-[10px] text-ag-muted mt-1">适合桌面端互绑，双端核对 6 位安全码</p>
                 </button>
               </div>
 
               {isCustomRelay && (
                 <label className="flex items-center justify-between gap-2 rounded-lg bg-[#090c12] border border-amber-500/25 px-3 py-2 cursor-pointer">
-                  <span className="text-[11px] text-amber-200">
-                    携带自定义中继配置（对方扫码可自动导入私有中继）
-                  </span>
+                  <span className="text-[11px] text-amber-200">携带自定义中继配置</span>
                   <input
                     type="checkbox"
                     checked={includeRelay}
@@ -170,8 +166,8 @@ export const SyncBindPanel: React.FC<Props> = ({ relay, onClose, onDeviceBound, 
                 onClick={() => void handleStartOffer()}
                 className="w-full py-2.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 text-white text-xs font-medium flex items-center justify-center gap-1.5 shadow-glow transition"
               >
-                {flow.starting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
-                {flow.starting ? '正在创建加密绑定房间...' : offerMode === 1 ? '生成配对二维码' : '生成 8 位绑定房间码'}
+                {flow.starting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : offerMode === 1 ? <QrCode className="w-3.5 h-3.5" /> : <KeyRound className="w-3.5 h-3.5" />}
+                {flow.starting ? '创建中...' : offerMode === 1 ? '生成二维码' : '生成房间码'}
               </button>
             </div>
           ) : (
@@ -188,7 +184,7 @@ export const SyncBindPanel: React.FC<Props> = ({ relay, onClose, onDeviceBound, 
                     if (e.nativeEvent.isComposing || e.keyCode === 229) return
                     if (e.key === 'Enter' && isReadySyncCodeOrUri(joinInput)) void handleAcceptBind()
                   }}
-                  placeholder="粘贴 synctool://pair?... 链接或输入 XXXX-XXXX 房间码"
+                  placeholder="XXXX-XXXX 或 synctool://pair?..."
                   className="w-full rounded-xl bg-[#090c12] border border-ag-border px-3.5 py-2.5 pr-9 font-mono text-xs text-ag-text placeholder:text-ag-subtle focus:outline-none focus:border-indigo-500/60"
                 />
                 {uriInputMode && (
@@ -208,8 +204,8 @@ export const SyncBindPanel: React.FC<Props> = ({ relay, onClose, onDeviceBound, 
                 onClick={() => void handleAcceptBind()}
                 className="w-full py-2.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 text-white text-xs font-medium flex items-center justify-center gap-1.5 shadow-glow transition"
               >
-                {flow.starting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
-                {flow.starting ? '正在连接配对房间...' : '加入房间并绑定设备'}
+                {flow.starting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />}
+                {flow.starting ? '连接中...' : '绑定设备'}
               </button>
             </div>
           )}
@@ -221,9 +217,7 @@ export const SyncBindPanel: React.FC<Props> = ({ relay, onClose, onDeviceBound, 
               {flow.session.mode === 1 && pairUri && <QrCodeSvg value={pairUri} size={172} />}
               <div className="flex-1 w-full space-y-2.5 text-center sm:text-left">
                 <div className="text-[11px] text-ag-muted">
-                  {flow.session.mode === 1
-                    ? '请用另一台设备的 GravitySSH 扫描二维码（或复制完整配对链接）'
-                    : '请在另一台设备的「输入配对链接或 8 位房间码」中输入：'}
+                  {flow.session.mode === 1 ? '请使用另一台设备扫码或复制配对链接' : '请在另一台设备输入房间码：'}
                 </div>
                 {roomCode && (
                   <div className="flex items-center justify-center sm:justify-start gap-2">
@@ -232,7 +226,7 @@ export const SyncBindPanel: React.FC<Props> = ({ relay, onClose, onDeviceBound, 
                     </span>
                     <button
                       type="button"
-                      onClick={() => void copyCode(formatRoomCodeDisplay(roomCode)).then((ok) => ok && onToast('8 位房间码已复制'))}
+                      onClick={() => void copyCode(formatRoomCodeDisplay(roomCode)).then((ok) => ok && onToast('房间码已复制'))}
                       className="p-2 rounded-lg bg-ag-elevated hover:bg-ag-hover border border-ag-border text-ag-text"
                       title="复制房间码"
                     >
@@ -243,16 +237,16 @@ export const SyncBindPanel: React.FC<Props> = ({ relay, onClose, onDeviceBound, 
                 {flow.session.mode === 1 && pairUri && (
                   <button
                     type="button"
-                    onClick={() => void copyUri(pairUri).then((ok) => ok && onToast('完整配对链接已复制（含一次性密钥，请勿发至公开群聊）'))}
+                    onClick={() => void copyUri(pairUri).then((ok) => ok && onToast('配对链接已复制'))}
                     className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-ag-elevated hover:bg-ag-hover border border-ag-border text-[11px] text-ag-text"
                   >
                     {copiedUri ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    复制完整配对链接
+                    复制配对链接
                   </button>
                 )}
                 <div className="flex items-center justify-center sm:justify-start gap-2 text-[11px] text-cyan-300">
                   <Clock className="w-3.5 h-3.5" />
-                  <span>{left > 0 ? `房间有效倒计时 ${fmtSec(left)}` : '等待中继确认状态...'}</span>
+                  <span>{left > 0 ? `剩余 ${fmtSec(left)}` : '等待响应...'}</span>
                 </div>
               </div>
             </div>
@@ -261,7 +255,7 @@ export const SyncBindPanel: React.FC<Props> = ({ relay, onClose, onDeviceBound, 
           {st === 'waiting_peer' && flow.session.role !== 'initiator' && (
             <div className="rounded-xl bg-indigo-500/10 border border-indigo-500/30 px-3.5 py-3 flex items-center gap-2.5 text-xs text-indigo-200">
               <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-              <span>正在与对端交换加密身份公钥并建立信任通道...</span>
+              <span>正在连接对端...</span>
             </div>
           )}
 
@@ -279,7 +273,7 @@ export const SyncBindPanel: React.FC<Props> = ({ relay, onClose, onDeviceBound, 
             <SyncSasPrompt
               variant="confirm"
               sasCode={flow.status?.sas}
-              approveLabel="一致，允许绑定"
+              approveLabel="一致，确认绑定"
               busy={flow.confirmingSas}
               onConfirm={(approved) => void flow.confirmSas(approved)}
             />
@@ -288,7 +282,7 @@ export const SyncBindPanel: React.FC<Props> = ({ relay, onClose, onDeviceBound, 
           {st === 'transferring' && (
             <div className="rounded-xl bg-indigo-500/10 border border-indigo-500/30 px-3.5 py-3 flex items-center gap-2.5 text-xs text-indigo-200">
               <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-              <span>正在签名验证设备名片并派发专属投递令牌...</span>
+              <span>正在完成绑定...</span>
             </div>
           )}
 
