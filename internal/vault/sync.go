@@ -48,7 +48,7 @@ func (s *Store) ExportSyncBundle(sourceDevice string) (models.SyncBundle, error)
 }
 
 // ImportSyncBundle applies a received SyncBundle using either "merge" (default)
-// or "overwrite" mode while keeping local settings and vault password intact.
+// or "overwrite" mode while keeping local settings, sync state, and vault password intact.
 func (s *Store) ImportSyncBundle(bundle models.SyncBundle, mode string) (models.SyncImportSummary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -73,6 +73,7 @@ func (s *Store) ImportSyncBundle(bundle models.SyncBundle, mode string) (models.
 	prevKeys := cloneSSHKeys(s.data.SSHKeys)
 	prevShortcuts := cloneShortcuts(s.data.Shortcuts)
 	prevTemplates := cloneTemplates(s.data.Templates)
+	prevSync := cloneVaultSyncState(s.data.Sync)
 	var summary models.SyncImportSummary
 	summary.Mode = mode
 
@@ -81,6 +82,7 @@ func (s *Store) ImportSyncBundle(bundle models.SyncBundle, mode string) (models.
 		s.data.Servers = sanitizeServers(bundle.Servers, s.data.Settings.DefaultKeepAliveSeconds)
 		s.data.Shortcuts = sanitizeShortcuts(bundle.Shortcuts)
 		s.data.Templates = sanitizeTemplates(bundle.Templates)
+		s.data.Sync = prevSync
 		summary.KeysAdded = len(s.data.SSHKeys)
 		summary.ServersAdded = len(s.data.Servers)
 		summary.ShortcutsAdded = len(s.data.Shortcuts)
@@ -97,6 +99,7 @@ func (s *Store) ImportSyncBundle(bundle models.SyncBundle, mode string) (models.
 		s.data.SSHKeys = prevKeys
 		s.data.Shortcuts = prevShortcuts
 		s.data.Templates = prevTemplates
+		s.data.Sync = prevSync
 		return models.SyncImportSummary{}, err
 	}
 	return summary, nil
