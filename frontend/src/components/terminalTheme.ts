@@ -1,6 +1,6 @@
 import type { ITheme } from '@xterm/xterm'
 
-export const DEFAULT_TERMINAL_FONT = '"Cascadia Mono", "JetBrains Mono", "Consolas", "Courier New", monospace'
+export const DEFAULT_TERMINAL_FONT = '"SF Mono", "Menlo", "Monaco", "Cascadia Mono", "JetBrains Mono", "Consolas", "Courier New", monospace'
 
 export const ANTIGRAVITY_TERM_THEME: ITheme = {
   background: '#0b0d12',

@@ -5,7 +5,7 @@ import {
 } from 'lucide-react'
 import type { SyncPingInfo, SyncRelayStatus } from '../syncTypes'
 import { useCopyFeedback } from '../hooks/useCopyFeedback'
-import { errMsg } from '../utils/errors'
+import { errMsg, isMacPlatform } from '../utils/errors'
 import { certExpiryAlert, formatPingSummary, formatRelaySummary, redactSyncUri } from '../utils/syncUri'
 import { api } from '../wailsApi'
 
@@ -228,7 +228,7 @@ export const SyncRelayBar: React.FC<Props> = ({
         ) : (
           <div className="flex items-center justify-between w-full gap-2">
             <span className="text-ag-muted truncate">
-              本机名称：<strong className="text-ag-text font-medium">{localDeviceLabel || 'Windows PC'}</strong>
+              本机名称：<strong className="text-ag-text font-medium">{localDeviceLabel || (isMacPlatform() ? 'Mac' : 'Windows PC')}</strong>
             </span>
             <button
               type="button"
@@ -322,7 +322,7 @@ export const SyncRelayBar: React.FC<Props> = ({
           className="flex items-center gap-1 text-[10px] text-ag-muted hover:text-ag-text transition"
         >
           {showGuide ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-          <span>自建中继 (Docker)</span>
+          <span>自建中继</span>
         </button>
         {showGuide && (
           <div className="mt-1.5 rounded-lg bg-[#090c12] border border-ag-border/80 p-2.5 flex items-start gap-2">

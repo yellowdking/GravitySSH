@@ -1,6 +1,7 @@
 import React from 'react'
 import { Bookmark, FolderTree, History, RefreshCw, Search, Sparkles, Waypoints } from 'lucide-react'
 import type { SessionInfo } from '../types'
+import { isMacPlatform } from '../utils/errors'
 
 interface Props {
   session: SessionInfo
@@ -62,7 +63,7 @@ export const TerminalToolbar: React.FC<Props> = React.memo(({
 
         <button
           onClick={onToggleAutocomplete}
-          title="点击快速开关智能命令补齐（也可以在设置中详细配置）"
+          title="智能命令补齐"
           className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border transition ${
             autocompleteEnabled
               ? 'bg-indigo-500/15 border-indigo-500/35 text-indigo-300'
@@ -75,7 +76,7 @@ export const TerminalToolbar: React.FC<Props> = React.memo(({
 
         <button
           onClick={onToggleSearch}
-          title="搜索终端内容 (Ctrl+F)"
+          title={`搜索终端 (${isMacPlatform() ? '⌘F' : 'Ctrl+F'})`}
           className={`p-1.5 rounded-md transition ${
             showSearch ? 'bg-ag-hover text-ag-text' : 'text-ag-muted hover:text-ag-text hover:bg-ag-hover/70'
           }`}
