@@ -13,7 +13,7 @@ import type {
 import { api } from '../wailsApi'
 import { errMsg } from '../utils/errors'
 import { DEFAULT_TERMINAL_FONT } from '../components/terminalTheme'
-import { pushTerminalData } from './terminalStream'
+import { clearAllTerminalBuffers, discardTerminalBuffer, pushTerminalData } from './terminalStream'
 
 function sameSettings(a: AppSettings, b: AppSettings): boolean {
   const keys = Object.keys(a) as Array<keyof AppSettings>
@@ -50,15 +50,42 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
   const [securityInfo, setSecurityInfo] = useState<VaultSecurityInfo | null>(null)
   const [lockState, setLockState] = useState<VaultLockState | null>(null)
-  const [appVersion, setAppVersion] = useState('1.4.3')
+  const [appVersion, setAppVersion] = useState('1.5.0')
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null)
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sftpOpenBySession, setSftpOpenBySession] = useState<Record<string, boolean>>({})
 
   const closedSessionIdsRef = useRef<Set<string>>(new Set())
+  const sessionsRef = useRef<SessionInfo[]>([])
+  sessionsRef.current = sessions
+  const lockedRef = useRef<boolean>(Boolean(lockState?.locked))
+  lockedRef.current = Boolean(lockState?.locked)
   const autoOpenSftpRef = useRef(settings.autoOpenSftp)
   autoOpenSftpRef.current = settings.autoOpenSftp
+
+  const purgeLockedWorkspaceState = useCallback(() => {
+    lockedRef.current = true
+    for (const s of sessionsRef.current) {
+      closedSessionIdsRef.current.add(s.sessionId)
+      discardTerminalBuffer(s.sessionId)
+    }
+    clearAllTerminalBuffers()
+    sessionsRef.current = []
+    setSessions([])
+    setActiveSessionId(null)
+    setSftpOpenBySession({})
+    setServers([])
+    setSshKeys([])
+    setShortcuts([])
+    setHistory([])
+  }, [])
+
+  useEffect(() => {
+    if (lockState?.locked) {
+      purgeLockedWorkspaceState()
+    }
+  }, [lockState?.locked, purgeLockedWorkspaceState])
 
   const reloadServers = useCallback(async () => {
     try { setServers((await api.listServers()) || []) }
@@ -88,12 +115,10 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
       ])
       if (ver) setAppVersion(ver)
       if (lock) {
+        lockedRef.current = lock.locked
         setLockState(lock)
         if (lock.locked) {
-          setServers([])
-          setSshKeys([])
-          setShortcuts([])
-          setHistory([])
+          purgeLockedWorkspaceState()
           return
         }
       }
@@ -117,7 +142,7 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
     } catch (err) {
       showToast(`加载配置失败: ${errMsg(err)}`, 'error')
     }
-  }, [showToast])
+  }, [purgeLockedWorkspaceState, showToast])
 
   useEffect(() => { void loadAll() }, [loadAll])
 
@@ -133,7 +158,7 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
 
   useEffect(() => {
     const unsubStatus = api.onEvent<SessionInfo>('session:status', (info) => {
-      if (closedSessionIdsRef.current.has(info.sessionId)) return
+      if (lockedRef.current || closedSessionIdsRef.current.has(info.sessionId)) return
       setSessions((prev) => {
         const idx = prev.findIndex((s) => s.sessionId === info.sessionId)
         if (idx === -1) return [...prev, info]
@@ -146,10 +171,11 @@ export function useAppData(showToast: (text: string, type?: 'info' | 'error') =>
       }
     })
     const unsubTermData = api.onEvent<{ sessionId: string; data: string }>('terminal:data', (p) => {
-      if (!p?.sessionId || !p.data || closedSessionIdsRef.current.has(p.sessionId)) return
+      if (lockedRef.current || !p?.sessionId || !p.data || closedSessionIdsRef.current.has(p.sessionId)) return
       pushTerminalData(p.sessionId, p.data)
     })
     const unsubCmd = api.onEvent<CommandRecord>('command:recorded', (rec) => {
+      if (lockedRef.current) return
       setHistory((prev) => [rec, ...prev].slice(0, 500))
     })
     return () => { unsubStatus(); unsubTermData(); unsubCmd() }
