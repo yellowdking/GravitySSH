@@ -63,7 +63,7 @@ export const KeyFormDrawer: React.FC<Props> = ({
         </div>
         <div>
           <div className="flex items-center justify-between mb-1">
-            <label className="text-xs text-ag-muted">私钥内容 (OpenSSH / PEM / RSA / Ed25519) *</label>
+            <label className="text-xs text-ag-muted">私钥内容 *</label>
             <button
               type="button"
               disabled={busy}
@@ -104,10 +104,10 @@ export const KeyFormDrawer: React.FC<Props> = ({
             <input disabled={busy} className="ag-input disabled:opacity-60" placeholder="例如：my-ed25519" value={name} onChange={(e) => onNameChange(e.target.value)} />
           </div>
           <div>
-            <label className="block text-xs text-ag-muted mb-1">加密算法</label>
+            <label className="block text-xs text-ag-muted mb-1">密钥类型</label>
             <select disabled={busy} className="ag-input disabled:opacity-60" value={algorithm} onChange={(e) => onAlgorithmChange(e.target.value as 'ed25519' | 'rsa4096')}>
-              <option value="ed25519">Ed25519（推荐 · 快速安全）</option>
-              <option value="rsa4096">RSA 4096-bit（兼容旧机）</option>
+              <option value="ed25519">Ed25519</option>
+              <option value="rsa4096">RSA-4096</option>
             </select>
           </div>
           <div>
