@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 )
 
 const configDirName = "gsshconfig"
@@ -34,8 +36,20 @@ func DefaultVaultPath() (string, error) {
 }
 
 func resolveDefaultVaultPath(exeDir, userConfigDir string) (string, error) {
+	return resolveDefaultVaultPathForOS(runtime.GOOS, exeDir, userConfigDir)
+}
+
+func isMacAppBundleExeDir(goos, exeDir string) bool {
+	if goos != "darwin" || exeDir == "" {
+		return false
+	}
+	norm := filepath.ToSlash(exeDir)
+	return strings.Contains(norm, ".app/Contents/") || strings.HasSuffix(norm, ".app/Contents")
+}
+
+func resolveDefaultVaultPathForOS(goos, exeDir, userConfigDir string) (string, error) {
 	var legacyCandidates []string
-	if exeDir != "" {
+	if exeDir != "" && !isMacAppBundleExeDir(goos, exeDir) {
 		legacyCandidates = append(legacyCandidates, filepath.Join(exeDir, "config", "vault.gsv"))
 	}
 	if userConfigDir != "" {
@@ -45,7 +59,7 @@ func resolveDefaultVaultPath(exeDir, userConfigDir string) (string, error) {
 		)
 	}
 
-	if exeDir != "" {
+	if exeDir != "" && !isMacAppBundleExeDir(goos, exeDir) {
 		portableDir := filepath.Join(exeDir, configDirName)
 		portablePath := filepath.Join(portableDir, "vault.gsv")
 		if err := ensureDirWritable(portableDir); err == nil {

@@ -169,9 +169,15 @@ func (s *Store) DeleteSSHKey(id string) error {
 			for j := range s.data.Servers {
 				if s.data.Servers[j].SSHKeyID == id {
 					s.data.Servers[j].SSHKeyID = ""
+					if s.data.Servers[j].AuthType == models.AuthBoth && s.data.Servers[j].Password != "" {
+						s.data.Servers[j].AuthType = models.AuthPassword
+					}
 				}
 				if s.data.Servers[j].JumpHost.SSHKeyID == id {
 					s.data.Servers[j].JumpHost.SSHKeyID = ""
+					if s.data.Servers[j].JumpHost.AuthType == models.AuthBoth && s.data.Servers[j].JumpHost.Password != "" {
+						s.data.Servers[j].JumpHost.AuthType = models.AuthPassword
+					}
 				}
 			}
 			if err := s.saveLocked(); err != nil {

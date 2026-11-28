@@ -9,7 +9,46 @@ import (
 
 	"github.com/yellowdking/GravitySSH/internal/crypto"
 	"github.com/yellowdking/GravitySSH/internal/models"
+	"github.com/yellowdking/synctool/sdk/go/envelope"
 )
+
+func clearVaultDataSecrets(d *models.VaultData) {
+	if d == nil {
+		return
+	}
+	clear(d.Servers)
+	clear(d.SSHKeys)
+	clear(d.Shortcuts)
+	clear(d.Templates)
+	clear(d.History)
+	d.Servers = []models.ServerConfig{}
+	d.SSHKeys = []models.SSHKeyRecord{}
+	d.Shortcuts = []models.CommandShortcut{}
+	d.Templates = []models.BuiltinTemplate{}
+	d.History = []models.CommandRecord{}
+
+	d.Sync.MasterSeedB64U = ""
+	d.Sync.LocalLabel = ""
+	d.Sync.ReplayWatermarkTS = 0
+	if d.Sync.CustomRelay != nil {
+		d.Sync.CustomRelay.AccessKey = ""
+		clear(d.Sync.CustomRelay.SPKIPins)
+		*d.Sync.CustomRelay = envelope.RelayProfile{}
+		d.Sync.CustomRelay = nil
+	}
+	for k, dev := range d.Sync.Devices {
+		dev.OutboundDepositToken = ""
+		dev.InboundTokenHash = ""
+		dev.InboundTokenID = ""
+		d.Sync.Devices[k] = dev
+	}
+	clear(d.Sync.Devices)
+	d.Sync.Devices = map[string]envelope.DeviceCard{}
+	clear(d.Sync.PendingTokenDeletes)
+	d.Sync.PendingTokenDeletes = nil
+	clear(d.Sync.SeenMsgs)
+	d.Sync.SeenMsgs = map[string]envelope.SeenMsgEntry{}
+}
 
 func (s *Store) LockState() models.VaultLockState {
 	s.mu.RLock()
@@ -61,6 +100,9 @@ func (s *Store) Lock() error {
 	s.pwSalt = nil
 	clearVaultDataSecrets(&s.data)
 	s.locked = true
+	if s.syncKS != nil {
+		s.syncKS.ClearRAMCaches()
+	}
 	return nil
 }
 

@@ -6,16 +6,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/yellowdking/GravitySSH/internal/crypto"
 	"github.com/yellowdking/GravitySSH/internal/models"
+	"github.com/yellowdking/synctool/sdk/go/envelope"
 )
 
 const (
-	vaultSchemaVersion      = 5
+	vaultSchemaVersion      = 6
 	defaultRecordFlushDelay = 1500 * time.Millisecond
 	maxFlushRetryDelay      = 60 * time.Second
 )
@@ -40,6 +42,7 @@ type Store struct {
 	flushDelay    time.Duration
 	maxRetryDelay time.Duration
 	flushFailures int
+	syncKS        *VaultSyncKeyStore
 }
 
 func vaultBackupPath(targetPath string) string {
@@ -70,8 +73,13 @@ func Open(filePath string, protector crypto.KeyProtector) (*Store, error) {
 			Templates: []models.BuiltinTemplate{},
 			History:   []models.CommandRecord{},
 			Settings:  models.DefaultSettings(),
+			Sync: models.VaultSyncState{
+				Devices:  map[string]envelope.DeviceCard{},
+				SeenMsgs: map[string]envelope.SeenMsgEntry{},
+			},
 		},
 	}
+	s.syncKS = newVaultSyncKeyStore(s)
 
 	bakPath := vaultBackupPath(filePath)
 	raw, err := os.ReadFile(filePath)
@@ -197,6 +205,17 @@ func normalizeVault(v *models.VaultData) {
 	if v.Settings.MaxHistoryEntries <= 0 {
 		v.Settings.MaxHistoryEntries = d.MaxHistoryEntries
 	}
+	normalizeSyncState(&v.Sync)
+	// Migrate legacy Settings.SyncRelayURL -> VaultData.Sync.CustomRelay (if valid synctool://relay URI)
+	// and unconditionally clear Settings.SyncRelayURL so bare v1.4.3 URLs fall back to default relay.
+	if v.Settings.SyncRelayURL != "" {
+		if prof, err := envelope.ParseRelayURI(strings.TrimSpace(v.Settings.SyncRelayURL)); err == nil && prof != nil {
+			if v.Sync.CustomRelay == nil {
+				v.Sync.CustomRelay = prof
+			}
+		}
+		v.Settings.SyncRelayURL = ""
+	}
 }
 
 func cloneServers(src []models.ServerConfig) []models.ServerConfig {
@@ -250,22 +269,6 @@ func cloneHistory(src []models.CommandRecord) []models.CommandRecord {
 	return out
 }
 
-func clearVaultDataSecrets(d *models.VaultData) {
-	if d == nil {
-		return
-	}
-	clear(d.Servers)
-	clear(d.SSHKeys)
-	clear(d.Shortcuts)
-	clear(d.Templates)
-	clear(d.History)
-	d.Servers = []models.ServerConfig{}
-	d.SSHKeys = []models.SSHKeyRecord{}
-	d.Shortcuts = []models.CommandShortcut{}
-	d.Templates = []models.BuiltinTemplate{}
-	d.History = []models.CommandRecord{}
-}
-
 func cloneVaultData(d models.VaultData) models.VaultData {
 	out := d
 	out.Servers = cloneServers(d.Servers)
@@ -273,6 +276,7 @@ func cloneVaultData(d models.VaultData) models.VaultData {
 	out.Shortcuts = cloneShortcuts(d.Shortcuts)
 	out.Templates = cloneTemplates(d.Templates)
 	out.History = cloneHistory(d.History)
+	out.Sync = cloneVaultSyncState(d.Sync)
 	return out
 }
 
@@ -532,6 +536,9 @@ func (s *Store) Close() error {
 	s.pwKey = nil
 	s.pwSalt = nil
 	clearVaultDataSecrets(&s.data)
+	if s.syncKS != nil {
+		s.syncKS.ClearRAMCaches()
+	}
 	return err
 }
 
