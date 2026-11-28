@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Eye, EyeOff, Loader2, ShieldAlert, ShieldCheck, XCircle } from 'lucide-react'
+import { ArrowDownToLine, Eye, EyeOff, Loader2, ShieldAlert, XCircle } from 'lucide-react'
 import type { SyncImportSummary } from '../syncTypes'
 import { useSyncFlow } from '../hooks/useSyncFlow'
 import { errMsg } from '../utils/errors'
@@ -42,7 +42,7 @@ export const SyncReceiveTab: React.FC<Props> = ({ onBusyChange, onSynced, onToas
 
   const handleStartReceive = async () => {
     if (!isReadySyncCodeOrUri(inputCodeOrUri)) {
-      onToast('请粘贴完整的 synctool://pair 链接或输入 8 位房间码', 'error')
+      onToast('请粘贴配对链接或输入 8 位房间码', 'error')
       return
     }
     setSummary(null)
@@ -67,7 +67,7 @@ export const SyncReceiveTab: React.FC<Props> = ({ onBusyChange, onSynced, onToas
       onSynced()
       setSummary(res)
       flow.resetFlow(false)
-      onToast(importMode === 'merge' ? '已安全合并同步配置到本地保险库' : '已使用同步配置覆盖本地数据')
+      onToast(importMode === 'merge' ? '已合并同步配置' : '已覆盖本地配置')
     } catch (err) {
       onToast(errMsg(err), 'error')
     } finally {
@@ -79,7 +79,7 @@ export const SyncReceiveTab: React.FC<Props> = ({ onBusyChange, onSynced, onToas
     return (
       <SyncSummaryCard
         summary={summary}
-        continueLabel="继续接收其他配置"
+        continueLabel="继续接收"
         onContinue={() => setSummary(null)}
       />
     )
@@ -102,14 +102,9 @@ export const SyncReceiveTab: React.FC<Props> = ({ onBusyChange, onSynced, onToas
     return (
       <div className="space-y-4">
         {st === 'waiting_peer' && (
-          <div className="rounded-xl bg-[#0d111a] border border-indigo-500/35 p-5 space-y-2.5 text-center">
-            <div className="flex items-center justify-center gap-2 text-xs font-medium text-indigo-300">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              <span>已进入同步房间，正在与发送端进行 X25519 加密握手...</span>
-            </div>
-            <p className="text-[11px] text-ag-muted">
-              若使用 8 位房间码模式，握手完成后将弹出 6 位安全码供双方当面核对。
-            </p>
+          <div className="rounded-xl bg-[#0d111a] border border-indigo-500/35 p-5 flex items-center justify-center gap-2 text-xs font-medium text-indigo-300">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            <span>正在连接发送端...</span>
           </div>
         )}
 
@@ -117,7 +112,7 @@ export const SyncReceiveTab: React.FC<Props> = ({ onBusyChange, onSynced, onToas
           <SyncSasPrompt
             variant="confirm"
             sasCode={flow.status?.sas}
-            approveLabel="一致，允许接收"
+            approveLabel="一致，确认接收"
             busy={flow.confirmingSas}
             onConfirm={(approved) => void flow.confirmSas(approved)}
           />
@@ -127,7 +122,7 @@ export const SyncReceiveTab: React.FC<Props> = ({ onBusyChange, onSynced, onToas
           <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/30 p-4 flex items-center justify-between gap-2 text-xs text-emerald-200">
             <span className="flex items-center gap-2">
               <Loader2 className="w-4 h-4 animate-spin shrink-0 text-emerald-300" />
-              安全核验已通过，正在拉取并解密校验配置包...
+              正在接收...
             </span>
             {(flow.status?.bytesTotal ?? 0) > 0 && (
               <span className="font-mono">
@@ -141,14 +136,14 @@ export const SyncReceiveTab: React.FC<Props> = ({ onBusyChange, onSynced, onToas
           <div className="rounded-xl bg-rose-500/10 border border-rose-500/35 p-4 space-y-3">
             <div className="flex items-center gap-2 text-xs text-rose-200">
               <ShieldAlert className="w-4 h-4 shrink-0 text-rose-300" />
-              <span>{flow.status?.message || flow.error || '接收已取消或校验未通过'}</span>
+              <span>{flow.status?.message || flow.error || '接收已取消或失败'}</span>
             </div>
             <button
               type="button"
               onClick={() => flow.resetFlow(false)}
               className="w-full py-2 rounded-lg bg-ag-elevated hover:bg-ag-hover border border-ag-border text-xs text-ag-text"
             >
-              返回重新输入
+              返回
             </button>
           </div>
         )}
@@ -179,7 +174,7 @@ export const SyncReceiveTab: React.FC<Props> = ({ onBusyChange, onSynced, onToas
 
       <div className="space-y-2">
         <label className="text-xs font-medium text-ag-text block">
-          粘贴配对链接（<span className="font-mono text-indigo-300">synctool://pair?...</span>）或输入 8 位房间码
+          配对链接或 8 位房间码
         </label>
         <div className="relative">
           <input
@@ -213,9 +208,6 @@ export const SyncReceiveTab: React.FC<Props> = ({ onBusyChange, onSynced, onToas
             </button>
           )}
         </div>
-        <p className="text-[11px] text-ag-muted leading-relaxed">
-          支持接收一次性速传链接（若链接携带自定义中继将自动识别连接）、8 位房间码（需双向核对 6 位安全码），或已配对设备的实时直传码。
-        </p>
       </div>
 
       <button
@@ -224,8 +216,8 @@ export const SyncReceiveTab: React.FC<Props> = ({ onBusyChange, onSynced, onToas
         disabled={flow.starting || !isReadySyncCodeOrUri(inputCodeOrUri)}
         className="w-full py-3 rounded-xl bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 text-white text-sm font-medium transition shadow-glow flex items-center justify-center gap-2"
       >
-        {flow.starting ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
-        {flow.starting ? '正在连接加密房间...' : '连接房间并解密预览'}
+        {flow.starting ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowDownToLine className="w-4 h-4" />}
+        {flow.starting ? '连接中...' : '接收配置'}
       </button>
     </div>
   )

@@ -37,13 +37,10 @@ export const SyncPreviewCard: React.FC<Props> = ({ preview, mode, applying, onMo
                 来自 {preview.sourceDevice || `${platformLabel} 设备`}
               </div>
               <div className="text-[11px] text-ag-muted">
-                {platformLabel} · 导出于 {exportedAtText}
+                {platformLabel} · {exportedAtText}
               </div>
             </div>
           </div>
-          <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-            已端到端解密校验
-          </span>
         </div>
 
         <div className="grid grid-cols-4 gap-2 text-center">
@@ -65,10 +62,10 @@ export const SyncPreviewCard: React.FC<Props> = ({ preview, mode, applying, onMo
         >
           <div className="flex items-center gap-1.5 text-xs font-semibold text-ag-text">
             <GitMerge className="w-3.5 h-3.5 text-indigo-300" />
-            <span>安全合并（推荐）</span>
+            <span>安全合并</span>
           </div>
           <p className="text-[11px] text-ag-muted mt-1 leading-relaxed">
-            按 ID / 地址 / 指纹智能去重更新，保留本机独有服务器与密钥。
+            保留本机现有配置，合并新增与更新项
           </p>
         </button>
 
@@ -83,7 +80,7 @@ export const SyncPreviewCard: React.FC<Props> = ({ preview, mode, applying, onMo
             <span>覆盖本地</span>
           </div>
           <p className="text-[11px] text-ag-muted mt-1 leading-relaxed">
-            替换为同步包内容，自动保留本地应用设置、保险库密码与已配对设备。
+            替换为同步内容（保留本机设置与配对设备）
           </p>
         </button>
       </div>
@@ -97,7 +94,7 @@ export const SyncPreviewCard: React.FC<Props> = ({ preview, mode, applying, onMo
           className={`px-4 py-2 rounded-lg text-xs font-medium text-white transition flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed ${mode === 'overwrite' ? 'bg-rose-600 hover:bg-rose-500' : 'bg-indigo-500 hover:bg-indigo-400 shadow-glow'}`}
         >
           {applying ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCcw className="w-3.5 h-3.5" />}
-          {applying ? '正在写入...' : mode === 'merge' ? '确认安全合并' : '确认覆盖本地'}
+          {applying ? '导入中...' : mode === 'merge' ? '确认合并' : '确认覆盖'}
         </button>
       </div>
     </div>
