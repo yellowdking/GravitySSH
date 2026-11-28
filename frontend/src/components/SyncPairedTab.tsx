@@ -60,11 +60,10 @@ export const SyncPairedTab: React.FC<Props> = ({
 
   const { copied, copy } = useCopyFeedback()
 
-  // Live pipe fallback flow when user clicks [改用实时直传]
   const pipeFlow = useSyncFlow({
     onToast,
     onCompleted: () => {
-      onToast('✓ 实时直传完成，对方已成功接收配置')
+      onToast('直传完成')
     },
   })
   const pipeUri = pipeFlow.status?.pairUri || pipeFlow.session?.pairUri || ''
@@ -80,11 +79,7 @@ export const SyncPairedTab: React.FC<Props> = ({
       setInboxSummary(res)
       onSynced()
       await onRefreshInbox()
-      onToast(
-        inboxMode === 'merge'
-          ? '已解密合并配置并向中继发送签名销毁回执'
-          : '已覆盖导入配置并向中继发送签名销毁回执'
-      )
+      onToast(inboxMode === 'merge' ? '已合并同步配置' : '已覆盖本地配置')
     } catch (err) {
       onToast(errMsg(err), 'error')
     } finally {
@@ -99,7 +94,7 @@ export const SyncPairedTab: React.FC<Props> = ({
       await api.dismissInboxItem(itemId)
       if (selectedInboxId === itemId) setSelectedInboxId(null)
       await onRefreshInbox()
-      onToast('已销毁该离线同步包')
+      onToast('已删除该同步项')
     } catch (err) {
       onToast(errMsg(err), 'error')
     } finally {
@@ -120,13 +115,13 @@ export const SyncPairedTab: React.FC<Props> = ({
         })
         setSentSpoolByDevice((prev) => ({
           ...prev,
-          [deviceId]: res.message || '已投递至对方离线收件箱（0-RTT 端到端加密）',
+          [deviceId]: res.message || '已发送至对方离线收件箱',
         }))
-        onToast(res.message || '✓ 已一键加密推送至对方收件箱')
+        onToast(res.message || '已推送至对方收件箱')
       } else if (res.status === 'suggest_pipe') {
         setSuggestPipeByDevice((prev) => ({
           ...prev,
-          [deviceId]: res.message || '当前中继未开启离线暂存或配额已满，可改用在线实时直传',
+          [deviceId]: res.message || '当前中继未开启离线收件箱或配额已满，可改用实时直传',
         }))
       } else if (res.status === 'pipe_offer_ready' && res.sessionId) {
         setSuggestPipeByDevice((prev) => {
@@ -144,7 +139,7 @@ export const SyncPairedTab: React.FC<Props> = ({
           roomCode: res.roomCode,
           expiresAt: res.expiresAt,
         })
-        onToast('实时直传房间已就绪，请在目标设备上扫码或输入房间码接收')
+        onToast('直传已就绪，请在对端扫码或输入房间码')
       }
     } catch (err) {
       onToast(errMsg(err), 'error')
@@ -160,7 +155,7 @@ export const SyncPairedTab: React.FC<Props> = ({
       await api.revokeSyncDevice(dev.deviceId)
       setConfirmRevokeId(null)
       await onRefreshAll()
-      onToast(`已吊销设备「${dev.label || dev.deviceId.slice(0, 8)}」的投递权限`)
+      onToast(`已移除设备「${dev.label || dev.deviceId.slice(0, 8)}」`)
     } catch (err) {
       onToast(errMsg(err), 'error')
     } finally {
@@ -173,18 +168,17 @@ export const SyncPairedTab: React.FC<Props> = ({
       {inboxSummary && (
         <SyncSummaryCard
           summary={inboxSummary}
-          continueLabel="返回已配对设备列表"
+          continueLabel="返回"
           onContinue={() => setInboxSummary(null)}
         />
       )}
 
-      {/* Two-Phase Inbox Banner */}
       {inboxItems.length > 0 && (
         <div className="rounded-xl bg-indigo-950/30 border border-indigo-500/40 p-3.5 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-xs font-semibold text-indigo-200">
               <Inbox className="w-4 h-4 text-indigo-300" />
-              <span>待处理加密收件箱（{inboxItems.length}）</span>
+              <span>收件箱（{inboxItems.length}）</span>
             </div>
             <button
               type="button"
@@ -219,7 +213,7 @@ export const SyncPairedTab: React.FC<Props> = ({
                           来自 {item.senderLabel || item.senderDeviceId.slice(0, 8)}（{formatPlatformLabel(item.senderPlatform)}）
                         </div>
                         <div className="text-[10px] text-ag-muted">
-                          {formatSyncTimestamp(item.createdAt)} · 密文体积 {formatBytes(item.totalBytes)}
+                          {formatSyncTimestamp(item.createdAt)} · {formatBytes(item.totalBytes)}
                         </div>
                       </div>
                     </div>
@@ -237,7 +231,7 @@ export const SyncPairedTab: React.FC<Props> = ({
                             className="px-2.5 py-1.5 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-medium flex items-center gap-1 transition disabled:opacity-50"
                           >
                             <Download className="w-3.5 h-3.5" />
-                            导入配置
+                            导入
                           </button>
                         )}
                         <button
@@ -247,13 +241,12 @@ export const SyncPairedTab: React.FC<Props> = ({
                           className="px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-200 text-xs flex items-center gap-1 transition disabled:opacity-50"
                         >
                           {isDismissing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-                          销毁
+                          删除
                         </button>
                       </div>
                     )}
                   </div>
 
-                  {/* Manifest counts rendered immediately before downloading part_id=1 blob */}
                   <div className="grid grid-cols-4 gap-1.5 text-center">
                     {[
                       ['主机', item.serverCount],
@@ -271,7 +264,7 @@ export const SyncPairedTab: React.FC<Props> = ({
                   {(item.pairingBroken || item.errorMessage) && (
                     <div className="rounded-lg bg-amber-500/10 border border-amber-500/35 px-2.5 py-1.5 flex items-center gap-2 text-[11px] text-amber-200">
                       <ShieldAlert className="w-3.5 h-3.5 shrink-0 text-amber-400" />
-                      <span>{item.errorMessage || '发送方签名校验异常或配对已失效，请销毁后重新绑定设备'}</span>
+                      <span>{item.errorMessage || '配对已失效，请重新绑定设备'}</span>
                     </div>
                   )}
 
@@ -290,9 +283,9 @@ export const SyncPairedTab: React.FC<Props> = ({
                         >
                           <div className="flex items-center gap-1 text-xs font-semibold text-ag-text">
                             <GitMerge className="w-3.5 h-3.5 text-indigo-300" />
-                            安全合并（推荐）
+                            安全合并
                           </div>
-                          <p className="text-[10px] text-ag-muted mt-0.5">保留本机独有服务器与密钥</p>
+                          <p className="text-[10px] text-ag-muted mt-0.5">保留本机现有配置</p>
                         </button>
                         <button
                           type="button"
@@ -308,7 +301,7 @@ export const SyncPairedTab: React.FC<Props> = ({
                             <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
                             覆盖本地
                           </div>
-                          <p className="text-[10px] text-ag-muted mt-0.5">替换为同步包，保留已配对设备</p>
+                          <p className="text-[10px] text-ag-muted mt-0.5">替换为同步内容</p>
                         </button>
                       </div>
                       <div className="flex items-center justify-end gap-2">
@@ -329,7 +322,7 @@ export const SyncPairedTab: React.FC<Props> = ({
                           }`}
                         >
                           {isApplying ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
-                          {isApplying ? '正在拉取解密并导入...' : inboxMode === 'merge' ? '确认合并并焚毁' : '确认覆盖并焚毁'}
+                          {isApplying ? '导入中...' : inboxMode === 'merge' ? '确认合并' : '确认覆盖'}
                         </button>
                       </div>
                     </div>
@@ -341,32 +334,31 @@ export const SyncPairedTab: React.FC<Props> = ({
         </div>
       )}
 
-      {/* Active Direct Pipe Offer Card (when fallback pipe mode is triggered) */}
       {pipeFlow.session && (
         <div className="rounded-xl bg-[#0d111a] border border-cyan-500/40 p-4 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-xs font-semibold text-cyan-200">
               <Zap className="w-4 h-4 text-cyan-300" />
-              <span>已配对设备实时直传通道</span>
+              <span>实时直传</span>
             </div>
             <button
               type="button"
               onClick={() => (pipeFlow.isActive ? void pipeFlow.cancelFlow() : pipeFlow.resetFlow())}
               className="text-[11px] text-ag-muted hover:text-ag-text"
             >
-              {pipeFlow.isActive ? '取消直传' : '关闭'}
+              {pipeFlow.isActive ? '取消' : '关闭'}
             </button>
           </div>
           {pipeFlow.status?.state === 'completed' ? (
             <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-3 py-2.5 text-xs text-emerald-200 flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-              <span>✓ 实时加密直传已完成，中继房间已销毁</span>
+              <span>直传已完成</span>
             </div>
           ) : (
             <div className="flex flex-col sm:flex-row items-center gap-4">
               {pipeUri && <QrCodeSvg value={pipeUri} size={160} />}
               <div className="flex-1 space-y-2 text-center sm:text-left">
-                <div className="text-[11px] text-ag-muted">请在目标设备的「一次性接收」中扫码或输入房间码：</div>
+                <div className="text-[11px] text-ag-muted">请在目标设备「接收」页扫码或输入房间码：</div>
                 {pipeRoom && (
                   <div className="flex items-center justify-center sm:justify-start gap-2">
                     <span className="font-mono text-xl font-bold tracking-[0.18em] text-cyan-200 bg-ag-elevated px-3 py-1.5 rounded-lg border border-cyan-500/35 select-all">
@@ -374,7 +366,7 @@ export const SyncPairedTab: React.FC<Props> = ({
                     </span>
                     <button
                       type="button"
-                      onClick={() => void copy(formatRoomCodeDisplay(pipeRoom)).then((ok) => ok && onToast('直传房间码已复制'))}
+                      onClick={() => void copy(formatRoomCodeDisplay(pipeRoom)).then((ok) => ok && onToast('房间码已复制'))}
                       className="p-2 rounded-lg bg-ag-elevated hover:bg-ag-hover border border-ag-border text-ag-text"
                     >
                       {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
@@ -383,7 +375,7 @@ export const SyncPairedTab: React.FC<Props> = ({
                 )}
                 <div className="inline-flex items-center gap-1.5 text-[11px] text-cyan-300">
                   <Clock className="w-3.5 h-3.5" />
-                  <span>{pipeLeft > 0 ? `有效倒计时 ${fmtSec(pipeLeft)}` : '正在传输或等待确认...'}</span>
+                  <span>{pipeLeft > 0 ? `剩余 ${fmtSec(pipeLeft)}` : '等待确认...'}</span>
                 </div>
               </div>
             </div>
@@ -391,11 +383,10 @@ export const SyncPairedTab: React.FC<Props> = ({
         </div>
       )}
 
-      {/* Paired Devices Section */}
       <div className="space-y-2.5">
         <div className="flex items-center justify-between gap-2">
           <div className="text-xs font-semibold text-ag-text">
-            已配对信任设备（{pairedDevices.length}）
+            已配对设备（{pairedDevices.length}）
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -405,7 +396,7 @@ export const SyncPairedTab: React.FC<Props> = ({
               className="px-2.5 py-1 rounded-lg bg-ag-elevated hover:bg-ag-hover border border-ag-border text-[11px] text-ag-muted hover:text-ag-text flex items-center gap-1 transition"
             >
               <RefreshCw className={`w-3 h-3 ${loadingInbox ? 'animate-spin' : ''}`} />
-              检查收件箱
+              刷新收件箱
             </button>
             {!showBindPanel && (
               <button
@@ -434,16 +425,14 @@ export const SyncPairedTab: React.FC<Props> = ({
 
         {pairedDevices.length === 0 && !showBindPanel ? (
           <div className="rounded-xl bg-[#0d111a] border border-ag-border p-5 text-center space-y-3">
-            <p className="text-xs text-ag-muted leading-relaxed">
-              尚未绑定个人设备。绑定手机或另一台电脑后，无需每次扫码或对码，即可享受 <strong>Ed25519 签名认证一键推送</strong>与<strong>离线收件箱同步</strong>。
-            </p>
+            <p className="text-xs text-ag-muted">暂无已配对设备</p>
             <button
               type="button"
               onClick={() => setShowBindPanel(true)}
               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-medium shadow-glow transition"
             >
               <Plus className="w-4 h-4" />
-              + 绑定新设备
+              绑定新设备
             </button>
           </div>
         ) : (
@@ -475,7 +464,7 @@ export const SyncPairedTab: React.FC<Props> = ({
                           </span>
                         </div>
                         <div className="text-[11px] text-ag-muted">
-                          {formatPlatformLabel(dev.platform)} · 绑定于 {formatSyncTimestamp(dev.pairedAt || dev.issuedAt)}
+                          {formatPlatformLabel(dev.platform)} · {formatSyncTimestamp(dev.pairedAt || dev.issuedAt)}
                         </div>
                       </div>
                     </div>
@@ -488,7 +477,7 @@ export const SyncPairedTab: React.FC<Props> = ({
                         className="px-3 py-1.5 rounded-lg bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-medium flex items-center gap-1.5 transition disabled:opacity-50"
                       >
                         {isPushing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
-                        一键推送
+                        推送
                       </button>
 
                       {confirmRevokeId === dev.deviceId ? (
@@ -500,7 +489,7 @@ export const SyncPairedTab: React.FC<Props> = ({
                             className="px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-medium flex items-center gap-1 disabled:opacity-50"
                           >
                             {isRevoking && <Loader2 className="w-3 h-3 animate-spin" />}
-                            确认吊销
+                            确认解绑
                           </button>
                           <button
                             type="button"
@@ -519,7 +508,7 @@ export const SyncPairedTab: React.FC<Props> = ({
                           className="px-2.5 py-1.5 rounded-lg bg-rose-500/[0.12] hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-1 transition disabled:opacity-50"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
-                          吊销
+                          解除绑定
                         </button>
                       )}
                     </div>
