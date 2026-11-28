@@ -190,3 +190,35 @@ func TestCheckReleaseRedirectAndEmptyFieldGuards(t *testing.T) {
 		}
 	}
 }
+
+func TestSelectReleaseAssetURLByOSAndArch(t *testing.T) {
+	fallback := "https://github.com/yellowdking/GravitySSH/releases/tag/v1.5.0"
+	assets := []ghAsset{
+		{Name: "GravitySSH-v1.5.0-windows-amd64.exe", BrowserDownloadURL: "https://github.com/yellowdking/GravitySSH/releases/download/v1.5.0/GravitySSH-v1.5.0-windows-amd64.exe"},
+		{Name: "GravitySSH-v1.5.0-windows-arm64.exe", BrowserDownloadURL: "https://github.com/yellowdking/GravitySSH/releases/download/v1.5.0/GravitySSH-v1.5.0-windows-arm64.exe"},
+		{Name: "GravitySSH-v1.5.0-darwin-arm64.dmg", BrowserDownloadURL: "https://github.com/yellowdking/GravitySSH/releases/download/v1.5.0/GravitySSH-v1.5.0-darwin-arm64.dmg"},
+		{Name: "GravitySSH-v1.5.0-darwin-amd64.dmg", BrowserDownloadURL: "https://github.com/yellowdking/GravitySSH/releases/download/v1.5.0/GravitySSH-v1.5.0-darwin-amd64.dmg"},
+		{Name: "GravitySSH-v1.5.0-linux-amd64.AppImage", BrowserDownloadURL: "https://github.com/yellowdking/GravitySSH/releases/download/v1.5.0/GravitySSH-v1.5.0-linux-amd64.AppImage"},
+	}
+
+	if got := selectReleaseAssetURL("windows", "amd64", assets, fallback); got != assets[0].BrowserDownloadURL {
+		t.Fatalf("windows/amd64 got %q", got)
+	}
+	if got := selectReleaseAssetURL("windows", "arm64", assets, fallback); got != assets[1].BrowserDownloadURL {
+		t.Fatalf("windows/arm64 got %q", got)
+	}
+	if got := selectReleaseAssetURL("darwin", "arm64", assets, fallback); got != assets[2].BrowserDownloadURL {
+		t.Fatalf("darwin/arm64 got %q", got)
+	}
+	if got := selectReleaseAssetURL("darwin", "amd64", assets, fallback); got != assets[3].BrowserDownloadURL {
+		t.Fatalf("darwin/amd64 got %q", got)
+	}
+	if got := selectReleaseAssetURL("linux", "amd64", assets, fallback); got != assets[4].BrowserDownloadURL {
+		t.Fatalf("linux/amd64 got %q", got)
+	}
+	// macOS with Windows-only release assets must fall back to HTML release URL, NEVER .exe!
+	winOnly := assets[:2]
+	if got := selectReleaseAssetURL("darwin", "arm64", winOnly, fallback); got != fallback {
+		t.Fatalf("expected darwin with win-only assets to use fallback %q, got %q", fallback, got)
+	}
+}

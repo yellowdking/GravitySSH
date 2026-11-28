@@ -268,7 +268,7 @@ func (s *Store) SaveSettings(settings models.AppSettings) (models.AppSettings, e
 	if settings.MaxHistoryEntries < 100 {
 		settings.MaxHistoryEntries = 100
 	}
-	settings.SyncRelayURL = strings.TrimSpace(settings.SyncRelayURL)
+	settings.SyncRelayURL = ""
 
 	prev := s.data.Settings
 	s.data.Settings = settings

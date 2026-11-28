@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -43,15 +44,17 @@ var releaseHTTPClient = &http.Client{
 	CheckRedirect: checkReleaseRedirect,
 }
 
+type ghAsset struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+}
+
 type ghRelease struct {
-	TagName     string `json:"tag_name"`
-	HTMLURL     string `json:"html_url"`
-	Body        string `json:"body"`
-	PublishedAt string `json:"published_at"`
-	Assets      []struct {
-		Name               string `json:"name"`
-		BrowserDownloadURL string `json:"browser_download_url"`
-	} `json:"assets"`
+	TagName     string    `json:"tag_name"`
+	HTMLURL     string    `json:"html_url"`
+	Body        string    `json:"body"`
+	PublishedAt string    `json:"published_at"`
+	Assets      []ghAsset `json:"assets"`
 }
 
 // CheckLatestRelease queries GitHub Releases API to see if a newer GravitySSH version exists.
@@ -132,13 +135,7 @@ func checkReleaseAtURL(ctx context.Context, apiURL, currentVersion string) (mode
 		return models.UpdateCheckResult{}, errors.New("更新接口返回了无效的版本号")
 	}
 
-	downloadURL := releaseURL
-	for _, asset := range rel.Assets {
-		if strings.HasSuffix(strings.ToLower(asset.Name), ".exe") && isTrustedGitHubURL(asset.BrowserDownloadURL) {
-			downloadURL = strings.TrimSpace(asset.BrowserDownloadURL)
-			break
-		}
-	}
+	downloadURL := selectReleaseAssetURL(runtime.GOOS, runtime.GOARCH, rel.Assets, releaseURL)
 
 	return models.UpdateCheckResult{
 		CurrentVersion: cur,
@@ -254,4 +251,66 @@ func parseSemver(v string) (semver, bool) {
 		out.pre = preParts
 	}
 	return out, true
+}
+
+func archMatchesAsset(goarch, lowerName string) bool {
+	switch goarch {
+	case "arm64":
+		return strings.Contains(lowerName, "arm64") || strings.Contains(lowerName, "aarch64") || strings.Contains(lowerName, "universal")
+	case "amd64":
+		return strings.Contains(lowerName, "amd64") || strings.Contains(lowerName, "x86_64") || strings.Contains(lowerName, "x64") || strings.Contains(lowerName, "universal")
+	default:
+		return strings.Contains(lowerName, goarch)
+	}
+}
+
+func selectReleaseAssetURL(goos, goarch string, assets []ghAsset, fallbackURL string) string {
+	var osFallback string
+	for _, asset := range assets {
+		dl := strings.TrimSpace(asset.BrowserDownloadURL)
+		if !isTrustedGitHubURL(dl) {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSpace(asset.Name))
+		switch goos {
+		case "windows":
+			if !strings.HasSuffix(name, ".exe") {
+				continue
+			}
+			if archMatchesAsset(goarch, name) {
+				return dl
+			}
+			if osFallback == "" {
+				osFallback = dl
+			}
+		case "darwin":
+			isMacAsset := strings.HasSuffix(name, ".dmg") || strings.HasSuffix(name, ".pkg") ||
+				((strings.Contains(name, "darwin") || strings.Contains(name, "macos")) && (strings.HasSuffix(name, ".zip") || strings.HasSuffix(name, ".tar.gz")))
+			if !isMacAsset {
+				continue
+			}
+			if archMatchesAsset(goarch, name) {
+				return dl
+			}
+			if osFallback == "" {
+				osFallback = dl
+			}
+		case "linux":
+			isLinuxAsset := strings.HasSuffix(name, ".appimage") || strings.HasSuffix(name, ".deb") || strings.HasSuffix(name, ".rpm") ||
+				(strings.Contains(name, "linux") && (strings.HasSuffix(name, ".tar.gz") || strings.HasSuffix(name, ".tgz") || strings.HasSuffix(name, ".zip")))
+			if !isLinuxAsset {
+				continue
+			}
+			if archMatchesAsset(goarch, name) {
+				return dl
+			}
+			if osFallback == "" {
+				osFallback = dl
+			}
+		}
+	}
+	if osFallback != "" {
+		return osFallback
+	}
+	return fallbackURL
 }
