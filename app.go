@@ -10,25 +10,16 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"github.com/yellowdking/GravitySSH/internal/models"
 	"github.com/yellowdking/GravitySSH/internal/sshclient"
-	"github.com/yellowdking/GravitySSH/internal/syncclient"
+	"github.com/yellowdking/GravitySSH/internal/syncsvc"
 	"github.com/yellowdking/GravitySSH/internal/updater"
 	"github.com/yellowdking/GravitySSH/internal/vault"
 )
 
-const (
-	maxSSHKeyFileSize    = 256 * 1024
-	maxCachedSyncClients = 16
-)
-
-type cachedSyncClient struct {
-	client   *syncclient.Client
-	lastUsed time.Time
-}
+const maxSSHKeyFileSize = 256 * 1024
 
 type wailsEventSink struct {
 	ctx context.Context
@@ -48,18 +39,25 @@ type App struct {
 	initErr         error
 	closing         bool
 	syncCache       *syncPreviewCache
-	syncClientMu    sync.Mutex
-	syncClients     map[string]*cachedSyncClient
+	syncMgr         *syncsvc.Manager
 	shortcutMu      sync.Mutex
 	shortcutRunners map[string]*sessionShortcutRunner
 }
 
 func NewApp() *App {
-	return &App{
+	app := &App{
 		syncCache:       newSyncPreviewCache(),
-		syncClients:     make(map[string]*cachedSyncClient),
 		shortcutRunners: make(map[string]*sessionShortcutRunner),
 	}
+	app.syncMgr = syncsvc.NewManager(
+		func(eventName string, payload any) {
+			if ctx := app.appContext(); ctx != nil {
+				runtime.EventsEmit(ctx, eventName, payload)
+			}
+		},
+		app.buildSyncPreview,
+	)
+	return app
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -91,23 +89,19 @@ func (a *App) shutdown(ctx context.Context) {
 	sshMgr := a.sshMgr
 	store := a.store
 	syncCache := a.syncCache
+	syncMgr := a.syncMgr
 	a.mu.Unlock()
 
 	a.cancelAllShortcutRuns()
+	if syncMgr != nil {
+		syncMgr.CloseAllOnLock()
+	}
 	if sshMgr != nil {
 		sshMgr.CloseAll()
 	}
 	if syncCache != nil {
 		syncCache.close()
 	}
-	a.syncClientMu.Lock()
-	for _, entry := range a.syncClients {
-		if entry != nil && entry.client != nil {
-			entry.client.CloseIdleConnections()
-		}
-	}
-	clear(a.syncClients)
-	a.syncClientMu.Unlock()
 	if store != nil {
 		_ = store.Close()
 	}
@@ -184,18 +178,22 @@ func (a *App) UnlockVault(password string) error {
 	return store.Unlock(password)
 }
 
-// LockVault immediately locks a password-protected vault, clears secrets from memory,
-// and cancels/clears any in-flight sync send/receive sessions and previews.
+// LockVault immediately terminates active shortcut runners, sync flows, and SSH/SFTP sessions,
+// flushes dirty vault state, and zeroes decrypted secrets from memory.
 func (a *App) LockVault() error {
-	store, _, _, err := a.readyDeps()
+	store, sshMgr, _, err := a.readyDeps()
 	if err != nil {
 		return err
 	}
-	if err := store.Lock(); err != nil {
-		return err
+	if !store.LockState().HasPassword {
+		return store.Lock()
 	}
+	a.cancelAllShortcutRuns()
 	a.cancelAllSyncOnLock()
-	return nil
+	if sshMgr != nil {
+		sshMgr.CloseAll()
+	}
+	return store.Lock()
 }
 
 func (a *App) SetVaultPassword(currentPassword, newPassword string) error {
@@ -351,9 +349,6 @@ func (a *App) importSSHKeyFromPath(store *vault.Store, selected, name, passphras
 	return &meta, nil
 }
 
-// ImportSSHKeyFromFile opens a native file dialog, reads & validates the chosen SSH private key
-// entirely inside Go without round-tripping raw PEM bytes through JS, zeroes the raw bytes on exit,
-// and returns the saved SSHKeyMeta (or nil, nil when cancelled).
 func (a *App) ImportSSHKeyFromFile(name, passphrase, comment string) (*models.SSHKeyMeta, error) {
 	store, _, ctx, err := a.unlockedDeps()
 	if err != nil {
