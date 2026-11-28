@@ -198,10 +198,7 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
             <div className="w-9 h-9 rounded-xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-300">
               <KeyRound className="w-5 h-5" />
             </div>
-            <div>
-              <h1 className="text-lg font-semibold text-ag-text">SSH 密钥库</h1>
-              <p className="text-xs text-ag-muted">一键生成、导入密钥并快速部署到目标服务器</p>
-            </div>
+            <h1 className="text-lg font-semibold text-ag-text">SSH 密钥库</h1>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -222,8 +219,7 @@ export const KeyVaultView: React.FC<KeyVaultViewProps> = ({ keys, servers, onRef
         {keys.length === 0 ? (
           <div className="rounded-2xl bg-ag-panel/70 border border-dashed border-ag-border py-14 text-center">
             <KeyRound className="w-8 h-8 text-ag-subtle mx-auto mb-3" />
-            <p className="text-sm text-ag-muted mb-1">还没有保存任何 SSH 密钥</p>
-            <p className="text-xs text-ag-subtle mb-4">点击一键生成 Ed25519 密钥，或从本地文件导入现有私钥</p>
+            <p className="text-sm text-ag-muted mb-4">暂无 SSH 密钥</p>
             <div className="flex items-center justify-center gap-2">
               <button onClick={() => void handleQuickGenerate()} disabled={quickBusy} className="ag-btn-primary text-xs"><Zap className="w-3.5 h-3.5" />一键生成密钥</button>
               <button onClick={() => void handlePickKeyFile()} disabled={busy} className="ag-btn-secondary text-xs"><FolderOpen className="w-3.5 h-3.5 text-sky-400" />从文件加载私钥</button>
