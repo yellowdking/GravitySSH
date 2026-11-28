@@ -1,7 +1,6 @@
 package sshclient
 
 import (
-	"context"
 	"fmt"
 	"path"
 	"strings"
@@ -29,7 +28,9 @@ func (m *Manager) SFTPExtractArchive(sessionID, remotePath string) (string, erro
 		return "", err
 	}
 
-	out, runErr := runSSHExec(context.Background(), client, cmd, 180*time.Second, true)
+	execCtx, cancel := m.sessionExecContext(sessionID, 180*time.Second)
+	defer cancel()
+	out, runErr := runSSHExec(execCtx, client, cmd, 180*time.Second, true)
 	m.invalidateDirTreeCache(sessionID, dir)
 
 	if runErr != nil {
